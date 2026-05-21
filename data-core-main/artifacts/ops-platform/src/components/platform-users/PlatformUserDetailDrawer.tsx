@@ -43,7 +43,7 @@ export function PlatformUserDetailDrawer({
 
   return (
     <div
-      className="fixed inset-y-0 right-0 z-50 w-full max-w-xl bg-background border-l border-border shadow-xl flex flex-col"
+      className="fixed inset-0 sm:inset-y-0 sm:left-auto sm:right-0 z-50 w-full sm:max-w-xl bg-background border-l border-border shadow-xl flex flex-col"
       data-testid="platform-user-detail-drawer"
     >
       <div className="flex items-center justify-between p-4 border-b border-border shrink-0">

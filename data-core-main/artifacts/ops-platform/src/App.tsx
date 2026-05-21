@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, KeyRound, X, Hash, Lock, Eye, EyeOff, ShieldOff } from "lucide-react";
+import { KeyRound, X, Hash, Lock, Eye, EyeOff, ShieldOff } from "lucide-react";
 import { usePermissions } from "@/hooks/use-permissions";
-import { Switch, Route, useLocation, Router as WouterRouter, Redirect } from 'wouter';
+import { Switch, Route, useLocation, Router as WouterRouter, Redirect, Link } from 'wouter';
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -17,7 +17,9 @@ import AppLayout from "@/components/layout/app-layout";
 import { WorkspaceAccessProvider } from "@/lib/workspace-access-context";
 import { WorkspaceReadOnlyBanner } from "@/components/workspace/WorkspaceReadOnlyBanner";
 import SuperAdminLayout from "@/components/layout/super-admin-layout";
-import LandingPage from "@/pages/landing";
+import DccHomePage from "@/pages/dcc-home";
+import { PublicAuthNav } from "@/components/layout/public-auth-nav";
+import { usePublicEnglish } from "@/hooks/use-public-english";
 import DashboardPage from "@/pages/dashboard";
 import HomePage from "@/pages/home";
 import TicketsPage from "@/pages/tickets";
@@ -119,7 +121,7 @@ function LanguageToggle() {
 
 function EmployeeSignInForm() {
   const auth = useAppAuth();
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { data: branding } = usePlatformBranding();
   const [, setLocation] = useLocation();
   const [employeeNumber, setEmployeeNumber] = useState("");
@@ -127,7 +129,6 @@ function EmployeeSignInForm() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const isRtl = i18n.language.startsWith("ar");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,7 +146,8 @@ function EmployeeSignInForm() {
 
   return (
     <div
-      dir={isRtl ? "rtl" : "ltr"}
+      dir="ltr"
+      lang="en"
       className="bg-white dark:bg-zinc-950 rounded-2xl w-[420px] max-w-full overflow-hidden shadow-xl border border-zinc-200 dark:border-zinc-800"
     >
       <div className="px-8 pt-10 pb-7 flex flex-col items-center gap-4 border-b border-zinc-100 dark:border-zinc-800">
@@ -238,12 +240,16 @@ function EmployeeSignInForm() {
         </button>
       </form>
 
-      <div className="px-8 pb-6 text-center">
+      <div className="px-8 pb-6 text-center space-y-2">
         <p className="text-xs text-zinc-400 dark:text-zinc-500">
-          {isRtl
-            ? "للمساعدة في تسجيل الدخول، تواصل مع مسؤول النظام"
-            : "Contact your system administrator if you need login assistance"}
+          Contact your system administrator if you need login assistance.
         </p>
+        <Link
+          href="/dcc-home"
+          className="text-xs font-medium text-primary hover:underline inline-flex items-center gap-1"
+        >
+          ← Back to Data Core Center home
+        </Link>
       </div>
     </div>
   );
@@ -252,18 +258,17 @@ function EmployeeSignInForm() {
 function SignInPage() {
   const auth = useAppAuth();
   const [, setLocation] = useLocation();
+  usePublicEnglish();
 
   useEffect(() => {
     if (auth.isLoaded && auth.isSignedIn) {
       setLocation(auth.user?.role === "super_admin" ? "/super-admin" : "/home");
     }
-  }, [auth.isLoaded, auth.isSignedIn]);
+  }, [auth.isLoaded, auth.isSignedIn, auth.user?.role, setLocation]);
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-zinc-50 dark:bg-zinc-900">
-      <div className="flex items-center justify-end px-6 py-4">
-        <LanguageToggle />
-      </div>
+    <div className="flex min-h-[100dvh] flex-col bg-zinc-50 dark:bg-zinc-900" lang="en" dir="ltr">
+      <PublicAuthNav variant="sign-in" />
       <div className="flex flex-1 flex-col items-center justify-center px-4 pb-16">
         <EmployeeSignInForm />
       </div>
@@ -375,7 +380,7 @@ function HomeRedirect() {
   const auth = useAppAuth();
 
   if (!auth.isLoaded) return <Spinner />;
-  if (!auth.isSignedIn) return <LandingPage />;
+  if (!auth.isSignedIn) return <Redirect to="/dcc-home" />;
   return <Redirect to={auth.user?.role === "super_admin" ? "/super-admin" : "/home"} />;
 }
 
@@ -574,6 +579,8 @@ function AppRoutes() {
       <Switch>
         <Route path="/setup">{() => <Redirect to="/sign-in" />}</Route>
         <Route path="/">{() => <HomeRedirect />}</Route>
+        <Route path="/dcc-home">{() => <DccHomePage />}</Route>
+        <Route path="/landing">{() => <Redirect to="/dcc-home" />}</Route>
         <Route path="/sign-in/*?">{() => <SignInPage />}</Route>
         <Route path="/platform/activate">{() => <PlatformActivatePage />}</Route>
 

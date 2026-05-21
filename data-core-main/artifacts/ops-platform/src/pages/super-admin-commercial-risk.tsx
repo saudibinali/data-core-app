@@ -111,8 +111,8 @@ export default function SuperAdminCommercialRiskPage() {
           <ShieldAlert className="w-6 h-6 text-muted-foreground" />
           Commercial Risk &amp; Renewal Readiness
         </h1>
-        <p className="text-sm text-muted-foreground mt-1" dir="rtl">
-          المخاطر التجارية وجاهزية التجديد - قراءة وتحليل فقط
+        <p className="text-sm text-muted-foreground mt-1">
+          Commercial risk and renewal readiness — read-only analysis
         </p>
         <p className="text-xs text-muted-foreground mt-2">
           Read-only intelligence. No automated emails, status changes, or payment actions.

@@ -2314,7 +2314,7 @@ function TenantAdminConsole({
           />
 
           <div
-            className="px-6 py-5"
+            className="px-4 sm:px-6 py-4 sm:py-5 min-w-0"
             role="tabpanel"
             id={`console-tabpanel-${effectiveTab}`}
             aria-labelledby={`console-tab-${effectiveTab}`}

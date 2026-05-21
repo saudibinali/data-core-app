@@ -67,13 +67,14 @@ interface NavItemProps {
   isPinned: boolean;
   onPin: () => void;
   onUnpin: () => void;
+  onNavigate?: () => void;
   dragHandleProps?: React.HTMLAttributes<HTMLButtonElement>;
   isDragging?: boolean;
   style?: React.CSSProperties;
 }
 
 function NavItem({
-  id, icon: Icon, label, isActive, badge, isPinned, onPin, onUnpin,
+  id, icon: Icon, label, isActive, badge, isPinned, onPin, onUnpin, onNavigate,
   dragHandleProps, isDragging, style,
 }: NavItemProps) {
   const [hovered, setHovered] = useState(false);
@@ -102,6 +103,7 @@ function NavItem({
 
       <Link
         href={id}
+        onClick={() => onNavigate?.()}
         className={cn(
           "flex flex-1 items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
           isActive
@@ -162,7 +164,7 @@ function SortableNavItem(props: Omit<NavItemProps, "dragHandleProps" | "isDraggi
   );
 }
 
-export default function Sidebar() {
+export default function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const [location] = useLocation();
   const { t, i18n } = useTranslation();
   const { signOut, user: authUser } = useAppAuth();
@@ -262,10 +264,14 @@ export default function Sidebar() {
   const toggleTheme    = () => setTheme(theme === "dark" ? "light" : "dark");
 
   return (
-    <aside className="w-64 border-r border-border bg-sidebar flex flex-col h-full">
+    <div className="w-full h-full border-r border-border bg-sidebar flex flex-col">
       {/* Logo */}
       <div className="h-14 flex items-center px-4 border-b border-border shrink-0">
-        <Link href="/home" className="flex items-center gap-2 font-bold text-lg text-sidebar-primary">
+        <Link
+          href="/home"
+          onClick={() => onNavigate?.()}
+          className="flex items-center gap-2 font-bold text-lg text-sidebar-primary"
+        >
           <img
             src={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/logo.png`}
             alt="Logo"
@@ -300,6 +306,7 @@ export default function Sidebar() {
                       isPinned
                       onPin={() => pin(id)}
                       onUnpin={() => unpin(id)}
+                      onNavigate={onNavigate}
                     />
                   );
                 })}
@@ -345,6 +352,7 @@ export default function Sidebar() {
                     isPinned={false}
                     onPin={() => pin(id)}
                     onUnpin={() => unpin(id)}
+                    onNavigate={onNavigate}
                   />
                 );
               })}
@@ -357,6 +365,7 @@ export default function Sidebar() {
       <div className="mt-auto border-t border-border p-4 flex flex-col gap-2 shrink-0">
         <Link
           href="/settings"
+          onClick={() => onNavigate?.()}
           className={cn(
             "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
             location.startsWith("/settings")
@@ -407,6 +416,6 @@ export default function Sidebar() {
           </button>
         </div>
       </div>
-    </aside>
+    </div>
   );
 }

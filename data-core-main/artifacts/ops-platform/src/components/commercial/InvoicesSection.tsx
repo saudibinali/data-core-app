@@ -190,7 +190,7 @@ export function InvoicesSection({
           <div className="flex items-center gap-2 flex-wrap">
             <FileText className="w-4 h-4 text-muted-foreground" />
             <span className="text-sm font-semibold">Invoices &amp; Documents</span>
-            <span className="text-xs text-muted-foreground" dir="rtl">الفواتير والمستندات</span>
+            <span className="text-xs text-muted-foreground">Invoices &amp; documents</span>
             <Badge variant="secondary" className="text-xs">{invoices.length}</Badge>
           </div>
           {canWriteInvoice && commercialAccountId && !formOpen && !statusRow && (

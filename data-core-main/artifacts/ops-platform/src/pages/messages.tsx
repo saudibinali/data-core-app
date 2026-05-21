@@ -857,11 +857,12 @@ export default function MailPage() {
   };
 
   const showComposePan = view === "compose" || view === "reply" || view === "edit-draft";
+  const mobileShowDetail = showComposePan || (view === "email" && !!selectedId);
 
   return (
-    <div className="flex h-full overflow-hidden select-none">
-      {/* ── Folder sidebar ─────────────────────────────────── */}
-      <div className="w-48 border-e flex flex-col shrink-0 bg-muted/10">
+    <div className="flex h-full min-h-0 min-w-0 flex-col lg:flex-row overflow-hidden select-none">
+      {/* ── Folder sidebar (desktop) ───────────────────────── */}
+      <div className="hidden lg:flex w-48 border-e flex-col shrink-0 bg-muted/10">
         {/* New E-mail button */}
         <div className="p-3 border-b">
           <Button onClick={handleCompose} className="w-full gap-2 justify-start" size="sm">
@@ -896,8 +897,42 @@ export default function MailPage() {
         </nav>
       </div>
 
+      {/* ── Folder chips (mobile / tablet) ───────────────────── */}
+      <div className="lg:hidden shrink-0 border-b bg-muted/10 flex gap-1 overflow-x-auto p-2">
+        {folders.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => {
+              setFolder(f.id);
+              setSelectedId(null);
+              setView("none");
+            }}
+            className={cn(
+              "shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors",
+              folder === f.id
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <f.icon className="w-3.5 h-3.5" />
+            <span>{f.label}</span>
+            {f.badge ? (
+              <span className="text-[10px] font-bold min-w-[16px] h-4 flex items-center justify-center rounded-full px-1 bg-primary-foreground/20">
+                {f.badge}
+              </span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+
       {/* ── Email list ────────────────────────────────────────── */}
-      <div className="w-72 border-e flex flex-col shrink-0">
+      <div
+        className={cn(
+          "border-e flex flex-col shrink-0 min-h-0 min-w-0 w-full lg:w-72",
+          mobileShowDetail && "hidden lg:flex",
+        )}
+      >
         {/* Search */}
         <div className="p-2 border-b bg-background">
           <div className="relative">
@@ -940,7 +975,12 @@ export default function MailPage() {
       </div>
 
       {/* ── Reading / Compose pane ──────────────────────────── */}
-      <div className="flex-1 overflow-hidden">
+      <div
+        className={cn(
+          "flex-1 min-w-0 overflow-hidden",
+          !mobileShowDetail && "hidden lg:flex",
+        )}
+      >
         {showComposePan ? (
           <InlineComposePan
             key={view === "reply" ? `reply-${replyTo?.id}` : view === "edit-draft" ? `draft-${editingDraft?.id}` : "compose"}

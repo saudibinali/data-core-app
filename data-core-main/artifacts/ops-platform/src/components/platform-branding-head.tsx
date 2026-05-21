@@ -13,9 +13,9 @@ export function PlatformBrandingHead() {
   useEffect(() => {
     if (!data) return;
 
-    if (data.platformName) {
-      document.title = data.platformName;
-    }
+    document.title = data.platformName?.trim()
+      ? data.platformName.trim()
+      : "Data Core Center";
 
     const faviconHref =
       resolveBrandingAssetUrl(data.faviconUrl) || DEFAULT_FAVICON;

@@ -213,7 +213,7 @@ function RolePermissionMatrix() {
         <div className="text-left">
           <h2 className="text-sm font-semibold">Role / Permission Matrix</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Platform role capabilities - مصفوفة صلاحيات أدوار المنصة
+            Platform role capabilities reference
           </p>
         </div>
         {collapsed ? <ChevronRight className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
@@ -230,7 +230,6 @@ function RolePermissionMatrix() {
                 {PLATFORM_ROLE_PERMISSION_SUMMARY.map(role => (
                   <th key={role.roleCode} className="px-2 py-2 text-center whitespace-nowrap">
                     <div className="font-semibold text-[10px]">{role.label}</div>
-                    <div className="text-muted-foreground text-[9px] mt-0.5">{role.labelAr}</div>
                     {!role.assignableFromUi && (
                       <div className="mt-1">
                         <span className="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Root</span>
@@ -248,7 +247,7 @@ function RolePermissionMatrix() {
                       colSpan={PLATFORM_ROLE_PERMISSION_SUMMARY.length + 1}
                       className="px-3 py-1.5 font-semibold text-[10px] text-muted-foreground uppercase tracking-wider"
                     >
-                      {group.label} - {group.labelAr}
+                      {group.label}
                     </td>
                   </tr>
                   {group.permissions.map(code => {
@@ -260,7 +259,6 @@ function RolePermissionMatrix() {
                             <RiskBadge riskLevel={def.riskLevel} />
                             <div>
                               <div className="font-medium text-[11px]">{def.label}</div>
-                              <div className="text-muted-foreground text-[10px]">{def.labelAr}</div>
                             </div>
                           </div>
                         </td>
@@ -720,7 +718,7 @@ function RoleChangePanel({ user, onDone }: RoleChangePanelProps) {
           <option value="">Select new role...</option>
           {availableRoles.map(k => (
             <option key={k} value={k}>
-              {INITIAL_PLATFORM_ROLE_CONFIG[k].label} - {INITIAL_PLATFORM_ROLE_CONFIG[k].labelAr}
+              {INITIAL_PLATFORM_ROLE_CONFIG[k].label}
             </option>
           ))}
         </select>
@@ -925,7 +923,7 @@ function UserRecentActivity({ userId }: UserRecentActivityProps) {
       data-testid="user-recent-activity"
     >
       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-        Recent Activity - آخر النشاط
+        Recent Activity
       </p>
 
       {isLoading && !data ? (
@@ -935,8 +933,8 @@ function UserRecentActivity({ userId }: UserRecentActivityProps) {
           ))}
         </div>
       ) : items.length === 0 ? (
-        <p className="text-xs text-muted-foreground py-2 text-center" dir="rtl">
-          لا توجد أنشطة حديثة
+        <p className="text-xs text-muted-foreground py-2 text-center">
+          No recent activity
         </p>
       ) : (
         <div className="space-y-1.5">
@@ -1037,7 +1035,7 @@ export default function SuperAdminPlatformUsers() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Platform Users</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Internal platform administration accounts - مستخدمو إدارة المنصة الداخليون
+            Internal platform administration accounts
           </p>
         </div>
         <div className="flex items-center gap-3">

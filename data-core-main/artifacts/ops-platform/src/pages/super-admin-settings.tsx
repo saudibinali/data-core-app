@@ -23,6 +23,13 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { BrandingAssetField } from "@/components/platform/BrandingAssetField";
 import { DEFAULT_FAVICON, DEFAULT_LOGO } from "@/lib/platform-branding";
 
@@ -129,7 +136,7 @@ function IdentitySection({ settings, onSave }: { settings: Record<string, unknow
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="space-y-1.5">
           <Label>{t("ps_platform_name")}</Label>
-          <Input value={String(form.platform_name ?? "")} onChange={set("platform_name")} placeholder="OpsPlatform" />
+          <Input value={String(form.platform_name ?? "")} onChange={set("platform_name")} placeholder="Data Core Center" />
         </div>
         <div className="space-y-1.5">
           <Label>{t("ps_org_name")}</Label>
@@ -273,7 +280,7 @@ function SmtpSection({ settings, onSave }: { settings: Record<string, unknown>; 
         </div>
         <div className="space-y-1.5">
           <Label>{t("ps_smtp_from_name")}</Label>
-          <Input value={String(form.from_name ?? "")} onChange={set("from_name")} placeholder="OpsPlatform" />
+          <Input value={String(form.from_name ?? "")} onChange={set("from_name")} placeholder="Data Core Center" />
         </div>
         <div className="sm:col-span-2 flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30">
           <p className="text-sm font-medium">{t("ps_smtp_secure")}</p>
@@ -427,7 +434,7 @@ function FeaturesSection({ settings, onSave }: { settings: Record<string, unknow
             <p className="text-xs text-muted-foreground/60 uppercase tracking-wide mb-2 px-1">{cat}</p>
             <div className="space-y-1">
               {(grouped[cat] ?? []).map(m => {
-                const label = i18n.language.startsWith("ar") ? m.nameAr : m.name;
+                const label = m.name;
                 return (
                   <div key={m.key} className="flex items-center justify-between gap-4 px-3 py-2.5 rounded-lg border border-border bg-card">
                     <div className="flex items-center gap-2">
@@ -735,9 +742,24 @@ export default function SuperAdminSettings() {
     ((platformSettings as Record<string, unknown> | undefined)?.[cat] ?? {}) as Record<string, unknown>;
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] -m-6 gap-0">
-      {/* Sidebar nav */}
-      <nav className="w-52 shrink-0 border-e border-border bg-muted/15 overflow-y-auto py-4 px-2 space-y-0.5">
+    <div className="flex flex-col lg:flex-row min-h-0 lg:h-[calc(100vh-7rem)] -m-4 sm:-m-6 gap-0">
+      <div className="lg:hidden shrink-0 border-b border-border bg-muted/15 p-3">
+        <Select value={active} onValueChange={(v) => setActive(v)}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Section" />
+          </SelectTrigger>
+          <SelectContent>
+            {NAV.map(({ id, labelKey }) => (
+              <SelectItem key={id} value={id}>
+                {t(labelKey)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Sidebar nav (desktop) */}
+      <nav className="hidden lg:flex w-52 shrink-0 border-e border-border bg-muted/15 overflow-y-auto py-4 px-2 space-y-0.5">
         {NAV.map(({ id, icon: Icon, labelKey, dot }) => (
           <button
             key={id}
@@ -757,7 +779,7 @@ export default function SuperAdminSettings() {
       </nav>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6 min-w-0">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6 min-w-0">
         {isLoading ? (
           <div className="space-y-4 max-w-2xl">
             {[1, 2, 3, 4].map(i => <div key={i} className="h-14 rounded-lg bg-muted animate-pulse" />)}

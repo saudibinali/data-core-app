@@ -106,7 +106,7 @@ function buildSubmissionConfirmationHtml(opts: {
 
     <!-- Header -->
     <div style="background:linear-gradient(135deg,#1e293b 0%,#334155 100%);padding:32px 32px 24px">
-      <div style="font-size:13px;color:#94a3b8;margin-bottom:4px">${workspaceName ?? "Operations Platform"}</div>
+      <div style="font-size:13px;color:#94a3b8;margin-bottom:4px">${workspaceName ?? "Data Core Center"}</div>
       <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700">Request Confirmation</h1>
       <div style="margin-top:4px;color:#94a3b8;font-size:13px;font-family:monospace">${requestNumber}</div>
     </div>
@@ -199,11 +199,11 @@ function buildSubmissionConfirmationHtml(opts: {
     <!-- Footer -->
     <div style="padding:20px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;text-align:center">
       <p style="margin:0;font-size:12px;color:#94a3b8">
-        This is an automated message from your Operations Platform.
+        This is an automated message from Data Core Center.
         Please do not reply to this email.
       </p>
       <p style="margin:4px 0 0;font-size:11px;color:#cbd5e1;direction:rtl">
-        هذه رسالة تلقائية من منصة العمليات. لا تقم بالرد على هذا البريد.
+        هذه رسالة تلقائية من Data Core Center. لا تقم بالرد على هذا البريد.
       </p>
     </div>
   </div>

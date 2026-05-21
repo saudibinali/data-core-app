@@ -1,7 +1,12 @@
 import { useTranslation } from "react-i18next";
 import { useLocation } from "wouter";
+import { MobileMenuButton } from "./mobile-menu-button";
 
-export default function Header() {
+interface HeaderProps {
+  onMenuClick?: () => void;
+}
+
+export default function Header({ onMenuClick }: HeaderProps) {
   const { t } = useTranslation();
   const [location] = useLocation();
 
@@ -20,8 +25,9 @@ export default function Header() {
   else if (location.startsWith("/governance"))    title = "Governance Console";
 
   return (
-    <header className="h-14 border-b border-border bg-background flex items-center px-6 shrink-0">
-      <h1 className="text-lg font-semibold">{title}</h1>
+    <header className="h-14 border-b border-border bg-background flex items-center gap-3 px-4 sm:px-6 shrink-0 min-w-0">
+      {onMenuClick ? <MobileMenuButton onClick={onMenuClick} /> : null}
+      <h1 className="text-base sm:text-lg font-semibold truncate min-w-0 flex-1">{title}</h1>
     </header>
   );
 }

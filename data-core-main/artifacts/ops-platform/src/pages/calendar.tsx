@@ -1287,9 +1287,9 @@ export default function CalendarPage() {
       </div>
 
       {/* ── Content ── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-w-0 overflow-hidden flex-col xl:flex-row">
         {/* ── Calendar Grid (75%) ── */}
-        <div className="flex-1 flex flex-col overflow-hidden border-r">
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0 xl:border-r border-b xl:border-b-0">
           {view === "month" && (
             <MonthView current={current} events={gridEvents} today={today}
               onDateClick={openCreate} onEventClick={openDetail} />
@@ -1304,8 +1304,8 @@ export default function CalendarPage() {
           )}
         </div>
 
-        {/* ── Right Sidebar (25%) ── */}
-        <div className="w-72 xl:w-80 shrink-0 flex flex-col overflow-hidden bg-card/50">
+        {/* ── Right Sidebar (25%) — desktop / large tablet landscape ── */}
+        <div className="hidden xl:flex w-72 xl:w-80 shrink-0 flex-col overflow-hidden bg-card/50 min-h-0">
           {/* Today header */}
           <div className="px-4 pt-4 pb-3 border-b">
             <div className="flex items-center justify-between mb-1">
@@ -1345,6 +1345,19 @@ export default function CalendarPage() {
               )}
             </div>
           </ScrollArea>
+        </div>
+
+        {/* Mobile / tablet agenda */}
+        <div className="xl:hidden shrink-0 border-t bg-card/50 max-h-[40vh] overflow-y-auto min-w-0">
+          <div className="px-4 pt-3 pb-2 border-b flex items-center justify-between gap-2">
+            <h3 className="text-sm font-bold">{t("today_schedule")}</h3>
+            <span className="text-xs text-muted-foreground shrink-0">
+              {today.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+            </span>
+          </div>
+          <div className="px-3 py-3">
+            <TodayStrip events={allEvents} now={now} onSelect={openDetail} />
+          </div>
         </div>
       </div>
 

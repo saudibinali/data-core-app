@@ -152,7 +152,7 @@ export default function SetupPage({ onInitialized }: SetupPageProps) {
           <div className="w-7 h-7 rounded-lg bg-primary flex items-center justify-center">
             <ShieldCheck className="w-4 h-4 text-primary-foreground" />
           </div>
-          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">OpsPlatform</span>
+          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Data Core Center</span>
         </div>
         <LanguageToggle />
       </div>

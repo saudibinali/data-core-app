@@ -184,7 +184,7 @@ export function CollectionTrackingPanel({
         <HeaderRow>
           <Banknote className="w-4 h-4 text-muted-foreground" />
           <span className="text-sm font-semibold">Collection Tracking</span>
-          <span className="text-xs text-muted-foreground" dir="rtl">متابعة التحصيل</span>
+          <span className="text-xs text-muted-foreground">Collection tracking</span>
           <span className="text-xs font-mono text-muted-foreground">{invoice.invoiceNumber}</span>
         </HeaderRow>
         <button type="button" onClick={onClose} className="p-1 rounded hover:bg-muted" aria-label="Close">

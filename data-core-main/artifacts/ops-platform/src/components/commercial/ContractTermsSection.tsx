@@ -136,7 +136,7 @@ export function ContractTermsSection({ tenantId, commercialAccountId, canWrite }
           <div className="flex items-center gap-2 flex-wrap">
             <FileText className="w-4 h-4 text-muted-foreground" />
             <span className="text-sm font-semibold">Contract Terms &amp; Renewal</span>
-            <span className="text-xs text-muted-foreground" dir="rtl">العقود والتجديد</span>
+            <span className="text-xs text-muted-foreground">Contracts &amp; renewal</span>
             <Badge variant="secondary" className="text-xs">{contracts.length}</Badge>
           </div>
           {canWrite && commercialAccountId && !formOpen && !statusRow && (

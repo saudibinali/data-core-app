@@ -1,6 +1,6 @@
 kind = "web"
 previewPath = "/"
-title = "Internal Operations Platform"
+title = "Data Core Center"
 version = "1.0.0"
 id = "artifacts/ops-platform"
 router = "path"

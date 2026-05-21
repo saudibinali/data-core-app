@@ -12,7 +12,7 @@
  *
  * Safety:
  *   - Never exposes stack traces, DB names, or internal policy details.
- *   - English + Arabic short messages on every denied state.
+ *   - Clear English messages on every denied state.
  *   - Backend remains the authoritative source of authorization.
  */
 
@@ -36,7 +36,7 @@ interface PlatformAccessDeniedProps {
 
 /**
  * Access-denied UI - two variants:
- *   compact=false (default) - centred card with icon + bilingual message
+ *   compact=false (default) - centred card with icon + message
  *   compact=true            - inline row for embedding inside panels
  */
 export function PlatformAccessDenied({
@@ -52,7 +52,7 @@ export function PlatformAccessDenied({
       >
         <Lock className="w-3.5 h-3.5 shrink-0 text-amber-500" aria-hidden="true" />
         <span>
-          {message ?? "This action is restricted - هذا الإجراء مقيّد"}
+          {message ?? "This action is restricted."}
         </span>
         {requiredPermission && (
           <code className="ml-1 font-mono text-[10px] opacity-60 bg-muted px-1 rounded">
@@ -76,7 +76,7 @@ export function PlatformAccessDenied({
 
       <div className="space-y-1.5 max-w-sm">
         <p className="font-semibold text-foreground">
-          Access Denied - لا تملك صلاحية الوصول
+          Access Denied
         </p>
         <p className="text-sm text-muted-foreground">
           {message ?? "You do not have permission to view this content."}
@@ -92,7 +92,7 @@ export function PlatformAccessDenied({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Contact Platform Owner - تواصل مع مالك المنصة
+        Contact the platform owner if you need access.
       </p>
     </div>
   );

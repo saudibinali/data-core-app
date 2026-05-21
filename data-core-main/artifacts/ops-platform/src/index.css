@@ -188,8 +188,17 @@
     @apply border-border;
   }
 
+  html {
+    overflow-x: hidden;
+  }
+
   body {
-    @apply font-sans antialiased bg-background text-foreground;
+    @apply font-sans antialiased bg-background text-foreground overflow-x-hidden;
+  }
+
+  #root {
+    min-height: 100dvh;
+    min-width: 0;
   }
 
   [dir="rtl"] .locale-prose-cell {
@@ -202,5 +211,23 @@
   [dir="ltr"] .locale-prose-cell {
     line-height: 1.55;
     overflow-wrap: break-word;
+  }
+}
+
+@layer utilities {
+  .app-shell-main {
+    @apply flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6;
+  }
+
+  .app-shell-container {
+    @apply mx-auto w-full min-w-0 max-w-6xl 2xl:max-w-7xl;
+  }
+
+  .app-table-scroll {
+    @apply w-full min-w-0 overflow-x-auto;
+  }
+
+  .app-pane-split {
+    @apply flex min-h-0 min-w-0 flex-col gap-0 lg:flex-row;
   }
 }

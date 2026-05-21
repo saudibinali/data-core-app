@@ -67,8 +67,7 @@ export function PlatformAuditSeverityBadge({ severity, lang = "en" }: SeverityBa
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cfg.badgeClass}`}
       data-testid={`severity-badge-${severity}`}
     >
-      <span>{lang === "ar" ? cfg.labelAr : cfg.label}</span>
-      {lang === "en" && <span className="ltr:ml-1 rtl:mr-1 text-[10px] opacity-70" dir="rtl">{cfg.labelAr}</span>}
+      <span>{cfg.label}</span>
     </span>
   );
 }
@@ -88,8 +87,7 @@ export function PlatformAuditResultBadge({ result, lang = "en" }: ResultBadgePro
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cfg.badgeClass}`}
       data-testid={`result-badge-${result}`}
     >
-      <span>{lang === "ar" ? cfg.labelAr : cfg.label}</span>
-      {lang === "en" && <span className="ltr:ml-1 rtl:mr-1 text-[10px] opacity-70" dir="rtl">{cfg.labelAr}</span>}
+      <span>{cfg.label}</span>
     </span>
   );
 }
@@ -125,13 +123,10 @@ export function PlatformActivityEventCard({ item }: EventCardProps) {
         </span>
       </div>
 
-      {/* Arabic label */}
-      <p className="text-xs text-muted-foreground" dir="rtl">{item.actionLabelAr}</p>
-
       {/* Actor / Target */}
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs">
         <span>
-          <span className="text-muted-foreground">Actor - الفاعل: </span>
+          <span className="text-muted-foreground">Actor: </span>
           <span className="font-medium">
             {item.actorDisplayName ?? item.actorEmail ?? (item.actorId ? `#${item.actorId}` : "System")}
           </span>
@@ -141,7 +136,7 @@ export function PlatformActivityEventCard({ item }: EventCardProps) {
         </span>
         {(item.targetDisplayName ?? item.targetEmail ?? item.targetUserId) ? (
           <span>
-            <span className="text-muted-foreground">Target - الهدف: </span>
+            <span className="text-muted-foreground">Target: </span>
             <span className="font-medium">
               {item.targetDisplayName ?? item.targetEmail ?? `#${item.targetUserId}`}
             </span>
@@ -195,7 +190,7 @@ export function PlatformActivityEventCard({ item }: EventCardProps) {
             ) : (
               <ChevronRight className="w-3 h-3" />
             )}
-            Metadata (redacted - مُعقَّم)
+            Metadata (redacted)
           </button>
           {expanded ? (
             <pre
@@ -242,7 +237,7 @@ export function PlatformActivityFiltersBar({
             <SelectValue placeholder="All groups" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="__all__">All Groups - كل المجموعات</SelectItem>
+            <SelectItem value="__all__">All groups</SelectItem>
             {PLATFORM_AUDIT_GROUP_FILTER_OPTIONS.map((o) => (
               <SelectItem key={o.value} value={o.value}>
                 {o.label}
@@ -263,10 +258,10 @@ export function PlatformActivityFiltersBar({
             <SelectValue placeholder="All results" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="__all__">All Results - كل النتائج</SelectItem>
+            <SelectItem value="__all__">All results</SelectItem>
             {PLATFORM_AUDIT_RESULT_FILTER_OPTIONS.map((o) => (
               <SelectItem key={o.value} value={o.value}>
-                {o.label} - {o.labelAr}
+                {o.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -284,10 +279,10 @@ export function PlatformActivityFiltersBar({
             <SelectValue placeholder="All severities" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="__all__">All Severities - كل الخطورة</SelectItem>
+            <SelectItem value="__all__">All severities</SelectItem>
             {PLATFORM_AUDIT_SEVERITY_FILTER_OPTIONS.map((o) => (
               <SelectItem key={o.value} value={o.value}>
-                {o.label} - {o.labelAr}
+                {o.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -388,7 +383,7 @@ export function PlatformActivityTimeline({
         className="text-center py-12 text-muted-foreground text-sm"
         data-testid="platform-activity-error"
       >
-        Failed to load activity - تعذر تحميل النشاط
+        Failed to load activity
       </div>
     );
   }
@@ -404,8 +399,8 @@ export function PlatformActivityTimeline({
           <p className="text-sm font-medium text-muted-foreground">
             No activity found
           </p>
-          <p className="text-xs text-muted-foreground mt-0.5" dir="rtl">
-            لا توجد أنشطة
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Try adjusting your filters.
           </p>
         </div>
       </div>
@@ -426,7 +421,7 @@ export function PlatformActivityTimeline({
             disabled={isLoading}
             data-testid="load-more-activity"
           >
-            {isLoading ? "Loading..." : "Load more - تحميل المزيد"}
+            {isLoading ? "Loading..." : "Load more"}
           </Button>
         </div>
       ) : null}
@@ -493,7 +488,7 @@ export default function SuperAdminActivity() {
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
             {t("platform_activity_desc", {
-              defaultValue: "Platform audit event log - سجل أحداث المنصة",
+              defaultValue: "Platform audit event log (read-only)",
             })}
           </p>
         </div>
@@ -515,7 +510,7 @@ export default function SuperAdminActivity() {
           {t("platform_activity")}
         </h1>
         <p className="text-muted-foreground text-sm mt-1">
-          Platform audit event log - سجل أحداث المنصة
+          Platform audit event log (read-only)
         </p>
       </div>
 
@@ -528,16 +523,14 @@ export default function SuperAdminActivity() {
             : `${allItems.length} event${allItems.length === 1 ? "" : "s"} shown`}
         </span>
         <span className="text-muted-foreground/40">|</span>
-        <span className="text-xs" dir="rtl">
-          قراءة فقط - Read-only
-        </span>
+        <span className="text-xs">Read-only</span>
       </div>
 
       {/* Filters */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-sm flex items-center gap-2">
-            <Filter className="w-4 h-4" /> Filters - فلاتر
+            <Filter className="w-4 h-4" /> Filters
           </CardTitle>
         </CardHeader>
         <CardContent>

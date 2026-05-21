@@ -19,6 +19,14 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const ROOT = resolve(import.meta.dirname, "../..");
+
+function readSrc(rel: string): string {
+  return readFileSync(resolve(ROOT, rel), "utf8");
+}
 import {
   getEffectivePlatformRoleCode,
   getCurrentPlatformPermissions,
@@ -327,22 +335,11 @@ describe("T7 - canAccessPlatformRoute", () => {
 // ── T8: Access denied component test (data-driven) ───────────────────────────
 
 describe("T8 - PlatformAccessDenied message content (T18)", () => {
-  it("T18 - denied UI must include English + Arabic text and permission code", () => {
-    // The component always renders:
-    //   "Access Denied - لا تملك صلاحية الوصول"
-    //   "Contact Platform Owner - تواصل مع مالك المنصة"
-    //   <code>{requiredPermission}</code>
-    // These are enforced by the component implementation.
-    // This test validates the config that drives the messages.
-    const expectedEnglish = "Access Denied";
-    const expectedArabic  = "لا تملك صلاحية الوصول";
-    const expectedContact = "تواصل مع مالك المنصة";
-
-    // These strings appear in platform-permission-route.tsx
-    // We verify them as requirements without rendering the component.
-    expect(expectedEnglish).toMatch(/Access Denied/);
-    expect(expectedArabic).toMatch(/صلاحية/);
-    expect(expectedContact).toMatch(/مالك المنصة/);
+  it("T18 - denied UI must include English-only access messaging", () => {
+    const routeSource = readSrc("components/platform-permission-route.tsx");
+    expect(routeSource).toContain("Access Denied");
+    expect(routeSource).toContain("Contact the platform owner if you need access.");
+    expect(routeSource).not.toMatch(/[\u0600-\u06FF]/);
   });
 });
 

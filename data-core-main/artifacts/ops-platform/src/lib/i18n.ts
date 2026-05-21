@@ -6,16 +6,17 @@ i18n
   .use(LanguageDetector)
   .use(initReactI18next)
   .init({
+    lng: 'en',
     fallbackLng: 'en',
     supportedLngs: ['en', 'ar'],
     detection: {
-      order: ['localStorage', 'navigator'],
+      order: ['localStorage'],
       caches: ['localStorage'],
     },
     resources: {
       en: {
         translation: {
-          app_name: 'OpsPlatform',
+          app_name: 'Data Core Center',
 
           // ── Navigation ──────────────────────────────────────────────────────
           dashboard:     'Dashboard',
@@ -35,12 +36,14 @@ i18n
           navigation:    'Navigation',
 
           // ── Landing ──────────────────────────────────────────────────────────
-          landing_title:    'Internal Operations Center',
-          landing_subtitle: 'A secure, enterprise-grade platform for internal operations management.',
+          landing_title:    'Data Core Center',
+          landing_subtitle: 'Enterprise workspace for data, operations, and governance — secure access for authorized teams.',
+          dcc_home_badge:   'Enterprise platform',
+          dcc_home_footer:  'Access is restricted to authorized personnel. Accounts are provisioned by administrators.',
 
           // ── Auth ─────────────────────────────────────────────────────────────
-          sign_in_title:    'Welcome back',
-          sign_in_subtitle: 'Enter your Employee Number and password to sign in.',
+          sign_in_title:    'Sign in to Data Core Center',
+          sign_in_subtitle: 'Enter your employee number and password to access your workspace.',
           sign_in_emp_number_label: 'Employee Number',
           sign_in_emp_number_placeholder: 'e.g. EMP-001',
           sign_in_password_label: 'Password',
@@ -128,7 +131,7 @@ i18n
           role_member:   'Member',
 
           // ── Dashboard (admin control center) ─────────────────────────────────
-          dashboard_subtitle:        'Overview of your operations platform.',
+          dashboard_subtitle:        'Overview of your Data Core Center workspace.',
           new_email:                 'New E-mail',
           new_ticket:                'New Ticket',
           open_tickets:              'Open Tickets',
@@ -900,7 +903,7 @@ i18n
 
       ar: {
         translation: {
-          app_name: 'منصة العمليات',
+          app_name: 'Data Core Center',
 
           // ── التنقل ───────────────────────────────────────────────────────────
           home:          'الرئيسية',
@@ -921,8 +924,10 @@ i18n
           navigation:    'التنقل',
 
           // ── الصفحة الرئيسية ───────────────────────────────────────────────────
-          landing_title:    'مركز العمليات الداخلية',
-          landing_subtitle: 'منصة مؤسسية متكاملة لإدارة العمليات الداخلية بكفاءة واحترافية.',
+          landing_title:    'Data Core Center',
+          landing_subtitle: 'Enterprise workspace for data, operations, and governance.',
+          dcc_home_badge:   'منصة مؤسسية',
+          dcc_home_footer:  'الوصول للموظفين المعتمدين فقط. يتم إنشاء الحسابات من قِبل المسؤولين.',
 
           // ── تسجيل الدخول ─────────────────────────────────────────────────────
           sign_in_title:    'مرحباً بعودتك',
@@ -1040,7 +1045,7 @@ i18n
           mark_as_read:               'تعيين كمقروء',
 
           // ── لوحة القيادة (مركز التحكم الإداري) ───────────────────────────────
-          dashboard_subtitle:   'نظرة عامة على منصة العمليات.',
+          dashboard_subtitle:   'نظرة عامة على Data Core Center.',
           new_email:            'رسالة جديدة',
           new_ticket:           'تذكرة جديدة',
           open_tickets:         'التذاكر المفتوحة',

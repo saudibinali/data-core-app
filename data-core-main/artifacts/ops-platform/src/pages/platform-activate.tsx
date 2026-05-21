@@ -124,9 +124,14 @@ export default function PlatformActivatePage() {
           <div className="text-center space-y-3 py-4" data-testid="activation-failure">
             <XCircle className="w-10 h-10 text-destructive mx-auto" />
             <p className="text-sm text-muted-foreground">{verify.message}</p>
-            <Link href="/sign-in" className="text-sm underline text-primary">
-              Go to sign in
-            </Link>
+            <div className="flex flex-col gap-2 items-center">
+              <Link href="/sign-in" className="text-sm underline text-primary">
+                Go to sign in
+              </Link>
+              <Link href="/dcc-home" className="text-sm text-muted-foreground hover:underline">
+                Back to home
+              </Link>
+            </div>
           </div>
         )}
 

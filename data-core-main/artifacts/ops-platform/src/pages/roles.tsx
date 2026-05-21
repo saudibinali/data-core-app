@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  ShieldCheck, Plus, Trash2, Loader2, Users, Save, ChevronRight,
+  ShieldCheck, Plus, Trash2, Loader2, Users, Save, ChevronRight, ArrowLeft,
   AlertTriangle, Search, X, UserPlus, UserMinus, RefreshCw,
   Lock, Zap, Filter, CheckSquare2, Square,
 } from "lucide-react";
@@ -581,9 +581,14 @@ export default function RolesPage() {
   });
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex flex-col lg:flex-row h-full min-h-0 min-w-0 overflow-hidden">
       {/* ── Left Panel: Role List ─────────────────────────────────────────── */}
-      <div className="w-72 shrink-0 border-r border-border flex flex-col bg-background">
+      <div
+        className={cn(
+          "w-full lg:w-72 shrink-0 border-b lg:border-b-0 lg:border-r border-border flex flex-col bg-background max-h-[42vh] lg:max-h-none min-h-0",
+          selectedRoleId && "hidden lg:flex",
+        )}
+      >
         <div className="p-4 border-b border-border space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -655,7 +660,12 @@ export default function RolesPage() {
       </div>
 
       {/* ── Right Panel: Role Editor ───────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto">
+      <div
+        className={cn(
+          "flex-1 min-w-0 overflow-y-auto",
+          !selectedRoleId && "hidden lg:block",
+        )}
+      >
         {!selectedRole ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-8">
             <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center">
@@ -673,9 +683,19 @@ export default function RolesPage() {
             </Button>
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto py-6 px-6 space-y-6">
+          <div className="max-w-3xl mx-auto py-4 sm:py-6 px-4 sm:px-6 space-y-6">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="lg:hidden -ms-2 gap-1.5 text-muted-foreground"
+              onClick={() => setSelectedRoleId(null)}
+            >
+              <ArrowLeft className="w-4 h-4" />
+              {isAr ? "العودة للأدوار" : "Back to roles"}
+            </Button>
             {/* Role header */}
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
               <span className="w-5 h-5 rounded-full ring-1 ring-black/10 shrink-0" style={{ backgroundColor: selectedRole.color }} />
               <h2 className="text-xl font-bold">{selectedRole.name}</h2>
               <Badge variant="secondary" className="text-xs gap-1">
@@ -690,7 +710,7 @@ export default function RolesPage() {
 
             {/* Tabs */}
             <Tabs defaultValue="permissions">
-              <TabsList className="w-full justify-start">
+              <TabsList className="w-full justify-start flex-wrap h-auto gap-1 p-1">
                 <TabsTrigger value="permissions" className="gap-2">
                   <Lock className="w-4 h-4" />
                   {isAr ? "الصلاحيات" : "Permissions"}

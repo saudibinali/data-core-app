@@ -8,7 +8,7 @@ import { platformSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 const IDENTITY_DEFAULTS = {
-  platform_name: "OpsPlatform",
+  platform_name: "Data Core Center",
   org_name: "",
   logo_url: "",
   favicon_url: "",

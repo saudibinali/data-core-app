@@ -9,12 +9,13 @@ import {
   saveBrandingAssetFile,
   upsertIdentityBrandingUrls,
 } from "../lib/platform-branding";
+import { processBrandingImage } from "../lib/branding-image-process";
 
 const router: IRouter = Router();
 
 const DEFAULTS: Record<string, Record<string, unknown>> = {
   identity: {
-    platform_name:  "OpsPlatform",
+    platform_name:  "Data Core Center",
     org_name:       "",
     logo_url:       "",
     favicon_url:    "",
@@ -30,7 +31,7 @@ const DEFAULTS: Record<string, Record<string, unknown>> = {
     username:   "",
     password:   "",
     from_email: "",
-    from_name:  "OpsPlatform",
+    from_name:  "Data Core Center",
     secure:     false,
     provider:   "smtp",
   },
@@ -114,10 +115,15 @@ router.post(
     }
 
     try {
-      const { publicPath } = await saveBrandingAssetFile(
-        kind,
+      const processed = await processBrandingImage(
         upload.buffer,
         upload.originalFileName,
+        kind,
+      );
+      const { publicPath } = await saveBrandingAssetFile(
+        kind,
+        processed.buffer,
+        `asset${processed.ext}`,
       );
       const cacheBust = `${publicPath}?v=${Date.now()}`;
       const patch =
