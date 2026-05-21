@@ -3,6 +3,7 @@ import { requireDatabase } from "../middlewares/requireDatabase";
 import setupRouter from "./setup";
 import authRouter from "./auth";
 import healthRouter from "./health";
+import contactRouter from "./contact";
 import workspacesRouter from "./workspaces";
 import invitationsRouter from "./invitations";
 import adminRouter from "./admin";
@@ -76,6 +77,7 @@ const router: IRouter = Router();
 router.use(setupRouter);
 router.use(authRouter);
 router.use(healthRouter);
+router.use(contactRouter);
 
 // ── Database guard - returns 503 for all routes below when DATABASE_URL unset ─
 router.use(requireDatabase);

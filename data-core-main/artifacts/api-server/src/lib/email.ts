@@ -267,3 +267,27 @@ export async function sendEmail({ to, subject, html }: { to: string; subject: st
     logger.warn({ err, to }, "sendEmail failed");
   }
 }
+
+export { isEmailConfigured };
+
+export async function sendTransactionalEmail(opts: {
+  to: string;
+  subject: string;
+  html: string;
+  replyTo?: string;
+}): Promise<void> {
+  if (!isEmailConfigured()) {
+    throw new Error("SMTP_NOT_CONFIGURED");
+  }
+  const transporter = getTransporter();
+  if (!transporter) {
+    throw new Error("SMTP_NOT_CONFIGURED");
+  }
+  await transporter.sendMail({
+    from: SMTP_FROM,
+    to: opts.to,
+    subject: opts.subject,
+    html: opts.html,
+    replyTo: opts.replyTo,
+  });
+}

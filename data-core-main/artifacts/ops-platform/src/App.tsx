@@ -19,8 +19,10 @@ import { WorkspaceReadOnlyBanner } from "@/components/workspace/WorkspaceReadOnl
 import SuperAdminLayout from "@/components/layout/super-admin-layout";
 import DccHomePage from "@/pages/dcc-home";
 import AboutPlatformPage from "@/pages/about-platform";
+import ContactPage from "@/pages/contact";
 import { PublicAuthNav } from "@/components/layout/public-auth-nav";
-import { usePublicEnglish } from "@/hooks/use-public-english";
+import { PublicLocaleProvider } from "@/lib/public-locale";
+import { usePublicLocale } from "@/lib/public-locale/context";
 import DashboardPage from "@/pages/dashboard";
 import HomePage from "@/pages/home";
 import TicketsPage from "@/pages/tickets";
@@ -260,7 +262,7 @@ function EmployeeSignInForm() {
 function SignInPage() {
   const auth = useAppAuth();
   const [, setLocation] = useLocation();
-  usePublicEnglish();
+  const { locale, dir } = usePublicLocale();
 
   useEffect(() => {
     if (auth.isLoaded && auth.isSignedIn) {
@@ -269,7 +271,7 @@ function SignInPage() {
   }, [auth.isLoaded, auth.isSignedIn, auth.user?.role, setLocation]);
 
   return (
-    <div className="flex min-h-[100dvh] flex-col bg-zinc-50 dark:bg-zinc-900" lang="en" dir="ltr">
+    <div className="flex min-h-[100dvh] flex-col bg-zinc-50 dark:bg-zinc-900" lang={locale} dir={dir}>
       <PublicAuthNav variant="sign-in" />
       <div className="flex flex-1 flex-col items-center justify-center px-4 pb-16">
         <EmployeeSignInForm />
@@ -586,6 +588,7 @@ function AppRoutes() {
         <Route path="/">{() => <HomeRedirect />}</Route>
         <Route path="/dcc-home">{() => <DccHomePage />}</Route>
         <Route path="/about-platform">{() => <AboutPlatformPage />}</Route>
+        <Route path="/contact">{() => <ContactPage />}</Route>
         <Route path="/landing">{() => <Redirect to="/dcc-home" />}</Route>
         <Route path="/sign-in/*?">{() => <SignInPage />}</Route>
         <Route path="/platform/activate">{() => <PlatformActivatePage />}</Route>
@@ -676,12 +679,14 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <PlatformBrandingHead />
       <AuthProvider>
-        <TooltipProvider>
-          <WouterRouter base={basePath}>
-            <AppRoutes />
-          </WouterRouter>
-          <Toaster />
-        </TooltipProvider>
+        <PublicLocaleProvider>
+          <TooltipProvider>
+            <WouterRouter base={basePath}>
+              <AppRoutes />
+            </WouterRouter>
+            <Toaster />
+          </TooltipProvider>
+        </PublicLocaleProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

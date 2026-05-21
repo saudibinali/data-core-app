@@ -1,32 +1,22 @@
 import type { ReactNode } from "react";
 import { Link } from "wouter";
 import { PublicAuthNav } from "@/components/layout/public-auth-nav";
-import { usePublicEnglish } from "@/hooks/use-public-english";
-import {
-  WORKSPACE_MODULES,
-  HCM_DEPENDENCIES,
-  WORKSPACE_ROLES,
-  PLATFORM_ROLES,
-  PLATFORM_CONSOLE_AREAS,
-  HR_CAPABILITIES,
-  CLIENT_OUTCOMES,
-} from "@/lib/about-platform-content";
+import { usePublicLocale } from "@/lib/public-locale/context";
 import {
   Building2,
   Shield,
   Users,
   Workflow,
   LineChart,
-  Cloud,
   Lock,
   Layers,
   ClipboardCheck,
   Globe,
+  ChevronLeft,
   ChevronRight,
   Network,
   FileText,
   Smartphone,
-  Settings,
   Ticket,
   Mail,
   CalendarDays,
@@ -40,54 +30,11 @@ import {
   Plug,
   type LucideIcon,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const LOGO_URL = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/official-logo.png`;
 
-const NAV_SECTIONS: { id: string; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "structure", label: "Structure" },
-  { id: "tenancy", label: "Tenancy" },
-  { id: "organization", label: "Organization" },
-  { id: "hcm", label: "HCM" },
-  { id: "self-service", label: "Self-Service" },
-  { id: "attendance-payroll", label: "Time & Payroll" },
-  { id: "collaboration", label: "Collaboration" },
-  { id: "administration", label: "Administration" },
-  { id: "security", label: "Security" },
-  { id: "visibility", label: "Visibility" },
-  { id: "workflows", label: "Workflows" },
-  { id: "documents", label: "Documents" },
-  { id: "branding", label: "Branding" },
-  { id: "experience", label: "Experience" },
-  { id: "saas", label: "SaaS" },
-  { id: "integration", label: "Integration" },
-  { id: "future", label: "Future" },
-  { id: "modules", label: "Modules" },
-  { id: "value", label: "Value" },
-];
-
-const HIGHLIGHTS: { icon: LucideIcon; title: string; text: string }[] = [
-  {
-    icon: Layers,
-    title: "Dual control planes",
-    text: "Workspace operations for each customer organization, plus a platform layer for tenants, entitlements, and commercial administration.",
-  },
-  {
-    icon: Users,
-    title: "Integrated HCM",
-    text: "Seventeen toggleable workspace modules including HR, payroll, attendance, self-service, and report center with enforced module dependencies.",
-  },
-  {
-    icon: Shield,
-    title: "Granular governance",
-    text: "Workspace RBAC with custom roles, platform permission codes, protected root owner policy, and access review for platform users.",
-  },
-  {
-    icon: Workflow,
-    title: "Process automation",
-    text: "Workflow builder, approval queues, notifications, and real-time updates for operational continuity.",
-  },
-];
+const HIGHLIGHT_ICONS: LucideIcon[] = [Layers, Users, Shield, Workflow];
 
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -143,24 +90,14 @@ function BulletList({ items }: { items: readonly string[] }) {
   );
 }
 
-function ModuleList() {
-  return (
-    <div className="rounded-lg border border-border divide-y divide-border max-h-[420px] overflow-y-auto">
-      {WORKSPACE_MODULES.map((m) => (
-        <div key={m.name} className="px-4 py-3 hover:bg-muted/30 transition-colors">
-          <p className="font-medium text-sm text-foreground">{m.name}</p>
-          <p className="text-xs text-muted-foreground mt-0.5">{m.desc}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function AboutPlatformPage() {
-  usePublicEnglish();
+  const { locale, dir, isRtl, messages } = usePublicLocale();
+  const a = messages.about;
+  const s = a.sections;
+  const Trail = isRtl ? ChevronLeft : ChevronRight;
 
   return (
-    <div className="min-h-[100dvh] flex flex-col bg-background" lang="en" dir="ltr">
+    <div className="min-h-[100dvh] flex flex-col bg-background" dir={dir} lang={locale}>
       <PublicAuthNav variant="about" />
 
       <section
@@ -179,19 +116,17 @@ export default function AboutPlatformPage() {
         <div className="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-12 py-14 sm:py-20 text-center">
           <img
             src={LOGO_URL}
-            alt="Data Core Center"
+            alt={a.heroTitle}
             className="mx-auto w-44 sm:w-56 md:w-72 h-auto object-contain drop-shadow-[0_8px_32px_rgba(0,123,255,0.35)]"
           />
           <p className="mt-6 text-xs font-semibold uppercase tracking-[0.35em] text-[#5ba3d0]">
-            Enterprise Platform Overview
+            {a.heroEyebrow}
           </p>
           <h1 className="mt-3 text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-white leading-tight">
-            Data Core Center
+            {a.heroTitle}
           </h1>
           <p className="mt-5 text-base sm:text-lg text-slate-300 max-w-3xl mx-auto leading-relaxed">
-            A multi-tenant internal operations and human capital management platform. This overview
-            describes implemented modules, administrative structures, and operational capabilities
-            available in the product today.
+            {a.heroSubtitle}
           </p>
         </div>
       </section>
@@ -201,7 +136,7 @@ export default function AboutPlatformPage() {
         aria-label="Page sections"
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-12 py-2.5 flex gap-3 overflow-x-auto text-xs sm:text-sm whitespace-nowrap scrollbar-none">
-          {NAV_SECTIONS.map(({ id, label }) => (
+          {a.nav.map(({ id, label }) => (
             <a
               key={id}
               href={`#${id}`}
@@ -215,190 +150,120 @@ export default function AboutPlatformPage() {
 
       <main className="flex-1">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-12 py-12 sm:py-16 space-y-14 sm:space-y-16">
-          {/* Highlights */}
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {HIGHLIGHTS.map((h) => (
-              <FeatureCard key={h.title} icon={h.icon} title={h.title}>
-                {h.text}
-              </FeatureCard>
-            ))}
+            {a.highlights.map((h, i) => {
+              const Icon = HIGHLIGHT_ICONS[i] ?? Layers;
+              return (
+                <FeatureCard key={h.title} icon={Icon} title={h.title}>
+                  {h.text}
+                </FeatureCard>
+              );
+            })}
           </div>
 
-          <Section id="overview" title="Platform Overview">
-            <Prose>
-              Data Core Center is an enterprise-grade, multi-tenant platform for internal operations
-              and workforce management. Each customer organization operates inside a workspace with
-              isolated data. Platform operators manage tenants, subscriptions, entitlements, and
-              commercial records from a separate super-administration console.
-            </Prose>
-            <Prose>
-              The product combines collaboration tools (tickets, messages, calendar), organizational
-              management (departments, groups, users, roles), human capital operations (HR, attendance,
-              payroll, self-service), and process automation (workflows, approvals, notifications).
-              Access is provisioned by administrators; there is no public self-registration.
-            </Prose>
+          <Section id="overview" title={s.overview.title}>
+            <Prose>{s.overview.p1}</Prose>
+            <Prose>{s.overview.p2}</Prose>
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-5 py-4 text-sm text-muted-foreground">
-              <strong className="text-foreground">Product focus:</strong> Human capital and internal
-              operations. General ERP domains (finance, procurement, inventory as primary modules) are
-              outside the current product nucleus.
+              <strong className="text-foreground">{s.overview.focusLabel}</strong> {s.overview.focusText}
             </div>
           </Section>
 
-          <Section id="structure" title="Enterprise Operational Structure">
+          <Section id="structure" title={s.structure.title}>
             <CardGrid>
-              <FeatureCard icon={Building2} title="Workspace plane">
-                Day-to-day operations for a single organization: modules, users, HR, payroll,
-                tickets, and self-service. Data queries are workspace-scoped from authenticated
-                context.
+              <FeatureCard icon={Building2} title={s.structure.workspacePlane.title}>
+                {s.structure.workspacePlane.text}
               </FeatureCard>
-              <FeatureCard icon={Globe} title="Platform plane">
-                Cross-tenant administration: tenant registry, commercial records, platform users,
-                subscription and entitlement control, governance review, and platform-wide settings.
+              <FeatureCard icon={Globe} title={s.structure.platformPlane.title}>
+                {s.structure.platformPlane.text}
               </FeatureCard>
             </CardGrid>
-            <SubTitle>How organizations operate</SubTitle>
-            <Prose>
-              A platform owner or operator provisions workspaces and assigns subscription entitlements.
-              Workspace administrators invite or create users, enable modules (within entitlement limits),
-              configure HR foundation data, and assign roles. Employees and managers use the workspace
-              sidebar navigation to reach authorized modules. Super-admin users access the platform
-              console at /super-admin with permission-gated navigation items.
-            </Prose>
+            <SubTitle>{s.structure.howOperateTitle}</SubTitle>
+            <Prose>{s.structure.howOperate}</Prose>
           </Section>
 
-          <Section id="tenancy" title="Multi-Tenant Organization Management">
-            <Prose>
-              Tenancy is implemented through workspaces. Each workspace represents a customer
-              organization with its own users, departments, modules, and operational data. The platform
-              tenant registry links workspace profiles to subscription metadata, renewal intelligence,
-              health evaluation, usage intelligence, and entitlement overrides.
-            </Prose>
+          <Section id="tenancy" title={s.tenancy.title}>
+            <Prose>{s.tenancy.p1}</Prose>
             <CardGrid>
-              <FeatureCard icon={Database} title="Tenant registry">
-                Super-admin Tenants console: lifecycle transitions, subscription association,
-                commercial posture, and operational health signals per tenant.
+              <FeatureCard icon={Database} title={s.tenancy.tenantRegistry.title}>
+                {s.tenancy.tenantRegistry.text}
               </FeatureCard>
-              <FeatureCard icon={CreditCard} title="Subscription visibility">
-                Workspace admins with tenant.subscription.read can view read-only subscription status,
-                enabled modules, quotas, and enforcement labels — without in-app payment processing.
+              <FeatureCard icon={CreditCard} title={s.tenancy.subscription.title}>
+                {s.tenancy.subscription.text}
               </FeatureCard>
             </CardGrid>
-            <SubTitle>SaaS packaging</SubTitle>
-            <Prose>
-              A commercial module catalog (hr_core, payroll, attendance, workflows, integrations,
-              analytics, self_service, and others) supports plan-based entitlements and operator
-              overrides with reason and confirmation. Overrides control access; they do not execute
-              payroll or payments inside the entitlement registry itself.
-            </Prose>
+            <SubTitle>{s.tenancy.saasTitle}</SubTitle>
+            <Prose>{s.tenancy.saas}</Prose>
           </Section>
 
-          <Section id="organization" title="Company & Organizational Structure">
-            <Prose>
-              Within a workspace, organizational structure is managed through departments and groups.
-              The users module provides the employee directory. HR employee records support organizational
-              attributes including branch and work location linkage via foundation data (work locations,
-              positions, employment statuses and types).
-            </Prose>
+          <Section id="organization" title={s.organization.title}>
+            <Prose>{s.organization.p1}</Prose>
             <CardGrid>
-              <FeatureCard icon={Building2} title="Departments & groups">
-                Department CRUD and group membership for team-based collaboration and permission scoping.
+              <FeatureCard icon={Building2} title={s.organization.deptGroups.title}>
+                {s.organization.deptGroups.text}
               </FeatureCard>
-              <FeatureCard icon={Users} title="User provisioning">
-                Admin invitation by email, direct user creation, pending invitations reconciled at
-                login, and password reset from workspace administration.
+              <FeatureCard icon={Users} title={s.organization.provisioning.title}>
+                {s.organization.provisioning.text}
               </FeatureCard>
             </CardGrid>
-            <Prose>
-              Users without a workspace assignment see a dedicated blocking screen rather than partial
-              access — maintaining clear tenancy boundaries at login.
-            </Prose>
+            <Prose>{s.organization.p2}</Prose>
           </Section>
 
-          <Section id="hcm" title="Workforce & HR Operations">
-            <Prose>
-              The Human Resources module is the HCM hub. Routes include /hr (dashboard), /hr/employees,
-              employee detail and provisioning, /admin/hr/foundation, /admin/hr/services, admin form
-              builder, and /hr/reports (report center).
-            </Prose>
-            <BulletList items={HR_CAPABILITIES} />
+          <Section id="hcm" title={s.hcm.title}>
+            <Prose>{s.hcm.p1}</Prose>
+            <BulletList items={s.hcm.capabilities} />
             <div className="mt-4 rounded-md border border-amber-200/50 bg-amber-50/50 dark:bg-amber-950/20 px-4 py-3 text-sm text-muted-foreground">
-              <strong className="text-foreground">Module dependencies:</strong> {HCM_DEPENDENCIES}
+              <strong className="text-foreground">{s.hcm.depsLabel}</strong> {s.hcm.deps}
             </div>
           </Section>
 
-          <Section id="self-service" title="Employee Self-Service">
-            <FeatureCard icon={ConciergeBell} title="Employee portal (/self-service)">
-              <BulletList
-                items={[
-                  "Leave requests (/self-service/leave)",
-                  "Attendance clock and history (/self-service/attendance)",
-                  "Payslip access (/self-service/payslips) with payroll permission rules",
-                  "Dynamic HR form submissions",
-                  "Approval items routed into the self-service experience",
-                  "Gated by self_service.view and enabled self-service module",
-                ]}
-              />
+          <Section id="self-service" title={s.selfService.title}>
+            <FeatureCard icon={ConciergeBell} title={s.selfService.portalTitle}>
+              <BulletList items={s.selfService.bullets} />
             </FeatureCard>
-            <Prose>
-              Legacy /forms routes redirect to self-service, consolidating employee-facing HR
-              interactions in one portal.
-            </Prose>
+            <Prose>{s.selfService.p1}</Prose>
           </Section>
 
-          <Section id="attendance-payroll" title="Attendance, Leave & Payroll Operations">
+          <Section id="attendance-payroll" title={s.attendancePayroll.title}>
             <CardGrid>
-              <FeatureCard icon={Clock} title="Time & attendance">
-                Admin: /admin/hr/attendance, workforce operations, attendance import pipelines, and
-                attendance integration sources. Employee self-service clock-in/out and daily status.
+              <FeatureCard icon={Clock} title={s.attendancePayroll.attendance.title}>
+                {s.attendancePayroll.attendance.text}
               </FeatureCard>
-              <FeatureCard icon={ClipboardCheck} title="Leave management">
-                Canonical leave APIs with employee submission and manager/HR approval paths connected
-                to the approvals fabric.
+              <FeatureCard icon={ClipboardCheck} title={s.attendancePayroll.leave.title}>
+                {s.attendancePayroll.leave.text}
               </FeatureCard>
-              <FeatureCard icon={CreditCard} title="Payroll">
-                /admin/hr/payroll and run detail pages; payroll operations console; pay period close,
-                attendance lock, payroll lock, calculate/approve/finalize; payslip PDF generation and
-                secure download tokens.
+              <FeatureCard icon={CreditCard} title={s.attendancePayroll.payroll.title}>
+                {s.attendancePayroll.payroll.text}
               </FeatureCard>
-              <FeatureCard icon={Lock} title="Payroll confidentiality">
-                Salary amounts masked when the viewer lacks hr.payroll.view, calculate, approve, or
-                related permissions — supporting segregation of duties.
+              <FeatureCard icon={Lock} title={s.attendancePayroll.confidentiality.title}>
+                {s.attendancePayroll.confidentiality.text}
               </FeatureCard>
             </CardGrid>
           </Section>
 
-          <Section id="collaboration" title="Collaboration & Daily Operations">
+          <Section id="collaboration" title={s.collaboration.title}>
             <CardGrid>
-              <FeatureCard icon={Ticket} title="Tickets">
-                List, create, detail with comments, activity timeline, CC users, and embedded approvals.
+              <FeatureCard icon={Ticket} title={s.collaboration.tickets.title}>
+                {s.collaboration.tickets.text}
               </FeatureCard>
-              <FeatureCard icon={Mail} title="Messages">
-                Internal threads with unread counts and full-width messaging layout.
+              <FeatureCard icon={Mail} title={s.collaboration.messages.title}>
+                {s.collaboration.messages.text}
               </FeatureCard>
-              <FeatureCard icon={CalendarDays} title="Calendar">
-                Team events with RSVP.
+              <FeatureCard icon={CalendarDays} title={s.collaboration.calendar.title}>
+                {s.collaboration.calendar.text}
               </FeatureCard>
-              <FeatureCard icon={Bell} title="Notifications">
-                Notification center with read and bulk actions (core module).
+              <FeatureCard icon={Bell} title={s.collaboration.notifications.title}>
+                {s.collaboration.notifications.text}
               </FeatureCard>
             </CardGrid>
           </Section>
 
-          <Section id="administration" title="Administrative Control & Centralized Administration">
-            <SubTitle>Workspace administration</SubTitle>
-            <BulletList
-              items={[
-                "Module enablement with dependency validation (HR root for payroll, attendance, self-service, report-center)",
-                "Custom roles and permission keys (resource.action pattern)",
-                "Workspace settings, theme, language (EN/AR), and profile management",
-                "Workspace SMTP configuration",
-                "Integrations page and platform stabilization diagnostics for module governance",
-                "Workspace governance dashboard (read-only health, metrics, stuck workflows, alerts)",
-              ]}
-            />
-            <SubTitle>Platform administration (/super-admin)</SubTitle>
+          <Section id="administration" title={s.administration.title}>
+            <SubTitle>{s.administration.workspaceTitle}</SubTitle>
+            <BulletList items={s.administration.workspaceBullets} />
+            <SubTitle>{s.administration.platformTitle}</SubTitle>
             <CardGrid>
-              {PLATFORM_CONSOLE_AREAS.map((area) => (
+              {s.administration.platformAreas.map((area) => (
                 <FeatureCard key={area.title} title={area.title}>
                   {area.text}
                 </FeatureCard>
@@ -406,151 +271,85 @@ export default function AboutPlatformPage() {
             </CardGrid>
           </Section>
 
-          <Section id="security" title="Security, Access Management & Role Governance">
-            <Prose>
-              Authentication uses employee number and password with bcrypt hashing and JWT bearer
-              tokens. The requireAuth middleware loads user status, role, workspace, platform role,
-              and root-owner flags on each request.
-            </Prose>
-            <SubTitle>Workspace roles</SubTitle>
+          <Section id="security" title={s.security.title}>
+            <Prose>{s.security.p1}</Prose>
+            <SubTitle>{s.security.workspaceRolesTitle}</SubTitle>
             <div className="space-y-3">
-              {WORKSPACE_ROLES.map((r) => (
+              {s.security.workspaceRoles.map((r) => (
                 <div key={r.role} className="rounded-md border border-border px-4 py-3">
                   <span className="font-medium text-foreground">{r.role}</span>
                   <span className="text-muted-foreground text-sm"> — {r.desc}</span>
                 </div>
               ))}
             </div>
-            <SubTitle>Platform roles (super_admin users)</SubTitle>
-            <BulletList items={PLATFORM_ROLES} />
-            <Prose>
-              Platform routes use requirePlatformPermission middleware aligned with the platform
-              permission matrix. Root platform owner accounts are protected: other administrators
-              cannot reset credentials or change email from platform user management; the owner uses
-              My Account (/super-admin/account) for self-service profile and password updates.
-            </Prose>
+            <SubTitle>{s.security.platformRolesTitle}</SubTitle>
+            <BulletList items={s.security.platformRoles} />
+            <Prose>{s.security.p2}</Prose>
           </Section>
 
-          <Section id="visibility" title="Dashboard & Operational Visibility">
+          <Section id="visibility" title={s.visibility.title}>
             <CardGrid>
-              <FeatureCard icon={LineChart} title="Workspace dashboard">
-                /dashboard — activity and statistics for authorized users (dashboard.view).
+              <FeatureCard icon={LineChart} title={s.visibility.dashboard.title}>
+                {s.visibility.dashboard.text}
               </FeatureCard>
-              <FeatureCard icon={Shield} title="Governance">
-                Workspace /governance — operational health console. Platform /super-admin/governance —
-                audit integrity, violations, workflows analytics, topology, evidence packages.
+              <FeatureCard icon={Shield} title={s.visibility.governance.title}>
+                {s.visibility.governance.text}
               </FeatureCard>
-              <FeatureCard icon={Network} title="Activity & events">
-                Workspace activity timeline; platform activity and audit/event log for operators.
+              <FeatureCard icon={Network} title={s.visibility.activity.title}>
+                {s.visibility.activity.text}
               </FeatureCard>
             </CardGrid>
           </Section>
 
-          <Section id="workflows" title="Workflow & Process Management">
-            <FeatureCard icon={GitFork} title="Workflows module">
-              <BulletList
-                items={[
-                  "/workflows — workflow list and builder",
-                  "/workflows/:id — workflow detail, versions, and execution context",
-                  "Event-driven steps: notifications, approvals, tasks, conditions, assignments",
-                  "Integration with tickets, HR services, forms, and approval queues",
-                  "Super-admin governance analytics over workflow health and dependencies",
-                ]}
-              />
+          <Section id="workflows" title={s.workflows.title}>
+            <FeatureCard icon={GitFork} title={s.workflows.cardTitle}>
+              <BulletList items={s.workflows.bullets} />
             </FeatureCard>
           </Section>
 
-          <Section id="documents" title="Document & Media Management">
-            <BulletList
-              items={[
-                "Ticket and HR employee document attachments",
-                "Report center exports, schedules, and archive-oriented outputs",
-                "Commercial invoice PDF upload and tenant billing invoice download (read-only portal)",
-                "Payroll payslip PDF generation with controlled download tokens",
-                "Branding asset upload with image validation and processing for platform identity",
-              ]}
-            />
+          <Section id="documents" title={s.documents.title}>
+            <BulletList items={s.documents.bullets} />
           </Section>
 
-          <Section id="branding" title="Branding & White-Label Capabilities">
-            <FeatureCard icon={Palette} title="Platform identity settings">
-              Configurable platform name (default Data Core Center), organization name, logo, favicon,
-              primary color, tagline, support email, and website URL. Public pages (DCCHOME,
-              /about-platform, sign-in) load branding via PlatformBrandingHead. White-label partners
-              can adapt presentation while retaining the same operational core.
+          <Section id="branding" title={s.branding.title}>
+            <FeatureCard icon={Palette} title={s.branding.cardTitle}>
+              {s.branding.text}
             </FeatureCard>
           </Section>
 
-          <Section id="experience" title="Responsive Cross-Platform Experience & Mobile Compatibility">
+          <Section id="experience" title={s.experience.title}>
             <CardGrid>
-              <FeatureCard icon={Smartphone} title="Responsive web">
-                Mobile sheet navigation for workspace and super-admin sidebars; lg breakpoint for
-                persistent desktop sidebar; stacked layouts and touch-friendly controls on narrow
-                screens.
+              <FeatureCard icon={Smartphone} title={s.experience.responsive.title}>
+                {s.experience.responsive.text}
               </FeatureCard>
-              <FeatureCard icon={Globe} title="English & Arabic">
-                i18next with dynamic document direction (RTL for Arabic) in workspace experiences;
-                platform super-admin console defaults to English layout for cross-tenant consistency.
+              <FeatureCard icon={Globe} title={s.experience.i18n.title}>
+                {s.experience.i18n.text}
               </FeatureCard>
             </CardGrid>
-            <Prose>
-              Delivery is a responsive web application — not a native mobile app in the current
-              repository. High-frequency employee actions (approvals, attendance, self-service) are
-              accessible via mobile browsers.
-            </Prose>
+            <Prose>{s.experience.p1}</Prose>
           </Section>
 
-          <Section id="saas" title="Enterprise Scalability & SaaS Architecture Direction">
-            <Prose>
-              Scalability is supported through workspace isolation, toggleable modules, quota modeling,
-              stateless API services, and platform-side tenant governance. Module governance prevents
-              invalid enablement orders; workspace access write guards can block mutations under
-              read-only enforcement during maintenance.
-            </Prose>
-            <Prose>
-              Contract-first OpenAPI drives Zod validation and generated React Query clients, reducing
-              integration drift between UI and API as the platform evolves.
-            </Prose>
+          <Section id="saas" title={s.saas.title}>
+            <Prose>{s.saas.p1}</Prose>
+            <Prose>{s.saas.p2}</Prose>
           </Section>
 
-          <Section id="integration" title="Integration & API Readiness">
-            <FeatureCard icon={Plug} title="Implemented integration surfaces">
-              <BulletList
-                items={[
-                  "OpenAPI specification as the contract source of truth with codegen workflow",
-                  "Attendance import pipelines and attendance integration sources",
-                  "Workspace integrations administration page",
-                  "HR employee import template, preview, and confirm flow",
-                  "Server-sent events stream for authenticated real-time UI updates",
-                  "Commercial and tenant APIs for operator systems (manual commercial records)",
-                ]}
-              />
+          <Section id="integration" title={s.integration.title}>
+            <FeatureCard icon={Plug} title={s.integration.cardTitle}>
+              <BulletList items={s.integration.bullets} />
             </FeatureCard>
           </Section>
 
-          <Section id="future" title="Automation, AI Readiness & Future Expansion">
-            <Prose>
-              Operational automation today is delivered through workflows, approvals, notifications,
-              scheduled reports, and governance analytics. The commercial entitlement catalog includes
-              ai_automation and advanced_analytics module codes for higher-tier packaging — indicating
-              direction for assisted operations under explicit administrative policy when implemented.
-            </Prose>
-            <Prose>
-              Catalog modules such as recruitment, onboarding, performance, LMS, and tenant-scoped
-              governance_console represent packaging and roadmap alignment; adoption depends on
-              entitlement and implementation maturity per module.
-            </Prose>
-            <SubTitle>Future mobile application direction</SubTitle>
-            <Prose>
-              Native mobile applications may follow for clock events, approvals, and notifications,
-              using the same permission model as the web client. Current investment prioritizes
-              responsive web access.
-            </Prose>
+          <Section id="future" title={s.future.title}>
+            <Prose>{s.future.p1}</Prose>
+            <Prose>{s.future.p2}</Prose>
+            <SubTitle>{s.future.mobileTitle}</SubTitle>
+            <Prose>{s.future.mobile}</Prose>
           </Section>
 
-          <Section id="value" title="What Clients Gain">
+          <Section id="value" title={s.value.title}>
             <div className="space-y-6">
-              {CLIENT_OUTCOMES.map((block) => (
+              {s.value.outcomes.map((block) => (
                 <div key={block.title} className="rounded-lg border border-border overflow-hidden">
                   <div className="px-5 py-3 bg-muted/40 border-b border-border font-semibold text-foreground">
                     {block.title}
@@ -568,12 +367,16 @@ export default function AboutPlatformPage() {
             </div>
           </Section>
 
-          <Section id="modules" title="Implemented Workspace Modules">
-            <Prose>
-              The following modules are seeded in the platform module registry and can be enabled per
-              workspace (subject to entitlements and dependency rules):
-            </Prose>
-            <ModuleList />
+          <Section id="modules" title={s.modules.title}>
+            <Prose>{s.modules.intro}</Prose>
+            <div className="rounded-lg border border-border divide-y divide-border max-h-[420px] overflow-y-auto">
+              {a.workspaceModules.map((m) => (
+                <div key={m.name} className="px-4 py-3 hover:bg-muted/30 transition-colors">
+                  <p className="font-medium text-sm text-foreground">{m.name}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{m.desc}</p>
+                </div>
+              ))}
+            </div>
           </Section>
 
           <div
@@ -584,25 +387,22 @@ export default function AboutPlatformPage() {
             }}
           >
             <img src={LOGO_URL} alt="" aria-hidden className="mx-auto w-28 h-auto mb-4 opacity-90" />
-            <p className="text-lg font-semibold text-foreground">Data Core Center</p>
-            <p className="text-sm text-muted-foreground mt-2 max-w-lg mx-auto">
-              Enterprise operational capability built on real modules, routes, and governance already
-              in the platform.
-            </p>
+            <p className="text-lg font-semibold text-foreground">{a.cta.tagline}</p>
+            <p className="text-sm text-muted-foreground mt-2 max-w-lg mx-auto">{a.cta.subtitle}</p>
             <div className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-3">
               <Link
                 href="/sign-in"
                 className="inline-flex h-11 items-center justify-center rounded-md px-8 text-sm font-semibold text-white"
                 style={{ background: "linear-gradient(90deg, #004080 0%, #007bff 100%)" }}
               >
-                Authorized sign-in
-                <ChevronRight className="w-4 h-4 ml-1" />
+                {a.cta.signIn}
+                <Trail className={cn("w-4 h-4", isRtl ? "me-1" : "ms-1")} />
               </Link>
               <Link
                 href="/dcc-home"
                 className="inline-flex h-11 items-center justify-center rounded-md border border-border px-8 text-sm font-medium hover:bg-accent transition-colors"
               >
-                Back to home
+                {a.cta.home}
               </Link>
             </div>
           </div>
@@ -610,7 +410,7 @@ export default function AboutPlatformPage() {
       </main>
 
       <footer className="border-t border-border px-4 sm:px-6 lg:px-12 py-8 text-center text-xs text-muted-foreground">
-        <p>Data Core Center — access restricted to authorized personnel.</p>
+        <p>{a.footer}</p>
       </footer>
     </div>
   );
