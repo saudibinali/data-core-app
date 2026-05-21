@@ -9,16 +9,28 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ShieldCheck, KeyRound, Mail, User, Loader2, CheckCircle2 } from "lucide-react";
 
-interface PlatformMe {
+interface AuthMeResponse {
+  id: number;
+  email: string | null;
+  fullName: string;
+  role: string;
+  mustResetPassword: boolean;
+  isRootOwner?: boolean;
+  platformRoleCode?: string | null;
+  platformJobTitle?: string | null;
+  platformDepartment?: string | null;
+  platformPhone?: string | null;
+  phoneNumber?: string | null;
+}
+
+interface AccountView {
   id: number;
   email: string;
   displayName: string;
   isRootOwner: boolean;
-  isProtected: boolean;
-  effectivePlatformRoleCode: string | null;
-  jobTitle: string | null;
-  department: string | null;
-  phone: string | null;
+  jobTitle: string;
+  department: string;
+  phone: string;
   mustResetPassword: boolean;
 }
 
@@ -28,13 +40,31 @@ function apiErrorMessage(body: unknown, status: number): string {
   return parts.length > 0 ? parts.join(" — ") : `Request failed (${status})`;
 }
 
+function mapAuthMe(data: AuthMeResponse): AccountView {
+  const isLegacyRoot =
+    data.role === "super_admin" &&
+    (data.platformRoleCode === null || data.platformRoleCode === undefined) &&
+    !data.isRootOwner;
+  return {
+    id: data.id,
+    email: data.email ?? "",
+    displayName: data.fullName ?? "",
+    isRootOwner: Boolean(data.isRootOwner) || isLegacyRoot,
+    jobTitle: data.platformJobTitle ?? "",
+    department: data.platformDepartment ?? "",
+    phone: data.platformPhone ?? data.phoneNumber ?? "",
+    mustResetPassword: Boolean(data.mustResetPassword),
+  };
+}
+
 export default function SuperAdminAccountPage() {
   const { user: authUser, refreshUser } = useAppAuth();
   const apiFetch = useApiFetch();
   const { toast } = useToast();
 
-  const [me, setMe] = useState<PlatformMe | null>(null);
+  const [me, setMe] = useState<AccountView | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [displayName, setDisplayName] = useState("");
   const [jobTitle, setJobTitle] = useState("");
@@ -51,31 +81,54 @@ export default function SuperAdminAccountPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordSaving, setPasswordSaving] = useState(false);
 
+  const applyAccount = useCallback((account: AccountView) => {
+    setMe(account);
+    setDisplayName(account.displayName);
+    setJobTitle(account.jobTitle);
+    setDepartment(account.department);
+    setPhone(account.phone);
+    setNewEmail(account.email);
+    setLoadError(null);
+  }, []);
+
   const loadMe = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const res = await apiFetch("/api/platform/me");
+      const res = await apiFetch("/api/auth/me");
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(apiErrorMessage(err, res.status));
       }
-      const data = (await res.json()) as PlatformMe;
-      setMe(data);
-      setDisplayName(data.displayName ?? "");
-      setJobTitle(data.jobTitle ?? "");
-      setDepartment(data.department ?? "");
-      setPhone(data.phone ?? "");
-      setNewEmail(data.email ?? "");
+      const data = (await res.json()) as AuthMeResponse;
+      if (data.role !== "super_admin") {
+        throw new Error("Forbidden — My Account is for the platform super administrator only. (SUPER_ADMIN_ONLY)");
+      }
+      applyAccount(mapAuthMe(data));
     } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      setLoadError(msg);
+      if (authUser?.role === "super_admin") {
+        applyAccount({
+          id: authUser.id,
+          email: authUser.email ?? "",
+          displayName: authUser.fullName ?? "",
+          isRootOwner: Boolean(authUser.isRootOwner),
+          jobTitle: "",
+          department: "",
+          phone: authUser.phoneNumber ?? "",
+          mustResetPassword: Boolean(authUser.mustResetPassword),
+        });
+      }
       toast({
         variant: "destructive",
-        title: "Could not load account",
-        description: e instanceof Error ? e.message : "Unknown error",
+        title: "Could not load full account",
+        description: msg,
       });
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, toast]);
+  }, [apiFetch, toast, applyAccount, authUser]);
 
   useEffect(() => {
     void loadMe();
@@ -84,7 +137,7 @@ export default function SuperAdminAccountPage() {
   async function saveProfile() {
     setProfileSaving(true);
     try {
-      const res = await apiFetch("/api/platform/me/profile", {
+      const res = await apiFetch("/api/auth/me/profile", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -100,7 +153,7 @@ export default function SuperAdminAccountPage() {
       }
       toast({ title: "Profile updated", description: "Your profile information was saved." });
       await loadMe();
-      await refreshUser?.();
+      await refreshUser();
     } catch (e) {
       toast({
         variant: "destructive",
@@ -115,7 +168,7 @@ export default function SuperAdminAccountPage() {
   async function saveEmail() {
     setEmailSaving(true);
     try {
-      const res = await apiFetch("/api/platform/me/email", {
+      const res = await apiFetch("/api/auth/me/email", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -128,9 +181,9 @@ export default function SuperAdminAccountPage() {
         throw new Error(apiErrorMessage(body, res.status));
       }
       setEmailCurrentPassword("");
-      toast({ title: "Email updated", description: "Sign in with your new email on next session." });
+      toast({ title: "Email updated", description: "Your sign-in email was updated." });
       await loadMe();
-      await refreshUser?.();
+      await refreshUser();
     } catch (e) {
       toast({
         variant: "destructive",
@@ -153,7 +206,7 @@ export default function SuperAdminAccountPage() {
     }
     setPasswordSaving(true);
     try {
-      const res = await apiFetch("/api/platform/me/change-password", {
+      const res = await apiFetch("/api/auth/change-password", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ currentPassword, newPassword }),
@@ -167,7 +220,7 @@ export default function SuperAdminAccountPage() {
       setConfirmPassword("");
       toast({ title: "Password updated", description: "Your password was changed successfully." });
       await loadMe();
-      await refreshUser?.();
+      await refreshUser();
     } catch (e) {
       toast({
         variant: "destructive",
@@ -179,7 +232,7 @@ export default function SuperAdminAccountPage() {
     }
   }
 
-  if (loading) {
+  if (loading && !me) {
     return (
       <div className="flex items-center justify-center min-h-[40vh] text-muted-foreground gap-2">
         <Loader2 className="w-5 h-5 animate-spin" />
@@ -198,6 +251,14 @@ export default function SuperAdminAccountPage() {
           Manage your platform sign-in credentials and profile. Only you can change this account.
         </p>
       </div>
+
+      {loadError && me ? (
+        <Alert className="border-amber-300 bg-amber-50 dark:bg-amber-950/30">
+          <AlertDescription>
+            Some account details could not be refreshed from the server. You can still edit and save below. ({loadError})
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {me?.mustResetPassword && (
         <Alert className="border-amber-300 bg-amber-50 dark:bg-amber-950/30">

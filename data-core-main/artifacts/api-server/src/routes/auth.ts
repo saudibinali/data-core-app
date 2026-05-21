@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { db } from "@workspace/db";
 import { usersTable, departmentsTable, workspaceCustomRolesTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type AuthRequest, requireAuth } from "../middlewares/requireAuth";
 import { isProtectedPlatformAccount } from "../lib/root-platform-owner-policy";
@@ -12,6 +12,11 @@ import {
   validatePasswordAgainstPolicy,
   passwordPolicyErrorMessage,
 } from "../lib/platform-password-policy";
+import {
+  validatePlatformSelfProfileUpdate,
+  validatePlatformSelfEmailUpdate,
+  normalizePlatformUserEmail,
+} from "../lib/platform-user-lifecycle";
 
 const router: IRouter = Router();
 
@@ -54,9 +59,29 @@ const meSelect = {
   mustResetPassword: usersTable.mustResetPassword,
   platformRoleCode: usersTable.platformRoleCode,
   isRootOwner: usersTable.isRootOwner,
+  platformJobTitle: usersTable.platformJobTitle,
+  platformDepartment: usersTable.platformDepartment,
+  platformPhone: usersTable.platformPhone,
   createdAt: usersTable.createdAt,
   updatedAt: usersTable.updatedAt,
 };
+
+/** Super Admin self-service (My Account) — only the signed-in super_admin. */
+function requireSuperAdminSelf(req: AuthRequest, res: Response): boolean {
+  if (!req.userId) {
+    res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });
+    return false;
+  }
+  if (req.userRole !== "super_admin") {
+    res.status(403).json({
+      error: "Forbidden",
+      code: "SUPER_ADMIN_ONLY",
+      message: "This action is only available to the platform super administrator account.",
+    });
+    return false;
+  }
+  return true;
+}
 
 function meQuery(userId: number) {
   return db
@@ -131,10 +156,7 @@ router.post("/auth/change-password", requireAuth, async (req: AuthRequest, res: 
     res.status(400).json({ error: "currentPassword and newPassword are required" });
     return;
   }
-  const isPlatformAccount =
-    req.userRole === "super_admin" && (req.workspaceId === null || req.workspaceId === undefined);
-
-  const policy = isPlatformAccount
+  const policy = req.userRole === "super_admin"
     ? await loadPlatformPasswordPolicy()
     : { minLength: 8, requireUppercase: false, requireSpecial: false, requireNumber: false };
 
@@ -156,6 +178,89 @@ router.post("/auth/change-password", requireAuth, async (req: AuthRequest, res: 
   const hash = await bcrypt.hash(newPassword, 12);
   await db.update(usersTable).set({ passwordHash: hash, mustResetPassword: false }).where(eq(usersTable.id, req.userId));
   res.json({ success: true });
+});
+
+/** PATCH /auth/me/profile - super_admin updates own profile */
+router.patch("/auth/me/profile", requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  if (!requireSuperAdminSelf(req, res)) return;
+
+  const payload = req.body as {
+    displayName?: string;
+    jobTitle?: string | null;
+    department?: string | null;
+    phone?: string | null;
+  };
+
+  const validation = validatePlatformSelfProfileUpdate(payload);
+  if (!validation.valid) {
+    res.status(400).json({ error: "Validation failed", codes: validation.errors });
+    return;
+  }
+
+  const updates: Partial<typeof usersTable.$inferInsert> = {
+    updatedAt: new Date(),
+    platformUpdatedBy: req.userId,
+  };
+  if (payload.displayName !== undefined) updates.fullName = payload.displayName.trim();
+  if (payload.jobTitle !== undefined) updates.platformJobTitle = payload.jobTitle?.trim() || null;
+  if (payload.department !== undefined) updates.platformDepartment = payload.department?.trim() || null;
+  if (payload.phone !== undefined) {
+    const p = payload.phone?.trim() || null;
+    updates.platformPhone = p;
+    updates.phoneNumber = p;
+  }
+
+  await db.update(usersTable).set(updates).where(eq(usersTable.id, req.userId!));
+  const [full] = await meQuery(req.userId!);
+  res.json({ success: true, profile: full });
+});
+
+/** PATCH /auth/me/email - super_admin updates own email */
+router.patch("/auth/me/email", requireAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  if (!requireSuperAdminSelf(req, res)) return;
+
+  const payload = req.body as { email?: string; currentPassword?: string };
+  const validation = validatePlatformSelfEmailUpdate(payload);
+  if (!validation.valid) {
+    res.status(400).json({ error: "Validation failed", codes: validation.errors });
+    return;
+  }
+
+  const normalizedEmail = normalizePlatformUserEmail(payload.email!);
+
+  const [user] = await db
+    .select({ passwordHash: usersTable.passwordHash })
+    .from(usersTable)
+    .where(eq(usersTable.id, req.userId!));
+
+  if (!user?.passwordHash) {
+    res.status(400).json({ error: "No password set for this account" });
+    return;
+  }
+
+  const validCurrent = await bcrypt.compare(String(payload.currentPassword), user.passwordHash);
+  if (!validCurrent) {
+    res.status(401).json({ error: "Current password is incorrect" });
+    return;
+  }
+
+  const [duplicate] = await db
+    .select({ id: usersTable.id })
+    .from(usersTable)
+    .where(and(eq(usersTable.email, normalizedEmail), ne(usersTable.id, req.userId!)))
+    .limit(1);
+
+  if (duplicate) {
+    res.status(409).json({ error: "A user with this email already exists", code: "DUPLICATE_EMAIL" });
+    return;
+  }
+
+  await db
+    .update(usersTable)
+    .set({ email: normalizedEmail, updatedAt: new Date(), platformUpdatedBy: req.userId })
+    .where(eq(usersTable.id, req.userId!));
+
+  res.json({ success: true, email: normalizedEmail });
 });
 
 /** POST /auth/reset-password - admin resets another user's password */
