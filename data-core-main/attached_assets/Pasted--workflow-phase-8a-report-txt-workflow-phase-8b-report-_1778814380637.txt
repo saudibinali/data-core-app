@@ -1,0 +1,280 @@
+راجع:
+- workflow-phase-8a-report.txt
+- workflow-phase-8b-report.txt
+- workflow-phase-8c-report.txt
+- workflow-phase-8d-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- runtimeWeightedComplexity
+- operational fragility index
+- trendDirection semantics
+- confidence model
+- hotspot detection
+- governance analytics infrastructure
+
+ثم نفّذ فقط:
+P8-E — Cross-Workflow Comparative Intelligence Foundations
+
+ولا تنفّذ:
+- AI ranking
+- autonomous prioritization
+- auto-remediation
+- distributed ranking systems
+- realtime streaming ranking
+- organization-wide federation
+
+عنوان المهمة:
+WORKFLOW PHASE 8-E — Cross-Workflow Comparative Intelligence & Risk Ranking Foundations
+
+المهمة الحالية:
+تحويل:
+isolated workflow intelligence
+
+إلى:
+workspace-level comparative operational intelligence
+
+الهدف:
+تمكين:
+- workflow risk ranking
+- operational prioritization
+- hotspot concentration visibility
+- comparative fragility analysis
+- governance triage readiness
+
+بطريقة:
+deterministic comparative intelligence engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT INTELLIGENCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- topology intelligence (P8-A)
+- dependency intelligence (P8-B)
+- operational correlation (P8-C)
+- forecast engine (P8-D)
+- governance dashboards
+- trend APIs
+
+حدّد:
+- أين workflows تُحلل بمعزل
+- أين comparative visibility مفقودة
+- أين governance triage غير ممكن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN COMPARATIVE INTELLIGENCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+WorkflowComparativeIntelligence
+
+ليحتوي:
+- comparativeRiskScore
+- runtimeWeightedComplexity
+- projectedComplexity
+- fragilityLevel
+- trendDirection
+- hotspotCount
+- operationalPriority
+- workspaceRank
+- confidenceLevel
+
+مع:
+deterministic ranking semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — COMPARATIVE RISK SCORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+comparativeRiskScore()
+
+يعتمد على:
+- runtimeWeightedComplexity
+- projectedComplexity
+- fragility severity
+- hotspot recurrence
+- degradation trend
+- forecast confidence
+
+مع:
+stable normalized scoring (0–100).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — WORKSPACE RANKING ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+rankWorkflowsByOperationalRisk()
+
+بحيث:
+- يرتب workflows داخل workspace
+- deterministic tie-breaking
+- stable ordering
+- pagination-ready semantics
+
+لكن:
+بدون cross-workspace federation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — OPERATIONAL PRIORITY CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+OperationalPriority
+
+يحتوي:
+- informational
+- watch
+- elevated
+- urgent
+- critical
+
+اعتمد على:
+- comparativeRiskScore
+- trendDirection
+- fragilityLevel
+- hotspot severity
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — HOTSPOT CONCENTRATION ANALYTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اكتشف:
+- workflows dominating operational pressure
+- recurring chronic hotspots
+- storm-heavy workflows
+- fragility concentration zones
+
+اعتمد فقط على:
+existing intelligence layers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+comparative intelligence
+
+داخل:
+- governance dashboards
+- operational consoles
+- workflow listing APIs
+- analytics panels
+
+لكن:
+بدون autonomous actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_comparative_ranking_computed
+
+B)
+workflow_operational_priority_assigned
+
+C)
+workflow_hotspot_concentration_detected
+
+D)
+workflow_risk_escalation_detected
+
+كلها تحتوي:
+- workflowId
+- workspaceId
+- comparativeRiskScore
+- workspaceRank
+- operationalPriority
+- trendDirection
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Comparative intelligence MUST:
+- remain READ-ONLY
+- never mutate workflows
+- never trigger alerts automatically
+- never invoke runtime execution
+- never depend on live runtime state
+
+أي:
+deterministic comparative analytics فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+comparativeRiskScore deterministic
+
+T2:
+workspace ranking stable ordering
+
+T3:
+tie-breaking deterministic
+
+T4:
+operationalPriority classification stable
+
+T5:
+degrading workflows ranked higher
+
+T6:
+confidence penalties reduce ranking
+
+T7:
+hotspot concentration detection stable
+
+T8:
+comparative serialization stable
+
+T9:
+no live runtime dependency required
+
+T10:
+comparative engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- AI ranking
+- autonomous remediation
+- realtime ranking streams
+- distributed federation
+- organization-wide super analytics
+- automatic escalation systems
+
+خلك:
+minimal deterministic comparative intelligence layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-8e-report.txt
+
+ويحتوي:
+- comparative intelligence architecture
+- comparativeRiskScore formulas
+- workspace ranking semantics
+- operational priority model
+- hotspot concentration analytics
+- governance integration points
+- observability additions
+- tests results
+- remaining comparative intelligence gaps
+- readiness assessment قبل proactive governance phase

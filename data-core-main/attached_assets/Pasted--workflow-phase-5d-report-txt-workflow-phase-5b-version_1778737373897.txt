@@ -1,0 +1,243 @@
+راجع:
+- workflow-phase-5d-report.txt
+- workflow-phase-5b-versioning-review.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- immutable publish notes
+- governance lifecycle
+- validation-before-publish
+- activation risks
+- version governance architecture
+
+ثم نفّذ فقط:
+P5-E — Workflow Publish Governance Foundations
+
+ولا تنفّذ:
+- rollback UI
+- simulation engine
+- scheduler
+- DAG runtime
+- retries
+- multi-environment deployments
+
+عنوان المهمة:
+WORKFLOW PHASE 5-E — Immutable Publish Governance & Activation Safety
+
+المهمة الحالية:
+تحويل:
+workflow activation
+
+من:
+mutable state toggle
+
+إلى:
+governed immutable publish lifecycle
+
+الهدف:
+منع:
+- unsafe workflow activation
+- silent production mutations
+- unvalidated publishes
+- activation drift
+- audit ambiguity
+
+بطريقة:
+enterprise-safe publish governance model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ACTIVATION FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- activate workflow route
+- validation integration
+- workflow status lifecycle
+- snapshot behavior
+- current mutable fields
+- active workflow semantics
+
+حدّد:
+- ما الذي ما يزال mutable بعد activation
+- أين توجد publish ambiguities
+- كيف active definitions ما تزال خطيرة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN PUBLISH LIFECYCLE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم lifecycle واضح:
+
+draft
+→ validated
+→ published
+→ deprecated
+
+مع:
+immutable publish semantics.
+
+المطلوب:
+- activation becomes publish
+- publish artifact immutable
+- draft remains editable
+- published copy frozen
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ADD PUBLISH GOVERNANCE METADATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم metadata المطلوبة:
+
+- publishedAt
+- publishedBy
+- publishNotes
+- validationSummary
+- validationHash
+- publishSource
+
+مع:
+audit-safe semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — IMMUTABLE PUBLISH RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم rules تمنع:
+- editing published workflows
+- silent step mutation
+- changing routing after publish
+- changing approval semantics after publish
+
+لكن:
+draft workflows تبقى editable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ACTIVE VERSION POINTER MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+activeVersionId
+أو equivalent model.
+
+المطلوب:
+- workspace execution always resolves published version
+- no execution from mutable draft
+- execution snapshot compatibility
+- future rollback compatibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — VALIDATION-BEFORE-PUBLISH ENFORCEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+publish pipeline
+
+بحيث:
+publish مستحيل إذا:
+- validation errors موجودة
+- governance checks failed
+- unsafe topology detected
+
+لكن:
+warnings/notices لا تمنع publish حالياً.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — AUDIT & OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_publish_started
+
+B)
+workflow_publish_completed
+
+C)
+workflow_publish_blocked
+
+D)
+workflow_deprecated
+
+كلها تحتوي:
+- workflowId
+- workspaceId
+- publishedBy
+- validationSummary
+- version
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — EXECUTION RESOLUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+كيف executeWorkflow()
+يحدد:
+أي نسخة يستخدم.
+
+المطلوب:
+- only published immutable version executable
+- drafts never executable
+- snapshot still captured per execution
+- future rollback-safe resolution
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — GOVERNANCE UX NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف يجب أن يفهم الإدمن:
+- الفرق بين draft/published
+- validation warnings
+- publish risk
+- deprecated workflows
+- immutable history
+
+بدون implementation UI كامل.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- full rollback implementation
+- multi-env promotion
+- git branching
+- collaborative editing
+- simulation engine
+- DAG orchestration
+
+خلك:
+minimal immutable governance lifecycle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — IMPLEMENTATION ROADMAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم التنفيذ القادم إلى:
+- schema foundations
+- publish artifact model
+- immutable enforcement
+- execution resolution
+- deprecation flow
+- audit integration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5e-report.txt
+
+ويحتوي:
+- current activation risks
+- immutable publish lifecycle
+- publish governance model
+- active version resolution strategy
+- immutable enforcement strategy
+- audit/observability strategy
+- execution resolution behavior
+- governance UX recommendations
+- phased implementation roadmap
+- catastrophic risks إذا بقي activation mutable

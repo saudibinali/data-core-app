@@ -1,0 +1,411 @@
+راجع:
+- workflow-phase-14d-report.txt
+- workflow-phase-14c-report.txt
+- workflow-phase-14b-report.txt
+- workflow-phase-14a-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/routes/platform-users.ts
+- artifacts/api-server/src/routes/platform-me.ts
+- artifacts/api-server/src/routes/platform-activity.ts
+- artifacts/api-server/src/lib/platform-permissions.ts
+- artifacts/api-server/src/lib/root-platform-owner-policy.ts
+- artifacts/api-server/src/lib/platform-audit-events.ts
+- artifacts/api-server/src/lib/redact-audit-metadata.ts
+- artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+- artifacts/ops-platform/src/pages/super-admin-activity.tsx
+- artifacts/ops-platform/src/lib/platform-access.ts
+- artifacts/ops-platform/src/lib/platform-audit-config.ts
+- artifacts/ops-platform/src/components/platform-permission-route.tsx
+- artifacts/ops-platform/src/components/layout/super-admin-layout.tsx
+- existing super-admin routes and navigation
+
+ثم نفّذ فقط:
+P14-E — Platform Administration Users Console Finalization
+
+ولا تنفّذ:
+- billing/commercial modules
+- invoice/payment
+- tenant-side billing
+- tenant users
+- customer users
+- HR employee users
+- SSO
+- MFA
+- password reset
+- email invite sending
+- delete user
+- custom role builder
+- permission editor
+- break-glass recovery
+- audit export/delete/edit
+- schema-heavy audit redesign
+
+عنوان المهمة:
+WORKFLOW PHASE 14-E — Platform Administration Users Console Finalization
+
+المهمة الحالية:
+إغلاق Phase 14 بتثبيت Console إدارة مستخدمي المنصة والصلاحيات والنشاط، مع hardening واختبارات ناقصة وتقرير نهائي.
+
+الهدف:
+تسليم Platform Administration Users & Access foundation بشكل جاهز قبل الانتقال إلى Phase 15 Commercial/Billing.
+
+النتيجة المطلوبة:
+- Users & Access page مستقرة
+- Role/Permission Matrix واضحة
+- Root Protection واضح ومغلق
+- Activity/Audit visibility جاهزة
+- Route guards/nav/action gating متناسقة
+- HTTP integration tests الناقصة مضافة
+- لا يوجد scope creep
+- تقرير إغلاق نهائي Phase 14
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW FULL PHASE 14 FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع مخرجات:
+P14-A:
+- Platform User creation
+- status changes
+- root protection policy
+
+P14-B:
+- fixed role matrix
+- permission middleware
+- role update API
+
+P14-C:
+- /platform/me
+- frontend permission helpers
+- route guards
+- nav/action/tab gating
+
+P14-D:
+- platform activity APIs
+- audit taxonomy
+- metadata redaction
+- activity timeline
+- recent user activity
+
+وثق:
+- ما هو مكتمل
+- ما هو مؤجل عمدًا
+- أي technical debt واضح
+- أي risks قبل Phase 15
+
+مهم:
+لا تضف features كبيرة.
+هذه مرحلة إغلاق.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — USERS & ACCESS PAGE FINAL POLISH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع صفحة:
+- /super-admin/platform-users
+
+تأكد من:
+- العنوان واضح:
+  Platform Users & Access — مستخدمو المنصة والصلاحيات
+- جدول المستخدمين واضح
+- badges واضحة:
+  - root
+  - protected
+  - role
+  - status
+- Create Platform User dialog:
+  - لا يحتوي root_platform_owner
+  - validation واضح
+  - رسائل خطأ مفهومة
+- Status Change Panel:
+  - يحتاج reason + confirmation
+  - لا يظهر للـ root/protected
+  - لا يظهر بدون permission
+- Role Change Panel:
+  - يستبعد root_platform_owner
+  - يحتاج reason + confirmation
+  - لا يظهر للـ root/protected
+  - لا يظهر للمستخدم نفسه
+  - لا يظهر إذا target equal/higher privilege
+- Recent Activity:
+  - يظهر فقط لمن يملك platform.activity.read أو audit.read
+  - لا يكسر الصفحة إذا فشل endpoint
+
+مهم:
+لا تضف:
+- password reset
+- delete
+- email change
+- invite email
+- custom roles
+- permission editor
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PLATFORM ACTIVITY PAGE FINAL POLISH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- /super-admin/activity
+
+تأكد من:
+- route guard واضح
+- denied state واضح
+- filters تعمل بدون كسر
+- limit محترم
+- load more يعمل
+- metadata collapsed افتراضيًا
+- metadataSafe فقط المعروض
+- no raw metadata
+- Arabic/English labels موجودة
+- empty/loading/error states واضحة
+
+مهم:
+لا تضف export.
+لا تضف delete/edit.
+لا تضف real-time streaming.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ADD MISSING HTTP INTEGRATION TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف backend HTTP integration tests للـ APIs التالية:
+
+GET /platform/activity
+
+Tests:
+- requires auth
+- denies workspace user
+- allows user with platform.activity.read
+- allows user with audit.read
+- denies user without both
+- filters by action
+- filters by result
+- filters by group
+- filters by severity
+- filters by from/to date
+- paginates newest first
+- redacts metadata secrets
+- returns nextCursor
+- respects limit max 200
+
+GET /platform/users/:userId/activity
+
+Tests:
+- requires auth
+- denies workspace user
+- denies insufficient permission
+- returns 404 for workspace target user
+- returns actor activity
+- returns target activity via metadata.targetUserId
+- redacts metadata secrets
+- respects limit max 100
+- returns nextCursor
+
+مهم:
+إذا test infra ما يدعم HTTP integration بسهولة:
+- أضف route-level handler tests أو supertest حسب pattern الحالي
+- لا تتركها بدون تغطية
+- وثق أي استثناء بوضوح في التقرير
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — PERMISSION CONSISTENCY REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع التناسق بين:
+- backend PLATFORM_ROLE_PERMISSION_MATRIX
+- frontend PLATFORM_ROLE_PERMISSION_MATRIX_CONFIG
+- platform-access.ts
+- navigation requirements
+- route guards
+- API permissions
+
+تأكد:
+- auditor visibility متناسق:
+  - audit.read
+  - platform.activity.read
+- finance_admin لا يرى activity إذا لا يملكها
+- support_admin يرى activity إذا matrix يعطيه platform.activity.read
+- read_only_operator لا يرى activity إذا لا يملكها
+- platform_admin/root يشوفون كل شيء
+
+إذا فيه mismatch:
+- أصلحه في config فقط إذا آمن
+- لا تغير فلسفة الرولات بدون سبب
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ROOT PROTECTION FINAL REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- create user
+- status update
+- role update
+- UI panels
+- activity view
+- policy helpers
+
+تأكد:
+- لا يمكن إنشاء root من UI/API
+- لا يمكن تعيين root من role update
+- لا يمكن تعطيل root
+- لا يمكن قفل root
+- لا يمكن تغيير دور root
+- لا يمكن تغيير root من مستخدم مساوي/أعلى
+- لا يمكن self-promotion
+- لا توجد أزرار:
+  - reset password
+  - delete
+  - email change
+  - assign root
+- كل blocked attempt يسجل audit
+
+لا تضف break-glass الآن.
+فقط وثق أنه مؤجل.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — ROUTE / NAVIGATION HARDENING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- /super-admin/platform-users
+- /super-admin/activity
+- tenant registry
+- tenant console tabs/actions
+- platform settings إذا موجودة
+- event log إذا موجود
+- governance section out-of-scope
+
+تأكد:
+- nav item مخفي بدون permission
+- direct URL يعرض denied state أو backend 403
+- write actions لا تظهر بدون permission
+- backend يرفض حتى لو الواجهة أخفت
+
+لا تكسر صفحات خارج scope.
+وثق out-of-scope pages.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SAFETY CONTRACT FINAL ASSERTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/راجع tests أو import guards تؤكد:
+
+- noPasswordReset
+- noDeleteUser
+- noEmailInviteSending
+- noSso
+- noMfa
+- noCustomRoles
+- noPermissionEditor
+- noAuditDelete
+- noAuditEdit
+- noAuditExport
+- noBillingCommercial
+- noInvoicePayment
+- noTenantUsers
+- noCustomerUsers
+- noHrUsers
+- preserveRootProtection
+- preserveBackendAuthority
+
+كلها true في configs المناسبة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/تأكد من tests تغطي:
+
+T1:
+Users & Access page renders title/table/create/role matrix/recent activity safely
+
+T2:
+Create dialog excludes root_platform_owner
+
+T3:
+Status panel hidden for root/protected
+
+T4:
+Role panel hidden for root/protected/self/equal-higher privilege
+
+T5:
+Recent activity section does not render without platform.activity.read/audit.read
+
+T6:
+Activity page denied state for unauthorized role
+
+T7:
+Activity page filters/timeline/load more render
+
+T8:
+metadataSafe displayed, raw metadata not displayed
+
+T9:
+backend GET /platform/activity HTTP tests complete
+
+T10:
+backend GET /platform/users/:userId/activity HTTP tests complete
+
+T11:
+backend/frontend permission matrix consistency
+
+T12:
+root protection final assertions
+
+T13:
+safety contracts final assertions
+
+T14:
+no forbidden features introduced
+
+T15:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- billing/commercial
+- invoice/payment
+- tenant-side billing
+- tenant users
+- customer users
+- HR employee users
+- password reset
+- delete user
+- email invite sending
+- SSO
+- MFA
+- custom role builder
+- permission editor
+- break-glass recovery
+- audit export/delete/edit
+- SIEM integration
+- real-time audit stream
+- schema-heavy audit redesign
+
+خلك:
+Finalization + hardening + tests + closure فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-14e-report.txt
+
+ويحتوي:
+- full Phase 14 review
+- Users & Access final state
+- Platform Activity final state
+- HTTP integration tests added
+- permission consistency review
+- root protection final review
+- route/navigation hardening
+- safety contract assertions
+- tests results
+- remaining known limitations
+- final readiness assessment for Phase 15

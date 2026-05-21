@@ -1,0 +1,51 @@
+P-HCM2 WORKFLOW PHASE REPORT
+============================
+Date: 2026-05-20
+Phase: P-HCM2 — HCM Foundation Closure
+Status: COMPLETE
+
+OBJECTIVES
+----------
+1. Workspace-driven leave runtime (legacy / transition / canonical)
+2. Employee ↔ user account linking APIs + UI
+3. Canonical leave path production-ready without env-only pilot
+
+DELIVERABLES
+------------
+Backend:
+  - lib/db/drizzle/0020_hcm_workspace_leave_runtime.sql
+  - lib/db/src/schema/hr.ts (leaveRuntimeMode)
+  - lib/hr/hcm-workspace-settings.ts
+  - lib/hr/employee-account-service.ts
+  - routes/hr-employee-account.ts
+  - leave-cutover-flags.ts (resolveLeaveCutoverStatus)
+  - leave-cutover-freeze.ts (async + canonical freeze)
+  - routes/hr.ts settings + async legacy guards
+  - routes/leave.ts status endpoint
+
+Frontend:
+  - hr-employees.tsx — leave runtime in workspace HR settings
+  - hr-employee-detail.tsx — Login Account link/unlink card
+  - lib/leave-cutover-flags.ts — status type extended
+
+Docs:
+  - p-hcm2-hcm-foundation.md
+  - workflow-phase-hcm2-report.txt
+
+Tests:
+  - p-hcm2-foundation.smoke.test.ts (7 cases)
+  - leave-cutover-flags.test.ts (+2 resolve cases)
+
+EXIT CRITERIA
+-------------
+[x] leave_runtime_mode persisted per workspace
+[x] Effective cutover flags exposed via API
+[x] Employee link-user / unlink / account status
+[x] UI for leave mode + account linking
+[x] Smoke tests pass
+
+DEFERRED
+--------
+- Bulk legacy leave migration
+- Unified employee provisioning wizard
+- Finance GL / SCM domains

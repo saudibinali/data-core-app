@@ -1,0 +1,265 @@
+راجع:
+- workflow-phase-4a-report.txt
+- workflow-governance-phase-4-review.txt
+خصوصًا:
+- P4-B section
+- Lazy TTL model
+- execution timeout notes
+- inter-step boundary strategy
+
+ثم نفّذ فقط:
+P4-B — Lazy TTL
+
+ولا تنفّذ أي جزء من:
+- P4-C
+- P4-D
+- P4-E
+- P4-F
+
+عنوان المهمة:
+WORKFLOW PHASE 4-B — Lazy TTL & Stuck Execution Protection
+
+المهمة الحالية:
+إضافة execution timeout protection
+للـ workflow runtime
+بدون إدخال:
+- schedulers
+- queues
+- cron systems
+- distributed timers
+
+الهدف:
+منع:
+- stuck executions
+- zombie workflows
+- endless suspended executions
+
+بطريقة:
+single-process pragmatic architecture
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — SCHEMA CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف إلى:
+workflow_executions
+
+الحقل:
+timeout_at TIMESTAMP NULL
+
+ثم:
+status enum/value:
+أضف:
+timed_out
+
+المطلوب:
+- migration واضحة
+- backward compatible
+- existing rows تبقى سليمة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DEFAULT EXECUTION TTL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+engine.ts
+
+عند إنشاء execution:
+
+احسب:
+timeoutAt = now + DEFAULT_EXECUTION_TTL_HOURS
+
+الافتراضي:
+24 ساعة
+
+المطلوب:
+- configurable constant
+- documented clearly
+- persisted في DB
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — INTER-STEP TTL CHECK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+executor.ts
+
+عند:
+inter-step boundary
+
+(نفس المنطقة التي أصبحت نظيفة بعد P4-A)
+
+أضف:
+
+إذا:
+now > timeout_at
+
+إذًا:
+- execution.status = "timed_out"
+- write structured warning log
+- stop execution safely
+- no throw
+- no partial next-step execution
+
+المطلوب:
+- cooperative timeout
+- current running step finishes first
+- timeout only checked BETWEEN steps
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — TIMEOUT DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/workflows/executions/stuck
+
+المقصود:
+Executions:
+- status = running OR waiting_approval
+- timeout_at < now
+
+المطلوب:
+إرجاع:
+- execution id
+- workflow id/name
+- workspaceId
+- trigger event
+- startedAt
+- timeoutAt
+- computed overdue duration
+- currentStepIndex
+
+filters:
+- workspaceId
+- workflowId
+- overdueMinutes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ADMIN TIMEOUT ACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+POST /api/workflows/executions/:id/timeout
+
+super_admin only.
+
+المطلوب:
+- force status → timed_out
+- structured audit log
+- no hard delete
+- no execution mutation beyond status
+
+إذا execution already terminal:
+- return safe validation error
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OBSERVABILITY INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+- diagnostics APIs تعرض timed_out
+- event timelines لا تنكسر
+- workflow detail APIs تعرض timeout state
+- structured logs تحتوي:
+  executionId
+  workflowId
+  workspaceId
+  timeoutAt
+  overdueMs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+A)
+لا تستخدم:
+setTimeout()
+per execution.
+
+B)
+لا تضف:
+cron
+scheduler
+background workers
+
+C)
+لا تقاطع step أثناء التنفيذ.
+
+D)
+TTL check فقط:
+BETWEEN steps.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+execution times out between steps
+
+T2:
+running step يكمل قبل timeout enforcement
+
+T3:
+terminal executions لا يمكن timeout لها
+
+T4:
+stuck diagnostics endpoint يعيد overdue executions فقط
+
+T5:
+legacy executions بدون timeout_at لا تنكسر
+
+T6:
+timed_out يظهر في diagnostics APIs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- cancellation tokens
+- retries
+- workflow recovery
+- schedulers
+- background sweepers
+- distributed timers
+- queues
+- cron jobs
+- DAG execution
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why TTL is cooperative
+- why timeout only checked between steps
+- why no scheduler exists yet
+- difference between:
+  timed_out
+  failed
+  cancelled (future)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-4b-report.txt
+
+ويحتوي:
+- schema changes
+- timeout lifecycle
+- timeout enforcement behavior
+- diagnostics behavior
+- admin timeout behavior
+- logs behavior
+- tests results
+- edge cases المكتشفة
+- readiness assessment قبل P4-C

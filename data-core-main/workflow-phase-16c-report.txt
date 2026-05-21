@@ -1,0 +1,206 @@
+================================================================================
+WORKFLOW PHASE 16-C — WORKSPACE LIMITS & QUOTAS
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P16-C only — do not start P16-D)
+
+================================================================================
+1. QUOTA CATALOG
+================================================================================
+
+Source: artifacts/api-server/src/lib/workspace-quota-catalog.ts
+
+Quota keys (11):
+  users.max, employees.max, branches.max, storage.gb, documents.max,
+  workflows.max, integrations.max, api.requests.monthly, ai.actions.monthly,
+  reports.max, custom.roles.max
+
+Per-quota fields:
+  key, label, labelAr, unit (count|gb|requests|actions), defaultLimit,
+  warningThresholdPercent (default 80), hardLimitSupported, description,
+  relatedModule (optional)
+
+Rules:
+  - Static/config-driven, extensible
+  - No payment linkage
+  - No hard enforcement in P16-C
+
+================================================================================
+2. DATABASE MODEL
+================================================================================
+
+Table: workspace_quota_limits (lib/db/src/schema/workspace-quota-limits.ts)
+
+Fields:
+  id, workspaceId, subscriptionId (optional), quotaKey, limitValue (nullable),
+  warningThresholdPercent, isHardLimit, source, effectiveFrom, effectiveUntil,
+  reason, internalNotes, createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - unique (workspaceId, quotaKey)
+  - limitValue >= 0 when set; null = unlimited
+  - warningThresholdPercent 1..100
+  - no hard delete — upsert/update only
+  - optional link to workspace_subscriptions (P16-A)
+
+Bootstrap: scripts/apply-p16-tables.cjs (workspace_quota_limits)
+
+================================================================================
+3. USAGE RESOLVER (read-only)
+================================================================================
+
+File: artifacts/api-server/src/lib/workspace-quota-resolver.ts
+
+  resolveWorkspaceQuotaUsage(workspaceId)
+
+Returns per quota:
+  quotaKey, limitValue, currentUsage, usagePercent, status
+  (ok|warning|exceeded|unlimited|unknown), warningThresholdPercent,
+  isHardLimit, source, quotaLimitId, effectiveFrom, effectiveUntil
+
+Usage sources (P16-C):
+  - users.max → users count
+  - employees.max → employees count
+  - branches.max → hr_org_units type=branch
+  - documents.max → hr_employee_documents count
+  - storage.gb → sum(fileSize) / GB (approximate)
+  - workflows.max → workflow_definitions (non-deleted)
+  - custom.roles.max → workspace_custom_roles count
+  - integrations.max, api.requests.monthly, ai.actions.monthly, reports.max → unknown
+
+Behavior:
+  - No mutations, blocks, or enforcement
+  - Default catalog limit when no DB row; DB row with limitValue=null → unlimited
+
+================================================================================
+4. PERMISSIONS ADDED (39 total platform permissions)
+================================================================================
+
+  - platform.quotas.read
+  - platform.quotas.update
+
+Role matrix (additive):
+  - root_platform_owner / platform_admin: read + update
+  - finance_admin: read + update
+  - sales_admin: read only
+  - support_admin / auditor / read_only_operator: read only
+  - workspace_support: none
+
+================================================================================
+5. BACKEND APIs (platform only)
+================================================================================
+
+Router: artifacts/api-server/src/routes/workspace-quotas.ts
+
+  GET  /platform/tenants/:tenantId/quotas/catalog → platform.quotas.read
+  GET  /platform/tenants/:tenantId/quotas         → platform.quotas.read
+  PUT  /platform/tenants/:tenantId/quotas       → platform.quotas.update (bulk upsert)
+  PATCH /platform/tenants/:tenantId/quotas/:quotaLimitId → platform.quotas.update
+  GET  /platform/tenants/:tenantId/quotas/usage → platform.quotas.read
+
+Not implemented:
+  - DELETE quota
+  - Tenant-side quota APIs
+  - Enforcement / login blocking / suspension endpoints
+  - Payment fields
+
+================================================================================
+6. VALIDATION
+================================================================================
+
+  - Tenant must exist
+  - subscriptionId must belong to same workspace
+  - quotaKey must exist in catalog
+  - limitValue >= 0 (null = unlimited)
+  - warningThresholdPercent 1..100
+  - effectiveFrom <= effectiveUntil
+  - reason required when reducing limitValue or enabling isHardLimit (min 10 chars)
+  - isHardLimit only when catalog.hardLimitSupported
+  - Forbidden payload keys: payment, Stripe, checkout, tax, ledger, etc.
+
+================================================================================
+7. AUDIT EVENTS
+================================================================================
+
+  - workspace_quotas_updated
+  - workspace_quota_changed
+  - workspace_quota_change_blocked
+
+Metadata (no secrets): actorId, workspaceId/tenantId, quotaLimitId, quotaKey,
+previousLimit, nextLimit, warningThresholdPercent, isHardLimit, source, reason, timestamp
+
+Group: tenant_quota (platform-audit-events.ts)
+
+================================================================================
+8. FRONTEND — LIMITS & QUOTAS SECTION
+================================================================================
+
+Location: Tenant Registry → Subscription & Entitlements tab
+Component: LimitsQuotasPanel.tsx (via SubscriptionEntitlementsConsole.tsx)
+
+Displays: quota list, limit, current usage, usage %, status badge,
+warning threshold, hard limit flag, source, edit dialog (platform.quotas.update)
+
+Hooks: artifacts/ops-platform/src/hooks/use-workspace-quotas.ts
+  - useTenantQuotaCatalog(tenantId)
+  - useTenantQuotas(tenantId)
+  - useTenantQuotaUsage(tenantId)
+  - useUpdateTenantQuotas()
+  - useUpdateTenantQuota()
+
+React Query keys:
+  - ["platform","tenants",tenantId,"quotas","catalog"]
+  - ["platform","tenants",tenantId,"quotas"]
+  - ["platform","tenants",tenantId,"quotas","usage"]
+
+Safety contract: artifacts/ops-platform/src/lib/quota-model-config.ts
+  (all flags true — indicators only, no enforcement/payment/email)
+
+Forbidden UI: Pay Now, Upgrade Plan, Stripe, Checkout, Auto Suspend,
+Block Login, Delete quota, Cleanup data
+
+================================================================================
+9. SAFETY GUARANTEES (P16-C)
+================================================================================
+
+  quotaModelOnly, usageIndicatorsOnly, noHardEnforcement,
+  noTenantLoginBlocking, noAutomaticSuspension, noDestructiveCleanup,
+  noElectronicPayment, noStripe, noCheckout, noPaymentGateway,
+  noInvoiceGenerationEngine, noTaxCalculation, noZatcaIntegration,
+  noAccountingLedger, noEmailSending, noCustomPermissions,
+  permissionGated, auditQuotaChanges — all true
+
+================================================================================
+10. TESTS
+================================================================================
+
+Backend:
+  - workspace-quota-catalog.test.ts
+  - workspace-quota-resolver.test.ts
+  - workspace-quotas.test.ts (routes, permissions, validation)
+  - platform-permissions.test.ts (39 permissions)
+  - platform-audit-events.test.ts (47 events)
+
+Frontend:
+  - phase-16c-quotas.test.ts (safety contract, permissions, UI, routes)
+
+Results: API vitest P16-C suites PASS; ops-platform phase-16c-quotas PASS
+
+================================================================================
+11. LIMITATIONS (intentional — for P16-D)
+================================================================================
+
+  - No grace period or suspension rule engine
+  - No automatic workspace suspension enforcement
+  - No tenant login blocking on quota exceeded
+  - No API/AI monthly metering (usage unknown until metering added)
+  - No integrations/reports usage source yet
+  - isHardLimit is metadata only — not enforced
+
+================================================================================
+NEXT PHASE (do not start)
+================================================================================
+
+P16-D — Grace Period & Suspension Rules
+
+================================================================================

@@ -1,0 +1,165 @@
+================================================================================
+WORKFLOW PHASE 17-D — Access Review & Audit
+================================================================================
+Status: COMPLETE
+Date: 2026-05-18
+Builds on: P17-A (directory), P17-B (overrides), P17-C (protection)
+Next phase: P17-E — Platform User Invitation / Activation (NOT started)
+
+================================================================================
+1) ACCESS REVIEW SUMMARY RESOLVER
+================================================================================
+File: artifacts/api-server/src/lib/platform-access-review.ts
+Function: buildPlatformAccessReviewSummary()
+
+Returns:
+  totalPlatformUsers, activeUsers, disabledUsers, suspendedUsers,
+  rootOwners, platformOwners, protectedUsers,
+  usersWithCustomOverrides, usersWithCustomGrants, usersWithCustomDenies,
+  usersWithCriticalPermissions, usersMissingRecentReview,
+  highRiskUsers[], staleUsers[], generatedAt
+
+High-risk criteria (risk level high | critical):
+  - isRootOwner → critical
+  - effective platform.permissions.update → critical
+  - protected platform admin (P17-C rules)
+  - effective platform.users.disable / platform.users.role.update
+  - custom grant or deny on critical permission catalog
+  - stale sensitive login (90+ days or never, with sensitive effective perms)
+
+Stale users: same login threshold applied to users with sensitive effective permissions.
+
+================================================================================
+2) USER ACCESS REVIEW DETAIL
+================================================================================
+Function: buildPlatformUserAccessReview(userId)
+
+Returns profile, protectionReasons[], role/grant/deny/effective/critical permissions,
+sensitivePermissionFlags, lastLoginAt, createdAt, lastPermissionChangeAt,
+lastStatusChangeAt, recentAuditEvents[] (sanitized), riskLevel, review metadata,
+generatedAt.
+
+No secrets, no full raw payloads (metadata allowlist + redact-audit-metadata).
+
+Helper: getProtectionReasons() in platform-protected-user.ts
+
+================================================================================
+3) AUDIT QUERY RESOLVER
+================================================================================
+Function: queryPlatformAccessAuditEvents(filters)
+
+Filters: userId, actorId, action, severity, dateFrom, dateTo, permissionCode,
+         blockedOnly, page, pageSize
+
+Source: activity_logs WHERE workspace_id IS NULL
+Actions: ACCESS_REVIEW_AUDIT_ACTIONS (P17-A/B/C + platform_access_review_recorded)
+
+Response: events[] (enriched + sanitized metadata), pagination
+
+================================================================================
+4) REVIEW METADATA (OPTIONAL TABLE — INCLUDED)
+================================================================================
+Table: platform_user_access_reviews
+Schema: lib/db/src/schema/platform-user-access-reviews.ts
+Migration: scripts/apply-p17d-platform-access-reviews.cjs
+
+Fields: platformUserId (unique), reviewedBy, reviewedAt, reviewStatus, reviewNotes
+
+reviewStatus: reviewed | needs_follow_up | exception_accepted
+
+Does NOT change permissions, status, or roles — audit only via
+platform_access_review_recorded.
+
+================================================================================
+5) PERMISSIONS ADDED
+================================================================================
+  platform.accessReview.read
+  platform.accessReview.update
+
+Total platform permission codes: 52
+
+Role matrix (no redesign — additive only):
+  root_platform_owner: read + update
+  platform_admin: read only (update excluded in PLATFORM_ADMIN_PERMISSIONS filter)
+  auditor: read only
+  read_only_operator: read only
+  finance_admin, sales_admin, support_admin, workspace_support: none
+
+================================================================================
+6) BACKEND APIs
+================================================================================
+File: artifacts/api-server/src/routes/platform-access-review.ts
+
+  GET  /platform/access-review/summary          → platform.accessReview.read
+  GET  /platform/access-review/users/:userId    → platform.accessReview.read
+  GET  /platform/access-review/audit-events     → platform.accessReview.read
+  POST /platform/access-review/users/:userId/review → platform.accessReview.update
+
+NOT implemented (by design):
+  approval/reject workflows, emergency access, permission/role/status mutation,
+  password/MFA/SSO, tenant/workspace access review
+
+Registered in artifacts/api-server/src/routes/index.ts
+
+Audit taxonomy extended in platform-audit-events.ts for P17-C protection events
+and platform_access_review_recorded.
+
+================================================================================
+7) FRONTEND — Access Review PAGE
+================================================================================
+Route: /super-admin/access-review
+Page: artifacts/ops-platform/src/pages/super-admin-access-review.tsx
+Hooks: artifacts/ops-platform/src/lib/platform-access-review-hooks.ts
+Config: artifacts/ops-platform/src/lib/platform-access-review-config.ts
+
+Sections:
+  A) Summary cards (9 metrics)
+  B) High-risk users table → opens detail drawer
+  C) User detail drawer: effective/critical permissions, overrides, recent audit
+  D) Audit timeline with filters (user, actor, action, severity, permission, blocked)
+  E) Mark reviewed (root only) — reviewStatus + notes
+
+Nav: super-admin-layout + platform-access.ts nav key "access-review"
+
+Forbidden UI absent: Approve/Reject, Emergency/Break Glass, Force Change,
+Grant/Deny from this page, role/status/password/MFA/SSO controls.
+
+================================================================================
+8) SAFETY CONTRACT
+================================================================================
+ACCESS_REVIEW_SAFETY_CONTRACT — all 13 flags true (api + ops import-time check)
+
+================================================================================
+9) TESTS
+================================================================================
+API: artifacts/api-server/src/lib/__tests__/platform-access-review.test.ts
+     14/14 passed (with platform-permissions suite 80/80)
+
+Ops: artifacts/ops-platform/src/lib/__tests__/phase-17d-access-review.test.ts
+     8/8 passed
+
+Permission counts updated to 52 across phase regression tests.
+
+================================================================================
+10) DATA EXPOSURE BOUNDARIES
+================================================================================
+- Audit metadata: allowlisted keys only in access-review responses
+- parseAndRedactMetadata applied before allowlist
+- No password/token/secret/payload fields returned
+- Review POST stores notes in review table + minimal audit metadata
+
+================================================================================
+11) LIMITATIONS (FOR P17-E)
+================================================================================
+- No invitation email or activation flows
+- No password reset / MFA / SSO management
+- No automated access certification campaigns or scheduled reviews
+- No export/SIEM integration
+- Audit pagination loads up to 500 rows before in-memory filter (acceptable for P17-D)
+
+================================================================================
+12) NEXT: P17-E — Platform User Invitation / Activation
+================================================================================
+Do NOT start P17-E in this deliverable.
+
+================================================================================

@@ -1,0 +1,227 @@
+STABILIZATION REPORT — appEventBus Architecture
+================================================
+Date:    2026-05-13
+Status:  ✅ COMPLETE — all changes applied, TypeScript clean (0 errors), server running
+Scope:   EventBus structural fixes before any new feature migration work begins
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT WAS FIXED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FIX 1 — Removed notification.created and workflow.executed from the event catalog
+  File:    lib/core-events/src/events.ts
+           lib/core-events/src/constants.ts
+           lib/core-events/src/index.ts
+  Problem: notification.created is an infrastructure side-effect, not a domain
+           event.  workflow.executed is a meta event that — if re-emitted on
+           appEventBus — would cause the bridge to forward it to eventDispatcher
+           which would trigger the WorkflowEngine on it, creating an infinite loop.
+           Neither event had an emitter or a listener in production code; they
+           were dead entries in the type catalog.
+  Action:  Removed both payload interfaces, TypedEvent aliases, EVENT_TYPES
+           entries, EventTypeMap entries, AnyTypedEvent members, and index.ts
+           re-exports.  Added detailed JSDoc explaining the rationale so they
+           are not accidentally re-introduced.
+  Risk if  notification.created: SSE push system that needs bus-based fanout —
+  reverted: re-introduce only when cycle detection exists.
+           workflow.executed: same — implement cycle detection first.
+
+
+FIX 2 — Enriched TicketStatusChangedPayload with title and createdByUserId
+  File:    lib/core-events/src/events.ts
+           artifacts/api-server/src/routes/tickets.ts
+  Problem: The notifications-bus.ts ticket.status_changed listener was issuing
+           a DB SELECT to fetch ticket.title and ticket.createdByUserId before
+           it could build the notification message.  The emitter (tickets.ts)
+           already has both values at emit-time: title from .returning() and
+           createdByUserId from the pre-update fetch.  The extra DB round-trip
+           was unnecessary and added latency on every status change.
+  Action:  Added title: string and createdByUserId: number to
+           TicketStatusChangedPayload.  Updated the emit in tickets.ts to
+           include both fields.  Updated the listener to read from payload
+           instead of querying.
+  Benefit: -1 DB SELECT per ticket status-change notification.
+
+
+FIX 3 — Canonical dual-emit policy in tickets.ts PATCH handler
+  File:    artifacts/api-server/src/routes/tickets.ts
+  Problem: The previous code ALWAYS emitted TICKET_UPDATED even for status-only
+           changes (e.g. closing a ticket without editing anything else).  This
+           caused:
+             • Spurious "ticket_updated" activity log rows on status-only PATCHes
+             • Double writes to workspace_event_logs (updated + status_changed)
+             • Double WorkflowEngine evaluations on status-only changes
+             • activity.ts listener had to branch on "status" in changes — a
+               semantic anti-pattern that mixed two concerns in one listener.
+  Action:  Implemented four explicit rules (Rule 1–4):
+             Rule 1: status-only change → emit TICKET_STATUS_CHANGED only
+             Rule 2: status + other fields → emit BOTH events
+             Rule 3: other fields only → emit TICKET_UPDATED only
+             Rule 4: nothing changed → emit nothing
+  Impact:  Status-only PATCHes now produce exactly 1 event (status_changed).
+           Mixed-field PATCHes still produce 2 events (both).
+           Empty PATCHes produce 0 events (previously produced 1).
+
+
+FIX 4 — Dedicated ticket.status_changed listener in activity.ts
+  File:    artifacts/api-server/src/lib/events/listeners/activity.ts
+  Problem: The TICKET_UPDATED listener in activity.ts branched on
+           "status" in event.data.changes to write a "status_changed" row.
+           With the canonical dual-emit policy this branch was wrong:
+             • Under Rule 1, ticket.updated is NOT emitted for status-only
+               changes — so the status_changed activity row was NEVER written.
+             • Under Rule 2 (both emitted), the status_changed row would
+               only be written inside the ticket.updated listener, making
+               activity.ts responsible for a concern owned by status_changed.
+  Action:  Added a dedicated TICKET_STATUS_CHANGED listener that exclusively
+           writes action = "status_changed" with metadata = "prev -> next".
+           Removed the "status" branch from the TICKET_UPDATED listener.
+           ticket.updated now handles assignee + field changes only.
+
+
+FIX 5 — Notification type unification: "assigned" → "ticket_assigned"
+  File:    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+  Problem: ticket.created listener wrote type = "ticket_assigned".
+           ticket.updated listener wrote type = "assigned".
+           Two different type strings for the same semantic concept broke
+           frontend notification grouping/filtering.
+  Action:  Changed ticket.updated listener to write type = "ticket_assigned".
+  Note:    Existing "assigned" rows in the notifications table are NOT
+           retroactively updated.  A data migration SQL is documented:
+             UPDATE notifications SET type = 'ticket_assigned' WHERE type = 'assigned';
+           Run this once the frontend is updated to use a single type string.
+
+
+FIX 6 — Removed DB query from ticket.status_changed notification listener
+  File:    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+  Problem: Listener fetched ticket from DB to get createdByUserId and title.
+           These are now in the payload (see FIX 2).
+  Action:  Removed ticketsTable import and DB SELECT from the listener.
+           Values now read directly from event.data.
+
+
+FIX 7 — Extracted shared IdempotencyGuard class
+  File:    artifacts/api-server/src/lib/events/idempotency.ts  (created)
+  Problem: activity.ts and notifications-bus.ts each defined their own local
+           IdempotencyGuard class — identical implementations duplicated in two
+           files with risk of drift.
+  Action:  Extracted to a shared module.  Both listener files import the class
+           and instantiate their OWN guard (not a shared singleton).  Each file
+           must have an independent guard so that activity.ts and
+           notifications-bus.ts can both process the same event.id without one
+           blocking the other.
+
+
+FIX 8 — check-workflow-triggers script
+  File:    scripts/src/check-workflow-triggers.ts (created)
+           scripts/package.json (new script entry)
+  Problem: Legacy event names in workflow_definitions.trigger_event will cause
+           workflows to silently never fire after the canonical rename.
+  Action:  Script queries the table for any of the four known legacy names.
+           Dry-run by default; pass --migrate to apply the rename SQL in a
+           transaction.  Also flags "condition review required" rows where
+           approval.approved / approval.rejected → approval.completed rename
+           changes semantics (outcome field now carries the distinction).
+  Result:  Ran against live DB — 0 rows found (safe, no migration needed).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CHANGED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  NEW
+    artifacts/api-server/src/lib/events/idempotency.ts
+    scripts/src/check-workflow-triggers.ts
+
+  MODIFIED
+    lib/core-events/src/events.ts
+    lib/core-events/src/constants.ts
+    lib/core-events/src/index.ts
+    artifacts/api-server/src/lib/events/listeners/activity.ts
+    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+    artifacts/api-server/src/routes/tickets.ts
+    scripts/package.json
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  TypeScript (pnpm run typecheck)
+    ✅ 0 errors — all 4 packages clean
+       libs:                        tsc --build        ✓
+       artifacts/api-server:        tsc --noEmit       ✓  (16.8s)
+       artifacts/ops-platform:      tsc --noEmit       ✓  (26.9s)
+       artifacts/mockup-sandbox:    tsc --noEmit       ✓  (14.3s)
+       scripts:                     tsc --noEmit       ✓  (8.4s)
+
+  DB migration check (pnpm --filter @workspace/scripts run check-workflow-triggers)
+    ✅ 0 legacy trigger_event rows found — no DB migration required
+
+  API server
+    ✅ Restarted and running
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING RISKS & OPEN ITEMS (not addressed in Stabilization)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RISK-01  In-memory dedup only — IdempotencyGuard loses state on server restart.
+         If the API server restarts mid-request (e.g. during deploy), an event
+         that partially succeeded may be re-processed.
+         Fix: Persist processed event IDs to a DB table or Redis with TTL.
+
+RISK-02  No dead-letter queue — failed listeners swallow errors (logged only).
+         A permanent DB failure in a listener will silently drop activity rows
+         or notifications with no retry.
+         Fix: Add a DLQ table; retry failed events with exponential backoff.
+
+RISK-03  No bus-level error boundary — if a listener throws synchronously
+         (not caught by try/catch), it propagates to the EventBus emit() caller.
+         Current listeners are all async and wrap in try/catch; risk is new
+         contributors adding a sync throw.
+         Fix: Add a global error boundary in EventBus.emit() that wraps each
+         listener call in try/catch.
+
+RISK-04  Data migration pending — existing "assigned" notification rows have a
+         different type string from new "ticket_assigned" rows.
+         Action: Run UPDATE notifications SET type = 'ticket_assigned'
+           WHERE type = 'assigned';
+         Coordinate with frontend update to normalise the type field in UI.
+
+RISK-05  BUG-001 — "leave.requested" registered twice in registry.ts:
+         once under module "hr" and once under module "forms" with different
+         schemas.  Documented in events.ts.  Fix in a dedicated ticket.
+
+RISK-06  employee.created and form.submitted listeners are READY but have no
+         emitter.  They will never fire until the corresponding routes add
+         appEventBus.emit().  Not a bug today; becomes a risk if someone
+         removes the legacy path before adding the bus emit.
+         Action: Add emitters in admin.ts + hr.ts in a dedicated migration ticket.
+
+RISK-07  ticket.commented is NOT on the bus.  Comment notifications are still
+         written inline in comments.ts.  This is intentional (kept legacy);
+         document in the backlog for future migration.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEXT RECOMMENDED STEPS (in priority order)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. Data migration: UPDATE notifications SET type = 'ticket_assigned'
+     WHERE type = 'assigned';
+     Coordinate with frontend change to use a single type string for filtering.
+
+  2. Migrate employee.created emitter: add appEventBus.emit() to admin.ts
+     + remove the legacy notifications.ts EMPLOYEE_CREATED block in the same commit.
+
+  3. Persist IdempotencyGuard state to DB/Redis for cross-restart safety.
+
+  4. Add global error boundary to EventBus.emit() to protect against sync throws.
+
+  5. Fix BUG-001: remove duplicate leave.requested entry in registry.ts.
+
+  6. Migrate ticket.commented to the bus + remove inline insert in comments.ts.
+
+  7. Design and implement a DLQ for permanently-failed listener events.

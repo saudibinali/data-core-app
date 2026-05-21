@@ -1,0 +1,472 @@
+راجع:
+- workflow-phase-12h-final-report.txt
+- workflow-phase-11g-final-report.txt
+- بنية المشروع المحفوظة الخاصة بـ:
+  - Multi-Tenant Infrastructure
+  - Platform Core
+  - Admin Console
+  - Authentication & Identity
+  - User Management
+  - Permissions & Security
+
+ثم نفّذ فقط:
+P13-A — Platform Tenant Registry & Workspace Inventory Foundations
+
+ولا تنفّذ:
+- billing provider integration
+- payment processing
+- automatic suspension
+- destructive tenant actions
+- workspace deletion
+- HR employee management
+- payroll/recruitment/attendance modules
+- tenant self-service admin
+- external invoicing
+- legal notices
+
+عنوان المهمة:
+WORKFLOW PHASE 13-A — Platform Tenant Registry & Workspace Inventory Foundations
+
+المهمة الحالية:
+تأسيس سجل مركزي للمستأجرين والـ Workspaces داخل السوبر أدمن.
+
+الهدف:
+تمكين:
+- platform tenant registry
+- workspace inventory visibility
+- tenant ownership metadata
+- workspace operational status visibility
+- subscription metadata placeholders
+- plan/module visibility foundations
+- platform-level tenant search/filtering
+
+بطريقة:
+deterministic platform administration foundation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TENANT / WORKSPACE STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع الموجود حاليًا في المشروع بخصوص:
+- workspaces
+- tenants
+- organizations
+- accounts
+- users
+- roles
+- platform admin routes
+- super-admin UI
+- existing database schema
+- existing API patterns
+- existing audit/event patterns
+
+حدّد:
+- هل يوجد Workspace model فعلي؟
+- هل يوجد Tenant model؟
+- هل العلاقة بين user و workspace واضحة؟
+- هل يوجد owner/admin للمستأجر؟
+- هل يوجد status للـ workspace؟
+- هل يوجد plan/subscription metadata؟
+- أين أفضل مكان لإضافة Platform Tenant Registry؟
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN TENANT REGISTRY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم أو وسّع model باسم:
+
+PlatformTenantProfile
+
+ليحتوي:
+- tenantId
+- workspaceId
+- workspaceName
+- tenantDisplayName
+- primaryOwnerUserId
+- primaryOwnerEmail
+- tenantStatus
+- workspaceStatus
+- planCode
+- subscriptionStatus
+- billingPeriodStart
+- billingPeriodEnd
+- trialEndsAt
+- gracePeriodEndsAt
+- region
+- dataResidency
+- createdAt
+- updatedAt
+- lastActivityAt
+- riskSignalSummary
+- moduleSummary
+- usageSummary
+
+مهم:
+إذا بعض الحقول غير متوفرة الآن:
+- أضفها كـ nullable/readiness fields
+- لا تخترع billing فعلي
+- لا تربط payment provider
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — TENANT STATUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+
+TenantStatus
+
+يدعم:
+- provisioning
+- active
+- trial
+- grace_period
+- suspended
+- archived
+- locked
+- pending_activation
+
+مع:
+strict deterministic semantics.
+
+مهم:
+لا تجعل status يغير الوصول فعليًا في هذه المرحلة إلا إذا النظام عنده pattern جاهز وآمن.
+الهدف الآن registry/status foundation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — WORKSPACE STATUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+
+WorkspaceOperationalStatus
+
+يدعم:
+- healthy
+- attention
+- degraded
+- restricted
+- suspended
+- archived
+- unknown
+
+يعتمد على:
+- subscription metadata
+- usage indicators
+- recent activity
+- governance risk summary
+- operational health signals
+
+لكن:
+بدون automatic destructive enforcement.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SUBSCRIPTION METADATA FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف foundation فقط لحقول الاشتراك:
+
+SubscriptionStatus:
+- trialing
+- active
+- renewal_due
+- grace_period
+- expired
+- suspended
+- cancelled
+- unknown
+
+SubscriptionPeriod:
+- startAt
+- endAt
+- renewalDueAt
+- trialEndsAt
+- gracePeriodEndsAt
+
+مهم:
+- لا payment provider
+- لا invoices
+- لا charges
+- لا tax logic
+- لا external billing
+- فقط metadata + lifecycle readiness.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PLAN / MODULE SUMMARY FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف readiness structure:
+
+TenantPlanSummary:
+- planCode
+- planName
+- planTier
+- seatLimit
+- storageLimit
+- enabledModules
+- disabledModules
+- restrictedModules
+- customEntitlementsCount
+
+مهم:
+هذه summary فقط.
+التفاصيل العميقة للـ entitlements في P13-D.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — USAGE SUMMARY FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+TenantUsageSummary:
+- activeUsers
+- seatLimit
+- storageUsed
+- storageLimit
+- monthlyApiUsage
+- apiLimit
+- documentsUsed
+- documentsLimit
+- lastCalculatedAt
+
+مهم:
+إذا usage غير موجود الآن:
+- رجّع unknown/null safely
+- لا تعمل حسابات ثقيلة
+- لا تضف jobs الآن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — RISK SIGNAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+TenantRiskSignalSummary:
+- renewalApproaching
+- subscriptionExpired
+- gracePeriodActive
+- usageLimitApproaching
+- usageLimitExceeded
+- governanceWarnings
+- operationalWarnings
+- riskLevel
+
+RiskLevel:
+- none
+- low
+- medium
+- high
+- critical
+- unknown
+
+لكن:
+read-only summary فقط.
+لا تنفذ actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — PLATFORM API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف APIs مثل:
+
+GET /platform/tenants
+GET /platform/tenants/:tenantId
+GET /platform/tenants/:tenantId/summary
+
+بحيث:
+- super-admin only
+- deterministic ordering
+- supports filters:
+  - tenantStatus
+  - subscriptionStatus
+  - planCode
+  - riskLevel
+  - region
+- supports search:
+  - workspaceName
+  - tenantDisplayName
+  - ownerEmail
+- read-only
+- no mutation endpoints الآن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SUPER ADMIN UI FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف صفحة في السوبر أدمن:
+
+Platform Tenants / Workspaces
+
+تحت Platform Administration.
+
+تعرض:
+- tenant registry table
+- workspace name
+- owner
+- status
+- subscription status
+- plan
+- period end
+- risk level
+- usage snapshot
+- modules summary
+- last activity
+- filters/search
+- detail drawer أو detail section read-only
+
+مهم:
+- read-only في P13-A
+- لا أزرار suspend/activate الآن
+- لا delete
+- لا billing actions
+- لا payment actions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الصفحة لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized
+- no results
+- unknown subscription data
+- unknown usage data
+- unknown owner data
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا يوجد pattern للـ structured events:
+أضف events مثل:
+
+- platform_tenant_registry_viewed
+- platform_tenant_profile_viewed
+- platform_tenant_registry_filtered
+
+لكن:
+بدون بيانات حساسة.
+وإذا ما فيه frontend telemetry واضح:
+لا تضف telemetry.
+
+Backend observability:
+- tenant_registry_listed
+- tenant_profile_read
+
+مع:
+- actorId
+- tenantId إن وجد
+- filtersApplied
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Tenant Registry MUST:
+- remain super-admin only
+- remain read-only في P13-A
+- never suspend tenants
+- never delete workspaces
+- never modify subscriptions
+- never expose tenant data cross-scope to غير super-admin
+- never infer legal/billing conclusions
+- fail closed on missing metadata
+
+أي:
+platform tenant visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+tenant registry API super-admin only
+
+T2:
+tenant registry deterministic ordering
+
+T3:
+tenant filters stable
+
+T4:
+tenant search stable
+
+T5:
+tenant profile serialization stable
+
+T6:
+subscription metadata nullable safe
+
+T7:
+usage summary nullable safe
+
+T8:
+risk signal summary deterministic
+
+T9:
+UI table renders
+
+T10:
+UI filters/search render
+
+T11:
+detail section read-only
+
+T12:
+no mutation/delete/suspend/billing/payment actions exist
+
+T13:
+unknown data states render
+
+T14:
+typecheck/build passes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- payment gateway
+- invoice generation
+- automatic suspension
+- tenant deletion
+- workspace archive action
+- subscription mutation endpoints
+- plan editor
+- module entitlement engine
+- HR employee management
+- tenant admin console
+- billing emails
+- legal notices
+
+خلك:
+minimal but complete platform tenant registry foundation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13a-report.txt
+
+ويحتوي:
+- tenant registry architecture
+- tenant/workspace status model
+- subscription metadata foundation
+- plan/module summary foundation
+- usage summary foundation
+- risk signal summary
+- API surface
+- super-admin UI additions
+- observability additions
+- safety guarantees
+- tests results
+- remaining tenant administration gaps
+- readiness assessment قبل Workspace Lifecycle Management

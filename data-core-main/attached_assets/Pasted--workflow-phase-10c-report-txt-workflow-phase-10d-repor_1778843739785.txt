@@ -1,0 +1,281 @@
+راجع:
+- workflow-phase-10c-report.txt
+- workflow-phase-10d-report.txt
+خصوصًا:
+- RecoveryOrchestrationAction
+- orchestration lifecycle
+- rollback guarantees
+- recommendation mapping
+- operator attribution
+- executionNotes
+- conflict prevention
+
+ثم نفّذ فقط:
+P10-E — Controlled Remediation Execution Research & Explicit Operator Confirmation Foundations
+
+ولا تنفّذ:
+- autonomous remediation
+- self-healing systems
+- unattended recovery execution
+- automatic scheduler mutation
+- AI remediation
+- automatic failover
+
+عنوان المهمة:
+WORKFLOW PHASE 10-E — Controlled Remediation Execution Research & Explicit Operator Confirmation Foundations
+
+المهمة الحالية:
+تحويل:
+audit-only orchestration lifecycle
+
+إلى:
+explicit operator-confirmed remediation execution research infrastructure
+
+الهدف:
+تمكين:
+- operator-confirmed remediation execution
+- execution-attempt tracking
+- remediation rollback recording
+- controlled execution semantics
+- execution-readiness experimentation
+
+بطريقة:
+deterministic confirmation-gated remediation layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EXECUTION GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Remaining Resilience Gaps"
+
+خصوصًا:
+- no execution step tracking
+- no remediation confirmation layer
+- no orchestration execution semantics
+- no remediation attempt history
+
+حدّد:
+- أين التنفيذ الفعلي يحدث خارج النظام
+- أين remediation attempts غير موثقة
+- أين rollback outcomes غير محفوظة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN REMEDIATION EXECUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RemediationExecutionAttempt
+
+ليحتوي:
+- executionId
+- actionId
+- workspaceId
+- executionType
+- confirmationMode
+- initiatedBy
+- confirmedBy
+- executedAt
+- executionStatus
+- rollbackStatus
+- executionEvidence
+- executionNotes
+
+مع:
+append-only deterministic execution semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EXPLICIT CONFIRMATION ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+confirmRemediationExecution()
+
+بحيث:
+- يتطلب explicit operator confirmation
+- يمنع unconfirmed execution tracking
+- يسجل execution evidence
+- يدعم rollback-result recording
+- يمنع duplicate active execution attempts
+
+لكن:
+بدون automatic execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EXECUTION TYPES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RemediationExecutionType
+
+يحتوي:
+- scheduler_configuration_review
+- fairness_weight_adjustment
+- containment_boundary_reconfiguration
+- advisory_threshold_tuning
+- workload_pressure_investigation
+- recovery_validation_execution
+- escalation_stabilization
+- operational_intervention
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — EXECUTION LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RemediationExecutionStatus
+
+يحتوي:
+- pending_confirmation
+- confirmed
+- executing
+- completed
+- rolled_back
+- abandoned
+
+مع:
+strict deterministic transitions فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — EXECUTION SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+- confirmation-required execution
+- append-only execution history
+- rollback-result tracking
+- operator attribution mandatory
+- no concurrent execution conflicts
+- audit-safe serialization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+POST /platform/reliability/executions
+POST /platform/reliability/executions/:id/confirm
+POST /platform/reliability/executions/:id/complete
+POST /platform/reliability/executions/:id/rollback
+GET  /platform/reliability/executions
+
+بحيث:
+- super-admin only
+- deterministic ordering
+- append-only execution history
+- audit-safe payloads
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+remediation_execution_created
+
+B)
+remediation_execution_confirmed
+
+C)
+remediation_execution_completed
+
+D)
+remediation_execution_rolled_back
+
+كلها تحتوي:
+- executionId
+- actionId
+- workspaceId
+- executionType
+- executionStatus
+- confirmedBy
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Remediation execution layer MUST:
+- remain operator-confirmed
+- never auto-execute remediation
+- never auto-confirm execution
+- preserve rollback guarantees
+- fail closed on ambiguity
+
+أي:
+human-confirmed remediation tracking فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+execution creation deterministic
+
+T2:
+confirmation required before execution
+
+T3:
+duplicate execution conflicts rejected
+
+T4:
+execution lifecycle transitions deterministic
+
+T5:
+rollback-result tracking preserved
+
+T6:
+append-only execution history guaranteed
+
+T7:
+audit serialization stable
+
+T8:
+super-admin enforcement valid
+
+T9:
+observability events scoped correctly
+
+T10:
+no autonomous remediation execution occurs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- automatic remediation execution
+- self-healing infrastructure
+- autonomous rollback execution
+- AI recovery execution
+- unattended orchestration
+- automatic scheduler balancing
+
+خلك:
+minimal deterministic confirmation-gated remediation infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-10e-report.txt
+
+ويحتوي:
+- remediation execution architecture
+- confirmation semantics
+- execution lifecycle model
+- rollback-result guarantees
+- governance integration points
+- observability additions
+- tests results
+- remaining resilience gaps
+- readiness assessment قبل supervised remediation automation research

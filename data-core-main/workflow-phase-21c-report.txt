@@ -1,0 +1,122 @@
+================================================================================
+WORKFLOW PHASE 21-C — Payroll Calculation Engine & Payslip Generation
+================================================================================
+Date: 2026-05-19
+Status: COMPLETE (engine + payslip scope)
+P21-D NOT STARTED (per instruction)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Delivered PayrollCalculationEngine with decimal-safe component posting,
+preview/final/correction runs, review/approve/lock workflow (no auto-approve),
+canonical payslips with issue numbering, PDF payslip reports with signed
+download, payroll domain events + notifications, and extended export definitions.
+Legacy hr_* payroll process remains transitional coexistence only.
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+payroll calculation engine     : GO
+payslip generation             : GO
+correction workflow            : GO
+payroll review flow            : GO
+enterprise payroll readiness   : PARTIAL (no bank/GL/tax/disbursement)
+
+--------------------------------------------------------------------------------
+CALCULATION ENGINE STATUS
+--------------------------------------------------------------------------------
+PayrollCalculationEngine — preview/final/correction, per-employee recalc
+PayrollInputGatherer — attendance summaries, OT, leave, adjustments
+PayrollComponentCatalog — workspace component codes
+Component posting to payroll_component_values with metadata_json
+Idempotent runs via payroll_runs.idempotency_key
+
+--------------------------------------------------------------------------------
+PAYROLL WORKFLOW STATUS
+--------------------------------------------------------------------------------
+Statuses: draft → calculating → review → approved → locked
+APIs: calculate, submit-review, approve, lock
+Preview runs: editable/recalculatable
+Final runs: immutable after lock; payslips on lock
+Correction runs: corrects_run_id + CORR_DELTA lines (non-destructive)
+
+--------------------------------------------------------------------------------
+PAYSLIP GENERATION STATUS
+--------------------------------------------------------------------------------
+Table: payroll_payslips (migration 0011)
+PayrollPayslipService — draft on approve, issue on lock
+Payslip numbering: PS-{year}-{seq} via hr_workspace_counters
+YTD foundation on payslip.ytd_json
+
+--------------------------------------------------------------------------------
+PDF STATUS
+--------------------------------------------------------------------------------
+Report: hr.payroll.payslip.pdf
+HTML template with AR/EN/bilingual + draft watermark
+Signed JWT download (payslip_dl token, 15 min TTL)
+Stored under report-artifacts + pdf_storage_key
+
+--------------------------------------------------------------------------------
+SECURITY STATUS
+--------------------------------------------------------------------------------
+Existing hr.payroll.* permissions enforced on all new routes
+Salary masking on list/review/payslip endpoints
+Immutable locked final runs
+Break-glass attendance locks unchanged from P21-B
+Audit via logPayrollAccess + domain events
+
+--------------------------------------------------------------------------------
+REPORTING / EXPORT STATUS
+--------------------------------------------------------------------------------
+hr.payroll.register (JSON)
+hr.payroll.components (JSON)
+hr.payroll.payslip.pdf (PDF)
+hr.payroll.payslips.batch (JSON)
+Integrated with export_jobs / generated_reports
+
+--------------------------------------------------------------------------------
+MIGRATION
+--------------------------------------------------------------------------------
+0011_payroll_calculation_payslips.sql
+  - payroll_payslips
+  - payroll_runs: corrects_run_id, review_warnings_json, locked_at, review submit fields
+  - payroll_run_employees: warnings_json, review_status
+  - payroll_component_values: metadata_json
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+pnpm exec vitest run src/lib/payroll/__tests__/
+Unit: payroll-foundation.smoke.test.ts (9 passed)
+Unit: payroll-calculation.smoke.test.ts (proration, idempotency, workflow guard, JWT)
+DB tests: skipped unless DATABASE_URL + migration 0011
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+- Bank / accounting / government exports
+- Full tax engine
+- Legacy UI still on /hr/payroll/runs/:id/process
+- Email delivery for payslip issued
+- Document Registry auto-link for PDF artifacts
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P21-D — Payroll Operations Center & Financial Export Readiness
+
+--------------------------------------------------------------------------------
+CONFIRMATIONS
+--------------------------------------------------------------------------------
+[x] No bank integrations
+[x] No accounting posting
+[x] No government integrations
+[x] No destructive migration
+[x] No ERP redesign
+[x] No salary disbursement automation
+[x] P21-D not started
+
+================================================================================
+END OF REPORT
+================================================================================

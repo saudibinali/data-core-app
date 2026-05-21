@@ -1,0 +1,97 @@
+uploads = []
+
+[[generated]]
+id = "9x5beTtNxkCjO5g7qXY6r"
+uri = "file://artifacts/ops-platform/public/logo.png"
+type = "image"
+title = "minimalist abstract geometric logo"
+
+[[outputs]]
+id = "iXa-w52AJaD15TttQZb5Q"
+uri = "file://platform-overview.txt"
+type = "text"
+title = "نظرة شاملة على المنصة — مايو 2026"
+
+[[outputs]]
+id = "Q_gXTbVUiHNAewrWdodUe"
+uri = "file://architecture-ticket-01-report.txt"
+type = "text"
+title = "Architecture Ticket 01 — Core Shared Packages Report"
+
+[[outputs]]
+id = "kZrrJVE6wS7uylusgd8-C"
+uri = "file://architecture-ticket-02-report.txt"
+type = "text"
+title = "Architecture Ticket 02 — Event Contracts Architecture Report"
+
+[[outputs]]
+id = "1si6xE-QTy41tbkgOkys_"
+uri = "file://architecture-ticket-03-report.txt"
+type = "text"
+title = "Architecture Ticket 03 — Event Bus Implementation Report"
+
+[[outputs]]
+id = "iujaY_CUJLa4aWDf7gdi5"
+uri = "file://architecture-ticket-04-report.txt"
+type = "text"
+title = "Architecture Ticket 04 — Activity Logging Bridge Report"
+
+[[outputs]]
+id = "WceXxqRnbmAD6HIIVuc_-"
+uri = "file://architecture-ticket-05-report.txt"
+type = "text"
+title = "Architecture Ticket 05 — Notification Bridge Report"
+
+[[outputs]]
+id = "ywluUL4v-aHOUodItwZi0"
+uri = "file://leave-domain-validation-report.txt"
+type = "text"
+title = "Leave Domain — Phase 1 Validation Report"
+
+[[outputs]]
+id = "m7eZwnOa6kHbkT7cXx-4X"
+uri = "file://event-observability-architecture-review.txt"
+type = "text"
+title = "Event Observability & Diagnostics — Architecture Review"
+
+[[outputs]]
+id = "06goY3zRtoh_grWOklSbP"
+uri = "file://workflow-phase-8a-report.txt"
+type = "text"
+title = "workflow-phase-8a-report.txt"
+
+[[outputs]]
+id = "rnsCgpgoxbFc4y78akHKN"
+uri = "file://workflow-phase-8b-report.txt"
+type = "text"
+title = "workflow-phase-8b-report.txt"
+
+[[outputs]]
+id = "JPftzmpB0HRihI8QOBp-L"
+uri = "file://.local/reports/P13-E-usage-capacity-intelligence.md"
+type = "text"
+title = "P13-E — Usage Limits, Quotas & Capacity Intelligence — Phase Report"
+
+[[outputs]]
+id = "L6OGBvbi2kwqbZgCgtxUp"
+uri = "file://workflow-phase-13e-report.txt"
+type = "text"
+title = "workflow-phase-13e-report.txt"
+
+[[outputs]]
+id = "7dAJHp8fis2Tgb4TZuUer"
+uri = "file://workflow-phase-13f-report.txt"
+type = "text"
+title = "workflow-phase-13f-report.txt"
+
+[[outputs]]
+id = "azJUHmWv7RsC57Rdz_jSD"
+uri = "file://workflow-phase-13i-report.txt"
+type = "text"
+title = "Phase 13-I Delivery Report"
+
+[[outputs]]
+id = "8k0vbPq23Qj2XIReAWsK4"
+uri = "file://workflow-phase-13j-final-report.txt"
+type = "text"
+title = "Phase 13 — Final Closure Report (P13-J)"

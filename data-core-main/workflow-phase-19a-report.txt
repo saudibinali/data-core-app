@@ -1,0 +1,143 @@
+================================================================================
+WORKFLOW PHASE 19A — WORKSPACE DOCUMENT & COMMUNICATION ARCHITECTURE FOUNDATION
+================================================================================
+Report file: workflow-phase-19a-report.txt
+Date: 2026-05-19
+Status: COMPLETE (architecture / documentation only)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P19-A established enterprise-grade architecture for workspace-scoped document
+storage, communication (email + notifications), reporting/export, and import
+processing. The foundation extends P18 workspace isolation (workspace_id) and
+avoids duplicate portals per p18-a-do-not-duplicate-list.md.
+
+Current platform has strong in-app notifications (event bus + SSE) and ad-hoc
+HR Excel import/export, but lacks unified document registry, per-workspace SMTP,
+async job queues, PDF report generation, and secured upload ACLs.
+
+No migrations, SMTP rollout, storage migration, or file engine code was added.
+
+================================================================================
+FILES CREATED
+================================================================================
+p19-a-workspace-communication-architecture.md
+p19-a-enterprise-document-architecture.md
+p19-a-document-communication-canonical-models.md
+p19-a-reporting-export-architecture.md
+p19-a-import-processing-architecture.md
+p19-a-notification-workflow-integration.md
+p19-a-document-communication-security.md
+p19-a-infrastructure-readiness-audit.md
+workflow-phase-19a-report.txt
+
+================================================================================
+CANONICAL INFRASTRUCTURE DIRECTION
+================================================================================
+Single workspace document registry (documents + document_versions) replacing
+fragmented object_path / storage_path / JSONB attachment patterns.
+
+Communication pipeline: Event → Notification Engine → Queue → Template Engine →
+Workspace SMTP / In-app → delivery tracking → audit.
+
+Job tables: notification_jobs, import_jobs, export_jobs, generated_reports.
+
+Extend notifications table with workspace_id (do not create parallel inbox).
+
+================================================================================
+WORKSPACE SMTP STRATEGY
+================================================================================
+Per-workspace workspace_smtp_configs (encrypted credentials, verified senders).
+Platform env SMTP remains for system mail only.
+Migrate from lib/email.ts env-only pattern to WorkspaceMailer + PlatformMailer.
+Wire or deprecate platform_settings smtp category to avoid split-brain.
+
+================================================================================
+DOCUMENT ARCHITECTURE SUMMARY
+================================================================================
+Lifecycle: Upload → Validate/Scan → Store → Version → Access → Export → Archive
+Storage key: {workspace_id}/{domain}/{entity}/{document_id}/{version}
+Unify: hr_employee_documents, form_submission_files, commercial PDFs, leave
+attachments (future migration).
+AI hooks documented only (OCR, parsing) — not implemented.
+
+================================================================================
+REPORTING / EXPORT STRATEGY
+================================================================================
+Report definitions registry + async export_jobs for large datasets.
+Excel: extend existing xlsx HR patterns.
+PDF: new engine (puppeteer or service) for payroll/compliance — phase P19-B+.
+Scheduled reports via communication layer.
+Download: signed URLs + document_access_logs.
+Activate reports.view permission with real /reports product in later phase.
+
+================================================================================
+IMPORT STRATEGY
+================================================================================
+Standardize HR preview/confirm pattern behind import_jobs.
+Validation + mapping + duplicate detection + dry-run + reconciliation.
+Revert strategy documented (batch id, 24h window) — implementation later.
+Attendance + employee imports first consumers.
+
+================================================================================
+SECURITY CONSIDERATIONS
+================================================================================
+Critical gaps to fix in implementation:
+  - Authenticate presign upload endpoint
+  - Re-enable private object ACL checks
+  - MIME + malware scan before active status
+  - Signed URL TTL + download audit
+PII: confidential classification for HR docs; export authorization chain.
+
+================================================================================
+INFRASTRUCTURE READINESS (GO / PARTIAL / BLOCKED)
+================================================================================
+Workspace isolation:              GO
+In-app notifications:             GO
+Leave event notifications:        GO
+Uploads / presign:                PARTIAL
+HR document metadata:             PARTIAL
+Form files:                       PARTIAL
+Excel export (HR):                PARTIAL
+Import preview/confirm (HR):      PARTIAL
+Workflow notification steps:      PARTIAL
+Email (env SMTP):                 PARTIAL
+Attachment model consistency:     PARTIAL
+Event bus / async emit:           PARTIAL
+
+Unified document registry:        BLOCKED
+Workspace SMTP:                   BLOCKED
+notification_jobs / deliveries:   BLOCKED
+PDF report engine:                BLOCKED
+export_jobs / import_jobs tables: BLOCKED
+Scheduled reports:                BLOCKED
+document_access_logs:             BLOCKED
+Enterprise report UI:             BLOCKED
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P19-B — Workspace SMTP & Notification Infrastructure Implementation
+
+Suggested P19-B scope:
+  - Migrations: workspace_smtp_configs, notification_templates, notification_jobs,
+    notification_deliveries, communication_audit_logs
+  - Wire notifications-bus to job queue
+  - Add workspace_id to notifications
+  - Do NOT yet migrate all documents (P19-C)
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No migrations added
+[x] No SMTP provider rollout
+[x] No storage migration
+[x] No production email sending changes
+[x] No file engine implementation
+[x] Architecture/documentation only
+[x] P19-B not started
+
+================================================================================
+END OF workflow-phase-19a-report.txt
+================================================================================

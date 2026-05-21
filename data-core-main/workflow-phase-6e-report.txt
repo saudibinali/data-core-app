@@ -1,0 +1,315 @@
+═══════════════════════════════════════════════════════════════════════════════
+WORKFLOW PHASE 6-E REPORT
+Governance Dashboard & Operational Console Foundations
+Generated: 2026-05-14
+═══════════════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Build a read-only governance dashboard frontend page that consumes the P6-D
+governance APIs, with pure utility functions, polling, stale detection, and
+passing tests.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DELIVERABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. OPENAPI CONTRACT ADDITIONS
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  lib/api-spec/openapi.yaml                                              │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │  New paths (5):                                                         │
+   │    GET  /governance/health   — tenant health snapshot                   │
+   │    GET  /governance/metrics  — execution metrics                        │
+   │    GET  /governance/stuck    — stuck executions list                    │
+   │    GET  /governance/alerts   — paginated alert list (page/limit params) │
+   │    POST /governance/events   — dashboard observability event (log-only) │
+   │                                                                         │
+   │  New schemas (7):                                                       │
+   │    GovernanceAlertItem  GovernanceHealth   GovernanceMetrics            │
+   │    GovernanceStuckItem  GovernanceStuck    GovernanceAlerts             │
+   │    GovernanceEventBody                                                  │
+   └─────────────────────────────────────────────────────────────────────────┘
+   All schemas follow existing patterns (inline enum constants, optional
+   properties, $ref cross-references). No breaking changes to existing paths.
+
+2. CODE GENERATION
+   Command: pnpm --filter @workspace/api-spec run codegen
+   Output:
+     lib/api-client-react/src/generated/api.ts  — 5 new hooks generated
+     lib/api-zod/src/generated/api.ts            — 7 new Zod schemas generated
+
+   Generated hooks:
+     useGetGovernanceHealth   useGetGovernanceMetrics   useGetGovernanceStuck
+     useGetGovernanceAlerts   usePostGovernanceEvents
+
+3. SERVER-SIDE OBSERVABILITY ENDPOINT
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  artifacts/api-server/src/routes/governance.ts                          │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │  + VALID_DASHBOARD_ACTIONS set (4 action strings validated)             │
+   │  + POST /governance/events handler:                                     │
+   │    - requireAuth + requireWorkspaceAdmin middleware                     │
+   │    - Input validation: action must be in VALID_DASHBOARD_ACTIONS        │
+   │    - Structured req.log.info call with:                                 │
+   │        workspaceId, actorId, visibleAlertCount, visibleStuckCount,      │
+   │        dashboardSeverity, action                                        │
+   │    - ZERO DB writes — purely emits to application log                  │
+   │    - Returns HTTP 204 No Content                                        │
+   └─────────────────────────────────────────────────────────────────────────┘
+   Safety invariant: This endpoint is a log sink, not a governance mutation.
+
+4. PURE UTILITY LIBRARY
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  artifacts/ops-platform/src/lib/governance-utils.ts                    │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │  Functions exported (15):                                               │
+   │    healthSeverityPalette(severity)  → SeverityPalette                  │
+   │    alertSeverityBadge(severity)     → Tailwind class string             │
+   │    stuckSeverityBadge(severity)     → Tailwind class string             │
+   │    stuckReasonLabel(reason)         → Human-readable string             │
+   │    stuckReasonBadge(reason)         → Tailwind class string             │
+   │    formatOverdueMs(ms)              → "Xh Ym" / "Xm Ys" / "Xs"        │
+   │    isCapturedAtStale(iso, now?)     → boolean (injectable clock)        │
+   │    capturedAtAge(iso, now?)         → "30s ago" / "2m ago" / "unknown"  │
+   │    sortAlertsBySeverity(alerts)     → alerts[] (stable, non-mutating)   │
+   │    errorRateToSeverity(rate)        → HealthSeverity                    │
+   │    formatErrorRate(rate)            → "12.3%"                           │
+   │    healthSeverityLabel(severity)    → "Critical" / "Warning" / …       │
+   │    buildDashboardEvent(action, …)   → DashboardObservabilityEvent       │
+   │                                                                         │
+   │  Constants:                                                             │
+   │    STALE_THRESHOLD_MS = 90_000  (3 × 30s polling interval)             │
+   │    SEVERITY_ORDER      = { critical:0, degraded:1, warning:2, … }      │
+   │                                                                         │
+   │  Design constraints:                                                    │
+   │    - No React imports — safe to test in node environment                │
+   │    - No Date.now() side effects — deterministic via injectable `now`    │
+   │    - All sort operations non-mutating (spread before sort)              │
+   │    - Negative count clamping in buildDashboardEvent                     │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+5. GOVERNANCE DASHBOARD PAGE
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  artifacts/ops-platform/src/pages/governance-dashboard.tsx             │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │  Layout (top → bottom):                                                 │
+   │    • Page header: title, stale indicator, "Updated Ns ago", Refresh btn │
+   │    • Tenant Health panel (bordered card, severity-coloured):            │
+   │        5 indicator dimensions  |  Storm + stuck count  |  Error rate   │
+   │    • Execution Metrics grid (7 stat cards):                             │
+   │        Active / Waiting Approval / Waiting Delay / Completed /         │
+   │        Failed / Timed Out / Cancelled                                   │
+   │    • Two-column lower section:                                          │
+   │        Alerts panel (sorted critical-first, count, empty state)        │
+   │        Stuck executions table (ID / WF / Reason / Overdue / Severity)  │
+   │                                                                         │
+   │  Polling model:                                                         │
+   │    All 4 queries: refetchInterval = 30_000 ms                          │
+   │    Stale indicator fires after STALE_THRESHOLD_MS (90s, ≥ 3 cycles)   │
+   │    Manual Refresh button: refetches all 4 + emits refreshed event      │
+   │                                                                         │
+   │  Observability events emitted:                                          │
+   │    governance_dashboard_loaded    — once on first successful data load  │
+   │    governance_dashboard_refreshed — on each manual refresh              │
+   │    governance_alert_viewed        — AlertsPanel first non-loading mount │
+   │    governance_stuck_table_viewed  — StuckPanel first non-loading mount  │
+   │    All 4 call POST /governance/events via usePostGovernanceEvents       │
+   │                                                                         │
+   │  Access control:                                                        │
+   │    usePermissions().isAdmin check → redirects to /home if not admin    │
+   │    Route guard: requiredRoles={["admin", "super_admin"]}                │
+   │                                                                         │
+   │  Safety invariants (READ-ONLY):                                         │
+   │    ✗ No force-timeout buttons                                           │
+   │    ✗ No cancel execution actions                                        │
+   │    ✗ No alert dismissal                                                 │
+   │    ✗ No workflow mutation actions                                       │
+   │    ✓ Truncation notice for stuck list when limit exceeded               │
+   │    ✓ Empty states for healthy workspace (0 alerts / 0 stuck)           │
+   │    ✓ Loading skeletons for all 4 data sections                         │
+   │    ✓ Error states for API failures                                      │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+6. ROUTING & NAVIGATION
+   - Route added in App.tsx:
+       /governance → GovernanceDashboard (requiredRoles: admin, super_admin)
+   - Header title in header.tsx:
+       location.startsWith("/governance") → "Governance Console"
+   - Sidebar: governance is NOT a module-driven item; route is accessible
+     by direct URL navigation (future: can be added as a module by the
+     platform owner via the modules API).
+
+7. TEST INFRASTRUCTURE
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  artifacts/ops-platform/vitest.config.ts (NEW)                         │
+   │    environment: "node"                                                  │
+   │    include: src/**/*.test.ts, src/**/*.test.tsx                         │
+   │    alias: "@" → src/                                                    │
+   │                                                                         │
+   │  artifacts/ops-platform/package.json                                    │
+   │    + "test": "vitest run"                                               │
+   │    + "vitest": "^4.1.6"                                                 │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/lib/__tests__/governance-utils.test.ts
+Result: 76 passed / 0 failed
+
+Test suites (15 describe blocks mapped to 10 core tests + 5 additional):
+
+  T1  Health severity renders correct color palette             (6 cases)
+      ✓ healthy → green   ✓ warning → yellow   ✓ degraded → orange
+      ✓ critical → red    ✓ unknown falls back to green
+      ✓ all 4 severities return SeverityPalette with all 5 required keys
+
+  T2  Alert severity ordering is stable                         (6 cases)
+      ✓ critical < warning < info in SEVERITY_ORDER
+      ✓ sortAlertsBySeverity puts critical first
+      ✓ equal severities preserve original relative order
+      ✓ empty list sorts without error
+      ✓ single alert returned unchanged
+      ✓ input array not mutated
+
+  T3  Stuck table respects truncation semantics                 (4 cases)
+      ✓ stuckSeverityBadge returns different classes for warning vs critical
+      ✓ stuckReasonBadge returns distinct colors for each reason
+      ✓ unknown stuck reason badge → gray fallback
+      ✓ unknown stuck severity badge → gray fallback
+
+  T4  Metrics formatting displays correct values                (5 cases)
+      ✓ formatErrorRate: 0%  50%  100%  12.3%
+      ✓ errorRateToSeverity: all 4 thresholds covered
+      ✓ healthSeverityLabel: 4 values
+
+  T5  Dashboard event construction is read-only and pure        (5 cases)
+      ✓ correct action field
+      ✓ correct counts and severity
+      ✓ synchronous (not a Promise)
+      ✓ deterministic (same inputs → same output)
+      ✓ all 4 action strings are distinct
+
+  T6  Polling refresh — stale state detection                   (4 cases)
+      ✓ fresh capturedAt (< threshold) is not stale
+      ✓ capturedAt 1ms past threshold is stale
+      ✓ capturedAt older than threshold is stale
+      ✓ STALE_THRESHOLD_MS ≥ 90_000ms (3 × 30s polling cycle)
+
+  T7  capturedAt stale indication is deterministic              (4 cases)
+      ✓ same inputs → same result
+      ✓ no Date.now() side effect
+      ✓ unparseable capturedAt → stale
+      ✓ future capturedAt → not stale
+
+  T8  Severity color mapping is deterministic                   (4 cases)
+      ✓ healthSeverityPalette('critical') called twice → identical
+      ✓ alertSeverityBadge is deterministic
+      ✓ stuckSeverityBadge is deterministic
+      ✓ alertSeverityBadge returns distinct classes for all 3 severities
+
+  T9  Empty workspace renders healthy state                     (5 cases)
+      ✓ 0% error rate → healthy severity
+      ✓ healthy palette has green dot
+      ✓ empty alert list sorts without error
+      ✓ 0ms overdue → "0s"
+      ✓ healthSeverityLabel('healthy') → "Healthy"
+
+  T10 Governance API failure handled safely                     (5 cases)
+      ✓ buildDashboardEvent with unknown severity does not throw
+      ✓ isCapturedAtStale("") → true
+      ✓ sortAlertsBySeverity with unknown severity strings does not throw
+      ✓ errorRateToSeverity(NaN) falls back to 'healthy'
+      ✓ formatOverdueMs(-1000) → "0s"
+
+  T11 formatOverdueMs edge cases                                (9 cases)
+  T12 sortAlertsBySeverity stability                            (2 cases)
+  T13 stuckReasonLabel and stuckReasonBadge coverage            (7 cases)
+  T14 capturedAtAge formatting                                  (5 cases)
+  T15 buildDashboardEvent clamps negative counts                (4 cases)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TYPECHECK RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  @workspace/api-server   → 0 errors (full typecheck clean)
+  @workspace/api-spec     → 0 errors (codegen + typecheck:libs clean)
+  @workspace/ops-platform → 0 errors in P6-E files
+                            2 pre-existing errors in workflow-detail.tsx /
+                            workflows.tsx (isActive field on UpdateWorkflowBody —
+                            unrelated to P6-E, carried forward from earlier phase)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ARCHITECTURE NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Contract-first adherence
+  All 5 governance endpoints were added to the OpenAPI spec FIRST, codegen
+  was run, and the dashboard page uses ONLY the generated hooks from
+  @workspace/api-client-react. No raw fetch() calls in the frontend.
+
+Read-only invariant
+  The dashboard contains zero mutation actions (no cancel, no force-timeout,
+  no alert dismissal). The only POST call is POST /governance/events which
+  is a log-only observability sink with no DB writes.
+
+Pure utility layer
+  governance-utils.ts has zero React/DOM imports and is entirely testable in
+  a node environment. The injectable `now: Date` parameter on isCapturedAtStale
+  and capturedAtAge enables deterministic testing without fake timers.
+
+Polling model
+  All 4 queries use TanStack Query's refetchInterval: 30_000. Stale detection
+  at 3× the polling interval (90s) accounts for up to 2 missed poll cycles
+  before surfacing a stale warning to the user.
+
+Observability chain
+  Frontend   →  POST /governance/events
+  Server     →  req.log.info({ workspaceId, actorId, action, counts, severity })
+  P6-D layer →  GET endpoint handlers already emit governance_api_* events
+  Net result →  Dashboard load emits: governance_dashboard_loaded +
+                4× governance_api_* events (one per data query)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MODIFIED
+  lib/api-spec/openapi.yaml
+    + 5 governance paths
+    + 7 governance schemas in components/schemas
+
+  lib/api-client-react/src/generated/api.ts              (codegen)
+  lib/api-zod/src/generated/api.ts                       (codegen)
+
+  artifacts/api-server/src/routes/governance.ts
+    + VALID_DASHBOARD_ACTIONS constant
+    + POST /governance/events handler
+
+  artifacts/ops-platform/src/App.tsx
+    + import GovernanceDashboard
+    + Route /governance
+
+  artifacts/ops-platform/src/components/layout/header.tsx
+    + /governance → "Governance Console" title
+
+  artifacts/ops-platform/package.json
+    + "test": "vitest run" script
+    + "vitest": "^4.1.6" devDependency
+
+CREATED
+  artifacts/ops-platform/src/lib/governance-utils.ts
+  artifacts/ops-platform/src/pages/governance-dashboard.tsx
+  artifacts/ops-platform/src/lib/__tests__/governance-utils.test.ts
+  artifacts/ops-platform/vitest.config.ts
+  workflow-phase-6e-report.txt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS: COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tests:     76 / 76 passed (ops-platform governance-utils)
+Typecheck: 0 new errors introduced by P6-E (2 pre-existing in unrelated files)
+═══════════════════════════════════════════════════════════════════════════════

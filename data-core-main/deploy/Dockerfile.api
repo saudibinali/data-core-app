@@ -1,0 +1,32 @@
+# ── Build stage ────────────────────────────────────────────────────────────
+FROM node:24-alpine AS builder
+WORKDIR /app
+
+# Enable pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# Copy workspace files
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY tsconfig.base.json tsconfig.json ./
+COPY lib/ ./lib/
+COPY artifacts/api-server/ ./artifacts/api-server/
+
+# Install all deps
+RUN pnpm install --frozen-lockfile
+
+# Build shared libs then the server
+RUN pnpm run typecheck:libs
+RUN pnpm --filter @workspace/api-server run build
+
+# ── Runtime stage ──────────────────────────────────────────────────────────
+FROM node:24-alpine
+WORKDIR /app
+
+RUN addgroup -S app && adduser -S app -G app
+
+COPY --from=builder /app/artifacts/api-server/dist ./dist
+
+USER app
+ENV NODE_ENV=production PORT=8080
+EXPOSE 8080
+CMD ["node", "--enable-source-maps", "./dist/index.mjs"]

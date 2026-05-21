@@ -1,0 +1,154 @@
+================================================================================
+WORKFLOW PHASE 18D3 — CANONICAL LEAVE UI CUTOVER & LEGACY FREEZE PLANNING
+================================================================================
+Report file: workflow-phase-18d3-report.txt
+Date: 2026-05-19
+Status: COMPLETE (planning + preparation only)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-D3 audited canonical WRITE readiness, produced UI cutover, legacy freeze,
+data migration, and operational runbook documentation. Added minimal feature
+flags (default OFF), transitional safety tests, and attendance UI warning badges
+for canonical pending rows (approval buttons remain legacy-only). No dual-write,
+no legacy removal, no migration execution, no production freeze or cutover.
+
+================================================================================
+FILES MODIFIED / CREATED
+================================================================================
+Code:
+  artifacts/api-server/src/lib/leave-cutover-flags.ts              (NEW)
+  artifacts/api-server/src/lib/__tests__/leave-cutover-flags.test.ts (NEW)
+  artifacts/ops-platform/src/lib/leave-cutover-flags.ts             (NEW)
+  artifacts/ops-platform/src/pages/hr-attendance.tsx              (warning badge)
+  artifacts/api-server/src/routes/__tests__/leave-cutover.safety.test.ts (NEW)
+
+Documentation:
+  p18-d3-ui-cutover-plan.md
+  p18-d3-legacy-freeze-strategy.md
+  p18-d3-data-migration-execution-plan.md
+  p18-d3-cutover-operational-runbook.md
+  workflow-phase-18d3-report.txt
+
+================================================================================
+1) CANONICAL LEAVE WRITE READINESS AUDIT
+================================================================================
+
+| Area                         | Verdict  | Notes |
+|------------------------------|----------|-------|
+| Submit flow (POST)           | PARTIAL  | Transaction-safe; overlap/balance enforced in leave_requests only; no legacy overlap check; balance skip if leavePolicyId omitted |
+| Approval flow                | PARTIAL  | Single-step; FOR UPDATE; hr.manage not in approve auth (role manager/admin only) |
+| Reject flow                  | PARTIAL  | Releases pending; manager override |
+| Withdraw flow                | GO       | Owner-only; releases pending; bus event |
+| Balances transaction-safe    | PARTIAL  | Canonical path uses FOR UPDATE; legacy path non-transactional in hr.ts |
+| Notifications idempotent     | PARTIAL  | Bus idempotencyKey per action; no dedicated notification dedup audit |
+| Activity/audit               | PARTIAL  | Event bus only; no hr_activity row per leave action |
+| Approval steps stable        | PARTIAL  | Null approver → pending request without step → approve returns 422 NO_STEP |
+| Overlap detection            | PARTIAL  | Canonical table only; legacy overlaps possible (R1) |
+| Insufficient balance         | GO       | 422 when policy+balance row exists |
+
+Overall canonical write stack: PARTIAL — staging-ready with documented gaps; not production cutover ready.
+
+================================================================================
+READINESS VERDICT (GO / PARTIAL / BLOCKED)
+================================================================================
+
+canonical submit:           PARTIAL
+canonical approvals:        PARTIAL
+UI cutover:                 PARTIAL  (plan + flags; D2 bridge live)
+legacy freeze:              BLOCKED  (strategy only; not enforced)
+data migration:             PARTIAL  (plan only; not executed)
+production rollout:         BLOCKED  (by design this phase)
+
+================================================================================
+FRONTEND / UI CUTOVER READINESS
+================================================================================
+- Self-service: read canonical ✓; submit legacy ✓; plan documents D4 switch
+- Attendance: merged list ✓; legacy approve ✓; canonical pending badge ✓
+- Employee detail: merged read ✓; legacy HR add ✓
+- Approval UI for canonical: disabled until VITE_CANONICAL_LEAVE_APPROVE (D4)
+
+================================================================================
+LEGACY FREEZE READINESS
+================================================================================
+- Strategy documented (p18-d3-legacy-freeze-strategy.md)
+- Flag LEGACY_LEAVE_FREEZE defined; routes NOT wired to 410 in D3
+- Rollback via env flip documented
+
+================================================================================
+DATA MIGRATION READINESS
+================================================================================
+- Execution plan: p18-d3-data-migration-execution-plan.md
+- Mapping source: p18-c-legacy-to-canonical-mapping-plan.md
+- Batching, verification, dry-run, reconciliation documented
+- No job executed; no production data changed
+
+================================================================================
+FEATURE FLAGS READINESS
+================================================================================
+API:  leave-cutover-flags.ts (CANONICAL_LEAVE_*, LEGACY_LEAVE_FREEZE)
+UI:   leave-cutover-flags.ts (VITE_* mirror)
+Default: ALL OFF
+Production enablement: NONE
+
+================================================================================
+SMOKE / SAFETY TEST RESULTS
+================================================================================
+leave-cutover-flags.test.ts:     2/2 PASS (unit)
+leave-cutover.safety.test.ts:    6/6 PASS (4 integration + 2 unit, DATABASE_URL)
+Prior P18-D1/D2 leave smokes:    unchanged (14/14 when run together)
+
+Coverage:
+  - no dual-write (legacy POST)
+  - legacy PATCH cannot modify canonical row
+  - legacy PATCH still works for legacy id
+  - HR canonical pending visibility
+  - freeze flag parse readiness (default off)
+
+================================================================================
+REMAINING BLOCKERS (P18-D4)
+================================================================================
+1. Legacy overlap not checked on canonical submit
+2. Approver-null requests without approval step
+3. hr.manage users may not approve canonical without manager role
+4. Legacy balance updates non-transactional until freeze
+5. Duplicate UI rows until migration + dedup
+6. Wire LEGACY_LEAVE_FREEZE to hr.ts 410 responses
+7. Enable canonical submit/approve UI behind flags per pilot workspace
+8. Execute data migration batches with reconciliation sign-off
+
+================================================================================
+ROLLBACK READINESS
+================================================================================
+GO — env flag flip + redeploy; no schema destruction; legacy tables intact.
+Documented in p18-d3-cutover-operational-runbook.md §2, §9.
+
+================================================================================
+PRODUCTION ROLLOUT RISKS
+================================================================================
+- R1/R3: Duplicate rows and double balance if submit cutover before freeze
+- R2: Double approval if both UIs active
+- R7: Balance drift after migration without reconciliation
+- Operational: Stale browser sessions during freeze window
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P18-D4 — Canonical Leave Controlled Production Cutover
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No dual-write implemented
+[x] No legacy tables removed
+[x] No destructive migration run
+[x] No canonical-only production switch
+[x] No payroll / attendance redesign
+[x] No hr.ts split/refactor
+[x] No production freeze applied
+[x] P18-D4 not started
+
+================================================================================
+END OF workflow-phase-18d3-report.txt
+================================================================================

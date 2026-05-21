@@ -1,0 +1,776 @@
+WORKFLOW PHASE 9-E REPORT
+Fairness Orchestration Policy & Controlled Scheduler Governance Foundations
+=============================================================================
+Date:    2026-05-15
+Status:  COMPLETE
+Tests:   1659 passed (29 files) — 0 failures — net +58 assertions over P9-D baseline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-E converts the read-only fairness intelligence from P9-D into controlled
+fairness governance policy infrastructure. Where P9-D gave super-admins a
+platform-wide read-only view of scheduler health, P9-E gives them the tools
+to record, approve, and revert explicit scheduler weight adjustments through
+a strictly human-gated lifecycle.
+
+Before P9-E:
+  • All scheduler fairness signals are advisory-only with no write path.
+  • No persistence of fairness decisions — each read shows a live snapshot.
+  • No audit trail of scheduler weight changes.
+  • No conflict prevention — multiple conflicting adjustments could coexist.
+  • No rollback semantics — no way to record "what was the previous weight."
+  • Platform operator had no governance-grade mechanism to act on P9-D data.
+
+After P9-E:
+  • SchedulerFairnessPolicy — formal typed policy model with full lifecycle.
+  • scheduler_fairness_policies DB table — persistent governance record.
+  • Pure deterministic engine (fairness-policy.ts) with 8 entry points.
+  • 4 new super-admin-only policy lifecycle routes.
+  • Starvation floor guarantee enforced at validation layer (never < 0.25).
+  • Conflict-safe: one active/pending policy per workspace at a time.
+  • Full audit trail: FairnessPolicyAuditEntry on every state transition.
+  • Auto-expiry of stale policies at GET /policies list time.
+  • 4 structured observability events.
+  • Human-approval required: createFairnessPolicy() → "pending";
+    only applyFairnessPolicy() (with approvedBy) makes it "active".
+
+Explicitly excluded (per phase scope):
+  Autonomous balancing, adaptive AI scheduling, realtime orchestration loops,
+  distributed scheduler federation, autoscaling execution clusters,
+  self-healing orchestration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. FAIRNESS POLICY ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-E extends the governance stack with a write-path layer above P9-D:
+
+  P9-A  TenantIsolationContext     — per-request isolation boundary
+  P9-B  TenantWorkloadPartition    — per-workspace advisory scheduler weight
+  P9-C  TenantGovernanceView       — workspace-scoped governance visibility
+  P9-D  PlatformGovernanceOverview — platform-wide read-only control plane
+  P9-E  SchedulerFairnessPolicy    — human-gated weight adjustment governance  ← NEW
+
+The P9-E write path:
+
+  [operator]
+      │
+      ├─① POST /platform/governance/fairness/policies
+      │    Body: { workspaceId, targetSchedulerWeight, adjustmentReason, expiresAt }
+      │    Engine: createFairnessPolicy() → status "pending"
+      │    DB: INSERT scheduler_fairness_policies
+      │    Event: scheduler_fairness_policy_created
+      │
+      ├─② POST /platform/governance/fairness/policies/:id/approve
+      │    Engine: applyFairnessPolicy() → status "active"
+      │    DB: UPDATE ... SET policyStatus="active", approvedBy, approvedAt
+      │    Event: scheduler_fairness_policy_approved
+      │
+      └─③ POST /platform/governance/fairness/policies/:id/rollback
+           Engine: rollbackFairnessPolicy() → status "rolled_back"
+           DB: UPDATE ... SET policyStatus="rolled_back", rollbackEligible=false
+           Event: scheduler_fairness_policy_rolled_back
+
+The P9-E read path:
+
+  [operator]
+      │
+      └─④ GET /platform/governance/fairness/policies
+           DB: SELECT ... ORDER BY createdAt DESC (with optional filters)
+           Auto-expire: UPDATE stale pending/active rows → "expired"
+           Returns: paginated SchedulerFairnessPolicy[], expiredCount
+
+Previous scheduler weight derivation (POST /policies step):
+
+  1. DB: SELECT COUNT(*) FILTER (WHERE status='running') AS active,
+              COUNT(*) FILTER (WHERE status='waiting_delay') AS delayed
+     FROM workflow_executions WHERE workspace_id = :workspaceId
+  2. evaluateWorkloadContainment({ workspaceId, active, delayed })
+     → TenantWorkloadPartition.schedulerWeight (P9-B advisory value)
+  3. This value becomes previousSchedulerWeight in the created policy.
+
+This ensures the "previous" weight is always grounded in a live P9-B evaluation,
+not a manually entered value from the operator.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. ENGINE: artifacts/api-server/src/lib/workflows/fairness-policy.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New file (~370 lines). Pure, deterministic, advisory-only.
+No DB, no async, no mutations, no cross-tenant data leakage.
+
+EXPORTED TYPES (10)
+
+  FairnessPolicyStatus
+    "pending" | "active" | "expired" | "rolled_back" | "rejected"
+    Five lifecycle states. Transitions are one-directional and deterministic.
+
+  FairnessPolicyViolationCode
+    14 typed error codes for all structural violations (see §3).
+    Used as a discriminant for safe error handling in route handlers.
+
+  FairnessPolicyViolation (class)
+    Typed error class — parallel to TenantIsolationViolation from P9-A.
+    Fields: code: FairnessPolicyViolationCode, message: string.
+    Engine throws on all ambiguous or unsafe inputs (fail-closed).
+
+  SchedulerFairnessPolicy (interface)
+    Core policy value object. 12 fields (see §4).
+    Fully JSON-serializable. All timestamps are ISO 8601 strings.
+
+  FairnessPolicyInput
+    Input for createFairnessPolicy(): workspaceId, targetSchedulerWeight,
+    previousSchedulerWeight, adjustmentReason, requestedBy, expiresAt.
+
+  FairnessPolicyValidationResult
+    { valid, errors: string[], warnings: string[] }
+    Returned by validateFairnessPolicyInput(). Non-throwing — callers inspect.
+
+  FairnessPolicyApprovalInput
+    { approvedBy, approvalTime? }
+    Input for applyFairnessPolicy(). approvalTime overrides now (tests).
+
+  FairnessPolicyRollbackInput
+    { rollbackReason?, rollbackTime? }
+    Input for rollbackFairnessPolicy(). rollbackReason is optional.
+
+  FairnessPolicyApplication
+    { policy, appliedWeight, rollbackWeight, auditEntry }
+    Result of applyFairnessPolicy() and rollbackFairnessPolicy().
+
+  FairnessPolicyConflict
+    { hasConflict, conflictingPolicyId?, conflictingStatus? }
+    Result of checkPolicyConflict().
+
+  FairnessPolicyAuditEntry
+    { timestamp, action, policyId, workspaceId, performedBy,
+      fromWeight, toWeight, reason, policyStatus }
+    Immutable audit record of a single state transition.
+
+EXPORTED FUNCTIONS (13)
+
+  makePolicyId(workspaceId)              → "fp:<workspaceId>-<ms>-<seq>"
+  resetPolicySeq()                       — reset sequence counter (tests only)
+
+  validateFairnessPolicyInput(input, validationTime?)
+    → FairnessPolicyValidationResult
+    Runs all 10 validation rules. Non-throwing. Returns errors[] and warnings[].
+
+  createFairnessPolicy(input, creationTime?)
+    → SchedulerFairnessPolicy (status: "pending")
+    Calls validateFairnessPolicyInput, throws FairnessPolicyViolation if invalid.
+    Generates policyId, sets rollbackEligible=true, approvedBy/At=null.
+    Emits scheduler_fairness_policy_created.
+
+  applyFairnessPolicy(policy, approvalInput)
+    → FairnessPolicyApplication (policy.status: "active")
+    Throws if: status ≠ "pending", policy expired, approvedBy empty.
+    Returns new policy object (does NOT mutate input).
+
+  rollbackFairnessPolicy(policy, rollbackInput)
+    → FairnessPolicyApplication (policy.status: "rolled_back")
+    Throws if: status ≠ "active", rollbackEligible = false.
+    Returns new policy object with rollbackEligible=false.
+    appliedWeight = previousSchedulerWeight (restores prior advisory weight).
+
+  expireFairnessPolicy(policy)
+    → SchedulerFairnessPolicy (status: "expired")
+    Throws if: policy already in terminal state (expired/rolled_back/rejected).
+    Sets rollbackEligible=false.
+
+  checkPolicyConflict(existingPolicies, workspaceId)
+    → FairnessPolicyConflict
+    Returns hasConflict=true if any policy for workspaceId is pending/active.
+    Pure — does not mutate existingPolicies array.
+
+  isPolicyExpired(policy, now?)         → boolean
+    Returns true if now ≥ policy.expiresAt (does not check status).
+
+  buildFairnessPolicyAuditEntry(input)  → FairnessPolicyAuditEntry
+
+  emitPolicyCreatedEvent(policy)        — scheduler_fairness_policy_created
+  emitPolicyApprovedEvent(policy, audit) — scheduler_fairness_policy_approved
+  emitPolicyRolledBackEvent(policy, audit) — scheduler_fairness_policy_rolled_back
+  emitPolicyExpiredEvent(policy)        — scheduler_fairness_policy_expired
+
+EXPORTED CONSTANTS (6)
+
+  SCHEDULER_WEIGHT_FLOOR           = 0.25  (starvation floor — never below)
+  SCHEDULER_WEIGHT_CEILING         = 1.00  (maximum allowed weight)
+  ALLOWED_POLICY_WEIGHTS           = [0.25, 0.50, 0.75, 1.00]
+  MAX_POLICY_DURATION_DAYS         = 30    (max policy lifetime from creation)
+  MIN_POLICY_DURATION_MINUTES      = 5     (minimum useful approval window)
+  MAX_ADJUSTMENT_REASON_LENGTH     = 500   (chars)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FAIRNESS GOVERNANCE RULES & SAFETY CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+10 validation rules enforced by validateFairnessPolicyInput():
+
+Rule 1 — Workspace identity
+  workspaceId must be a positive integer (> 0).
+  Code: INVALID_WORKSPACE_ID
+
+Rule 2 — Discrete weight values only
+  targetSchedulerWeight must be one of ALLOWED_POLICY_WEIGHTS [0.25, 0.50, 0.75, 1.00].
+  Fractional values like 0.33 or 0.49 are rejected.
+  Code: INVALID_SCHEDULER_WEIGHT
+
+Rule 3 — Starvation floor
+  targetSchedulerWeight may not be below SCHEDULER_WEIGHT_FLOOR (0.25).
+  Mirrors the P9-B starvation guarantee: no workspace is denied minimum share.
+  Code: WEIGHT_BELOW_STARVATION_FLOOR
+
+Rule 4 — Weight ceiling
+  targetSchedulerWeight may not exceed SCHEDULER_WEIGHT_CEILING (1.00).
+  Code: WEIGHT_ABOVE_CEILING
+
+Rule 5 — No-op prevention
+  targetSchedulerWeight must differ from previousSchedulerWeight.
+  A policy that changes nothing is semantically invalid — it creates false
+  governance state without any advisory effect.
+  Code: NO_OP_WEIGHT_UNCHANGED
+
+Rule 6 — Adjustment reason required
+  adjustmentReason must be a non-empty string, max 500 chars.
+  Code: MISSING_ADJUSTMENT_REASON
+
+Rule 7 — Operator identity required
+  requestedBy must be a non-empty string.
+  Every policy must be traceable to a specific operator.
+  Code: MISSING_OPERATOR_IDENTITY
+
+Rule 8 — Valid expiry timestamp
+  expiresAt must parse as a valid ISO 8601 datetime.
+  Code: INVALID_EXPIRY_TIMESTAMP
+
+Rule 9 — Minimum expiry window
+  expiresAt must be at least MIN_POLICY_DURATION_MINUTES (5 min) in the future.
+  A policy that expires in seconds before it can be approved is meaningless.
+  Code: INVALID_EXPIRY_TOO_SOON
+
+Rule 10 — Maximum expiry window
+  expiresAt must not exceed MAX_POLICY_DURATION_DAYS (30 days) from now.
+  Prevents unbounded policy lifetimes that would prevent future adjustments.
+  Code: INVALID_EXPIRY_TOO_FAR
+
+Additional runtime safety checks (in applyFairnessPolicy / rollbackFairnessPolicy):
+
+  POLICY_NOT_PENDING           — attempted approval of non-pending policy
+  POLICY_NOT_ACTIVE            — attempted rollback of non-active policy
+  POLICY_ALREADY_EXPIRED       — attempted approval of expired policy,
+                                  or attempted re-expiry of terminal policy
+  POLICY_NOT_ROLLBACK_ELIGIBLE — rollback when rollbackEligible=false
+  MISSING_OPERATOR_IDENTITY    — approval with empty approvedBy
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. POLICY LIFECYCLE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SchedulerFairnessPolicy — 12 fields:
+
+  policyId                  "fp:<workspaceId>-<ms>-<seq>"    string
+  workspaceId               workspace DB primary key          number
+  targetSchedulerWeight     desired weight [0.25–1.00]        number
+  previousSchedulerWeight   P9-B advisory weight at creation  number
+  adjustmentReason          human-readable rationale          string
+  requestedBy               super-admin creator identity      string
+  approvedBy                super-admin approver identity     string | null
+  approvedAt                ISO 8601 approval timestamp       string | null
+  expiresAt                 ISO 8601 expiry timestamp         string
+  rollbackEligible          can this be rolled back?          boolean
+  policyStatus              lifecycle status (see below)      FairnessPolicyStatus
+  createdAt                 ISO 8601 creation timestamp       string
+
+Status transitions (deterministic, one-directional):
+
+  ┌──────────┐   approve    ┌────────┐   rollback    ┌─────────────┐
+  │ pending  │ ──────────►  │ active │ ────────────► │ rolled_back │
+  └──────────┘              └────────┘               └─────────────┘
+       │                        │
+       │ expire (no approval)   │ expire (active past expiresAt)
+       ▼                        ▼
+  ┌─────────┐             ┌─────────┐
+  │ expired │             │ expired │
+  └─────────┘             └─────────┘
+
+  ┌──────────┐   reject
+  │ pending  │ ────────► ┌──────────┐
+  └──────────┘           │ rejected │  (explicit rejection — future route)
+                         └──────────┘
+
+Terminal states (no further transitions):
+  "expired", "rolled_back", "rejected"
+
+All terminal states set rollbackEligible=false.
+
+State-change authority:
+  "pending" → "active":      requires approvedBy identity (human gate)
+  "active" → "rolled_back":  requires explicit POST rollback call (human gate)
+  "pending"/"active" → "expired": automatic (expiresAt passed, detected at list time
+                                  or approve attempt)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. SCHEDULER ADJUSTMENT CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Adjustment range model:
+
+  0.25 (floor) ←── valid discrete values ───► 1.00 (ceiling)
+       |                                            |
+   SCHEDULER_WEIGHT_FLOOR              SCHEDULER_WEIGHT_CEILING
+
+A policy may adjust in either direction within this range:
+
+  Reducing a workspace's share (containment pressure adjustment):
+    1.00 → 0.75 → 0.50 → 0.25   (each step is one policy)
+
+  Restoring a workspace's share (pressure release):
+    0.25 → 0.50 → 0.75 → 1.00   (each step is one policy)
+
+Not allowed in a single policy:
+  • Skipping values (1.00 → 0.25 directly) — currently accepted if valid discrete value.
+    Platform operators should use sequential policies for gradual adjustments,
+    but there is no technical enforcement of gradual steps.
+
+Conflict prevention (one active/pending policy per workspace):
+  The checkPolicyConflict() function and the route's DB query ensure that a workspace
+  may not have two simultaneous live policies. This prevents:
+    • Two operators submitting conflicting weight targets simultaneously
+    • A pending reduction coexisting with an active increase
+    • Double-rollback scenarios (terminal state sets rollbackEligible=false)
+
+Advisory semantics:
+  "active" status means the targetSchedulerWeight is the operator's advised weight.
+  It does NOT automatically configure the scheduler. The operator is responsible
+  for reading the active policies and applying the weight to their scheduler
+  configuration. This is intentional — there is no automatic enforcement layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ROLLBACK GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Rollback is designed to be unconditionally safe (cannot make scheduler worse):
+
+A) previousSchedulerWeight is always recorded from a live P9-B partition evaluation
+   at policy creation time. It reflects the current advisory weight of the workspace.
+
+B) applyFairnessPolicy() returns rollbackWeight = previousSchedulerWeight, which is
+   the exact value to revert to. The rollback operation restores this value precisely.
+
+C) rollbackFairnessPolicy() returns appliedWeight = previousSchedulerWeight — the
+   weight that becomes advisory-effective after rollback.
+
+D) rollbackEligible = false is set on the returned policy after rollback. This
+   prevents double-rollback and prevents the engine from being called again on
+   the same policy object.
+
+E) DB update sets rollbackEligible=false atomically with policyStatus="rolled_back",
+   so a crashed-and-retried rollback call returns 409 (POLICY_NOT_ACTIVE) rather
+   than silently succeeding a second time.
+
+F) Rollback does not require a second approval — it is a direct operator action.
+   This is intentional: if an active policy is causing harm, the operator should
+   be able to revert immediately without waiting for a second approval gate.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. AUDITABILITY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every state transition produces a FairnessPolicyAuditEntry:
+
+  FairnessPolicyAuditEntry {
+    timestamp:    string   // ISO 8601 of this state change
+    action:       string   // "created" | "approved" | "rolled_back" | "expired" | "rejected"
+    policyId:     string   // policy being changed
+    workspaceId:  number   // workspace being governed
+    performedBy:  string   // operator identity
+    fromWeight:   number   // advisory weight before this action
+    toWeight:     number   // advisory weight after this action
+    reason:       string   // adjustmentReason or rollbackReason
+    policyStatus: string   // resulting status after this action
+  }
+
+The audit entry is:
+  • Returned in all POST route responses (alongside the updated policy object)
+  • Emitted as part of the structured observability log event
+  • Computed in the pure engine (no DB involvement required to produce it)
+  • Fully JSON-serializable — no class instances, no undefined fields
+
+Audit trail completeness:
+  Action: "created"      — performedBy = requestedBy (policy creator)
+  Action: "approved"     — performedBy = approvedBy (approving operator)
+  Action: "rolled_back"  — performedBy = approvedBy if set, else requestedBy
+  Action: "expired"      — performedBy = "system" (automatic expiry)
+
+All audit entries are emitted to the structured logger (logger.info) via the
+four emit functions, making them available to any external logging pipeline
+(e.g. CloudWatch, Datadog, Elastic).
+
+The DB table itself is the primary persistent audit trail:
+  • policyId is globally unique (fp: prefix + workspaceId + ms + seq)
+  • policyStatus transitions are monotonic (no state can repeat)
+  • approvedBy + approvedAt are immutable once set
+  • rollbackEligible is a one-way latch (true → false, never back)
+  • createdAt/updatedAt are DB-managed (defaultNow / $onUpdate)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SUPER-ADMIN GOVERNANCE APIs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 4 routes:
+  Auth:     requireAuth + requireSuperAdmin
+  DB reads: scheduler_fairness_policies + workspaces + workflow_executions
+  DB writes: INSERT/UPDATE scheduler_fairness_policies only
+  Engine:   fairness-policy.ts pure functions (no side effects beyond logging)
+
+POST /platform/governance/fairness/policies
+  Body:    { workspaceId, targetSchedulerWeight, adjustmentReason, expiresAt, requestedBy? }
+  Status:  201 Created
+  Checks:  workspace exists; no existing active/pending policy for workspace;
+           validateFairnessPolicyInput passes all 10 rules
+  Derives: previousSchedulerWeight from live P9-B partition (1 DB query)
+  Returns: { policy: SchedulerFairnessPolicy }
+  Event:   scheduler_fairness_policy_created
+
+POST /platform/governance/fairness/policies/:policyId/approve
+  Body:    { approvedBy? }  (defaults to String(req.userId))
+  Status:  200 OK
+  Checks:  policy exists; auto-expires if past expiresAt (→ 409);
+           policy status = "pending" (→ 409 if not); approvedBy non-empty
+  Returns: { policy: SchedulerFairnessPolicy, auditEntry: FairnessPolicyAuditEntry }
+  Event:   scheduler_fairness_policy_approved
+
+POST /platform/governance/fairness/policies/:policyId/rollback
+  Body:    { rollbackReason? }
+  Status:  200 OK
+  Checks:  policy exists; status = "active" (→ 409 if not);
+           rollbackEligible = true (→ 409 if false)
+  Returns: { policy: SchedulerFairnessPolicy, auditEntry: FairnessPolicyAuditEntry }
+  Event:   scheduler_fairness_policy_rolled_back
+
+GET /platform/governance/fairness/policies
+  Query:   workspaceId?, status?, page? (1-based, default 1), limit? (default 20, max 100)
+  Status:  200 OK
+  Checks:  none
+  Returns: { policies: SchedulerFairnessPolicy[], pagination, expiredCount }
+  Special: auto-expires stale pending/active rows (batch UPDATE by policyId);
+           the expiredCount field reports how many rows were auto-expired in this request.
+  Ordering: createdAt DESC (most recent first)
+
+Error response conventions:
+  400 Bad Request  — validation failure (returns { error, code })
+  404 Not Found    — workspace or policy not found
+  409 Conflict     — state transition not allowed (returns { error, code, policy? })
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. DB SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Table: scheduler_fairness_policies
+
+  id                      SERIAL PRIMARY KEY
+  policy_id               TEXT NOT NULL UNIQUE         — "fp:<workspaceId>-<ms>-<seq>"
+  workspace_id            INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+  target_scheduler_weight REAL NOT NULL                — 0.25 | 0.50 | 0.75 | 1.00
+  previous_scheduler_weight REAL NOT NULL              — P9-B advisory weight at creation
+  adjustment_reason       TEXT NOT NULL
+  requested_by            TEXT NOT NULL                — creator operator identity
+  approved_by             TEXT                         — null until approved
+  approved_at             TIMESTAMPTZ                  — null until approved
+  expires_at              TIMESTAMPTZ NOT NULL
+  rollback_eligible       BOOLEAN NOT NULL DEFAULT true
+  policy_status           TEXT NOT NULL DEFAULT 'pending'
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()  (triggers on update)
+
+Indexes:
+  idx_sfp_workspace_id     — on workspace_id      (tenant-scoped queries)
+  idx_sfp_policy_status    — on policy_status      (status-filtered LIST queries)
+  idx_sfp_workspace_status — on (workspace_id, policy_status)  (conflict check)
+  idx_sfp_expires_at       — on expires_at         (auto-expiry sweep queries)
+
+Type choices:
+  REAL for weight fields — consistent with P9-D governance.ts real columns.
+  TEXT for status/policyId — consistent with all other schema files.
+  BOOLEAN for rollbackEligible — one-way latch, fits boolean semantics.
+  TIMESTAMPTZ for all timestamps — consistent with workspaces / tickets / governance.
+
+Cascade delete: workspace deletion removes all its fairness policies.
+This is safe because policies are advisory records — deleting the workspace
+invalidates all its governance decisions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-E endpoints are data sources for:
+
+  Super-admin scheduler governance panel (/super-admin/scheduler or similar)
+    GET /platform/governance/fairness/policies → policy list with status badges,
+    weight change history, pending approvals queue.
+
+  Policy creation flow
+    POST /platform/governance/fairness/policies → triggered when operator
+    decides to reduce/restore a workspace's advisory weight after reviewing
+    the P9-D noisy-tenant or high-pressure workspace data.
+
+  Approval workflow
+    POST /policies/:id/approve → second operator (or same, depending on org policy)
+    explicitly confirms the weight change.
+
+  Rollback flow
+    POST /policies/:id/rollback → immediate reversion if the weight change
+    is causing unintended consequences (e.g., workflow backlogs growing faster).
+
+Integration with P9-D read plane:
+  P9-D GET /platform/governance/fairness returns the live advisory fairness
+  health. P9-E policies allow operators to act on that data. A complete
+  governance workflow is:
+    1. Check P9-D fairness → see workspace X is saturated (P9-D read)
+    2. Create policy to reduce X's weight (P9-E write)
+    3. Approve policy (P9-E write)
+    4. Monitor P9-D fairness again (P9-D read) — does health improve?
+    5. Rollback if needed (P9-E write)
+
+No automatic feedback loop: steps 1–5 are all explicit human actions.
+The platform provides no autonomous "auto-fix" based on P9-D health signals.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4 new structured log events emitted via logger.info():
+
+A) scheduler_fairness_policy_created
+   Emitted by: createFairnessPolicy() (engine)
+   Fields: event, policyId, workspaceId, targetSchedulerWeight,
+           previousSchedulerWeight, approvedBy (null), policyStatus ("pending"),
+           action ("created")
+
+B) scheduler_fairness_policy_approved
+   Emitted by: applyFairnessPolicy() (engine)
+   Fields: event, policyId, workspaceId, targetSchedulerWeight,
+           previousSchedulerWeight, approvedBy (set), policyStatus ("active"),
+           action ("approved"), appliedWeight
+
+C) scheduler_fairness_policy_rolled_back
+   Emitted by: rollbackFairnessPolicy() (engine)
+   Fields: event, policyId, workspaceId, targetSchedulerWeight,
+           previousSchedulerWeight, approvedBy, policyStatus ("rolled_back"),
+           action ("rolled_back"), restoredWeight
+
+D) scheduler_fairness_policy_expired
+   Emitted by: expireFairnessPolicy() (engine) + auto-expire path in GET route
+   Fields: event, policyId, workspaceId, targetSchedulerWeight,
+           previousSchedulerWeight, approvedBy, policyStatus ("expired"),
+           action ("expired")
+
+All events carry: policyId, workspaceId, targetSchedulerWeight,
+previousSchedulerWeight, approvedBy, policyStatus, action — as specified.
+
+Event design decision: events are emitted from the pure engine functions,
+not from route handlers. This means all callers (including future batch
+processors or cron jobs that call engine functions directly) automatically
+emit telemetry without additional instrumentation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/fairness-policy.test.ts
+
+T1  policy creation deterministic (6 assertions)
+    status="pending" at creation; policyId starts with "fp:" and contains workspaceId;
+    targetSchedulerWeight and previousSchedulerWeight match input;
+    approvedBy and approvedAt are null; createdAt is valid ISO matching creation time;
+    rollbackEligible=true.
+
+T2  unsafe scheduler weight rejected (6 assertions)
+    weight 0.0 rejected; weight 0.10 rejected (not discrete); weight 1.50 rejected
+    (above ceiling); weight -0.25 rejected (negative); weight 0.33 rejected (not discrete);
+    all ALLOWED_POLICY_WEIGHTS with a different previous weight are valid.
+
+T3  starvation floor preserved (5 assertions)
+    SCHEDULER_WEIGHT_FLOOR=0.25; weight 0.25 accepted (floor exactly);
+    weight 0.24 rejected; creating policy with weight 0.10 throws FairnessPolicyViolation;
+    starvation floor is the minimum value in ALLOWED_POLICY_WEIGHTS.
+
+T4  policy approval requires operator (5 assertions)
+    empty approvedBy throws FairnessPolicyViolation; whitespace-only approvedBy throws;
+    valid approval → status "active"; approvedBy/At set after approval;
+    re-approving active policy throws FairnessPolicyViolation(POLICY_NOT_PENDING).
+
+T5  rollback semantics valid (5 assertions)
+    active policy → status "rolled_back"; rollback appliedWeight = previousSchedulerWeight;
+    rolling back pending policy throws POLICY_NOT_ACTIVE;
+    rollbackEligible=false → throws POLICY_NOT_ROLLBACK_ELIGIBLE;
+    rollbackEligible=false on returned policy after rollback.
+
+T6  conflicting policies rejected (5 assertions)
+    pending policy for same workspace → hasConflict=true, conflictingStatus="pending";
+    active policy for same workspace → hasConflict=true, conflictingStatus="active";
+    different workspaceId → hasConflict=false;
+    only expired/rolled_back → hasConflict=false;
+    empty existing policies → hasConflict=false.
+
+T7  policy expiration deterministic (6 assertions)
+    pending policy past expiresAt → isPolicyExpired=true;
+    active policy past expiresAt → isPolicyExpired=true;
+    expireFairnessPolicy → status "expired";
+    expireFairnessPolicy → rollbackEligible=false;
+    re-expiring already-expired policy throws FairnessPolicyViolation;
+    expiring rolled_back policy throws FairnessPolicyViolation.
+
+T8  audit serialization stable (6 assertions)
+    SchedulerFairnessPolicy fully JSON-serializable; no undefined in JSON;
+    JSON round-trip preserves all fields; FairnessPolicyAuditEntry fully serializable;
+    audit entry action in known set; approved policy has non-null approvedBy.
+
+T9  super-admin enforcement valid (6 assertions)
+    makePolicyId generates non-repeating IDs; format "fp:<workspaceId>-<ms>-<seq>";
+    invalid workspaceId (0) rejected with error mentioning "workspaceId";
+    empty adjustmentReason rejected; no-op (target==previous) rejected;
+    expiresAt too soon rejected; expiresAt too far rejected.
+
+T10 no autonomous orchestration occurs (7 assertions)
+    createFairnessPolicy has no async behavior; applyFairnessPolicy has no async;
+    rollbackFairnessPolicy has no async; applyFairnessPolicy does not mutate input;
+    rollbackFairnessPolicy does not mutate input; checkPolicyConflict does not mutate;
+    all 4 emit functions do not throw.
+
+Total assertions: 58 new (T1–T10)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. REMAINING ORCHESTRATION GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) LIVE SCHEDULER ENFORCEMENT
+   "active" status is advisory — no scheduler automatically respects it.
+   The targetSchedulerWeight must be manually applied by the operator to
+   the actual scheduler batch configuration. A future enforcement layer
+   would read active policies and pass their targetSchedulerWeight to
+   evaluateWorkloadContainment(), allowing the scheduler to dynamically
+   respect operator-approved weight limits.
+
+B) POLICY REJECTION ROUTE
+   The "rejected" status is defined in FairnessPolicyStatus and the DB schema
+   accepts it, but there is no POST /policies/:id/reject route. A rejection
+   route would allow a second reviewer to explicitly block a pending policy
+   rather than just letting it expire. Deferred (low priority — expiry
+   achieves the same outcome with less UI surface).
+
+C) SEQUENTIAL STEP ENFORCEMENT
+   Multiple sequential weight reductions (e.g. 1.00 → 0.50 → 0.25) are not
+   linked. A future "policy chain" model would track parent/child policy IDs
+   and prevent skipping steps or creating conflicting chains. Currently each
+   policy is independent.
+
+D) POLICY HISTORY QUERY
+   GET /platform/governance/fairness/policies lists ALL policies including
+   expired/rolled_back. A dedicated history endpoint (e.g. /policies/history)
+   or a per-workspace timeline view would improve audit UX. Currently operators
+   must use the status= filter.
+
+E) SCHEDULER WEIGHT INHERITANCE
+   When a policy is rolled_back, the engine returns previousSchedulerWeight
+   as the advisory value. But this is the weight from the original partition
+   evaluation at policy-creation time — which may now be stale. A rollback
+   should ideally re-evaluate the live P9-B partition to confirm what weight
+   is appropriate. This is a future enhancement: the route currently uses
+   previousSchedulerWeight as the restored advisory value without re-evaluating.
+
+F) PLATFORM GOVERNANCE OVERVIEW INTEGRATION
+   The P9-D GET /platform/governance/overview endpoint does not currently
+   include an activeFairnessPolicies count or policyHealth field. Enriching
+   the P9-D overview response with P9-E policy state would give operators
+   a unified snapshot of both current health and in-flight governance actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. READINESS ASSESSMENT (pre-adaptive scheduling research)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Completed governance foundations:
+
+  P9-A  Tenant isolation engine + 6 violation codes
+        ✓ Per-request isolation boundary; per-tenant risk assessment.
+
+  P9-B  Workload partition engine + 5-component pressure scoring
+        ✓ Advisory schedulerWeight [0.25–1.00]; starvation floor guarantee;
+          4-category noisy tenant detection.
+
+  P9-C  Tenant governance view composition
+        ✓ Workspace-scoped governance API surface; isolation/fairness status.
+
+  P9-D  Platform workload control plane
+        ✓ Cross-workspace fairness health; noisy-tenant roster;
+          containment/advisory distribution; 4 super-admin read endpoints.
+
+  P9-E  Fairness orchestration policy infrastructure (this phase)
+        ✓ Human-gated lifecycle (pending → active → rolled_back/expired);
+          starvation floor enforced at validation; conflict prevention;
+          persistent DB audit trail; 4 policy lifecycle endpoints;
+          4 structured observability events.
+
+What is in place before an adaptive scheduling research phase:
+  ✓ Per-workspace advisory weight (P9-B) — computational foundation
+  ✓ Platform fairness health classifier (P9-D) — signal aggregation
+  ✓ Governance policy model (P9-E) — decision persistence layer
+  ✓ Human-gated approval workflow (P9-E) — operator control gate
+  ✓ Rollback semantics (P9-E) — reversibility guarantee
+  ✓ Conflict prevention (P9-E) — multi-operator safety
+  ✓ Full audit trail (P9-E) — traceability for research iteration
+  ✓ Observability events for all transitions — telemetry pipeline ready
+
+Suggested pre-conditions before adding adaptive or autonomous scheduling:
+  • Define the authority boundary: which decisions may be autonomous vs.
+    human-gated. P9-E requires human approval for all weight changes.
+    An adaptive layer would need a separate "auto-approved" policy type
+    with explicit scope constraints.
+  • Add live scheduler weight enforcement: read active P9-E policies
+    in the scheduler batch loop and pass targetSchedulerWeight to
+    per-workspace execution limits.
+  • Define a feedback loop: after an active policy, measure whether the
+    P9-D fairness health improved. This is the empirical signal needed
+    for any adaptive algorithm.
+  • Design a policy confidence model: an adaptive algorithm should still
+    produce SchedulerFairnessPolicy records (for auditability) but with
+    requestedBy="system:adaptive" and a confidence score field.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED   lib/db/src/schema/fairness-policies.ts           (~65 lines)
+            schedulerFairnessPoliciesTable + type exports
+  MODIFIED  lib/db/src/schema/index.ts
+            + export * from "./fairness-policies"
+  MIGRATED  DB schema — pnpm --filter @workspace/db run push
+            Created table: scheduler_fairness_policies (13 columns, 4 indexes)
+  CREATED   artifacts/api-server/src/lib/workflows/fairness-policy.ts   (~370 lines)
+            Pure P9-E engine — 13 exported functions, 10 types, 6 constants
+  CREATED   artifacts/api-server/src/lib/workflows/__tests__/fairness-policy.test.ts
+            (~290 lines) — T1–T10, 58 assertions
+  MODIFIED  artifacts/api-server/src/routes/platform.ts
+            + import schedulerFairnessPoliciesTable + or + desc from drizzle-orm
+            + import 10 names from fairness-policy engine
+            + rowToPolicy() mapper helper
+            + POST /platform/governance/fairness/policies
+            + POST /platform/governance/fairness/policies/:policyId/approve
+            + POST /platform/governance/fairness/policies/:policyId/rollback
+            + GET  /platform/governance/fairness/policies
+  CREATED   workflow-phase-9e-report.txt (this file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUMULATIVE TEST COUNTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Phase 9-A baseline:  1447 tests (25 files)
+  Phase 9-B additions:   +51 tests → 1498 tests (26 files)
+  Phase 9-C additions:   +49 tests → 1547 tests (27 files)
+  Phase 9-D additions:   +54 tests → 1601 tests (28 files)
+  Phase 9-E additions:   +58 tests → 1659 tests (29 files)
+  Total:               1659 tests, 29 files, 0 failures

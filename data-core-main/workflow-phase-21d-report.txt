@@ -1,0 +1,144 @@
+================================================================================
+WORKFLOW PHASE 21-D REPORT
+Payroll Operations Center & Financial Export Readiness
+Generated: 2026-05-19
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P21-D delivers the Payroll Operations Center (API + UI), exception management with
+notifications, financial export readiness (GL journal, cost center, bank metadata
+preparation only), GL component mapping foundation, policy versioning operations,
+operational audit views, monitoring metrics APIs, payslip operations, operational
+reports, smoke tests, and documentation — built on P21-B/C canonical payroll.
+
+No bank integrations, accounting posting, government integrations, salary
+disbursement automation, destructive migrations, or ERP redesign were introduced.
+
+OPERATIONS CENTER STATUS — GO
+-----------------------------
+[GO] Payroll Operations Center UI at /admin/hr/payroll-ops
+[GO] Overview: run metrics, review queue, locked periods, correction runs, alerts
+[GO] APIs under /hr/payroll/ops/* registered in routes/index.ts
+[GO] Filters, status badges, workspace isolation, refresh polling
+[GO] Operational actions: bulk review, exception resolve, export readiness view
+
+EXCEPTION MANAGEMENT STATUS — GO
+--------------------------------
+[GO] PayrollExceptionService — scan, persist, acknowledge, resolve
+[GO] Codes: MISSING_PACKAGE, MISSING_ATTENDANCE, NEGATIVE_NET, DUPLICATE_ADJUSTMENT,
+         MISSING_APPROVAL, POLICY_VIOLATION, CALCULATION_ERROR
+[GO] Auto-scan wired after calculateRun
+[GO] Notification dispatch on critical findings (in-app, no email)
+[GO] payroll_exceptions table (migration 0012)
+
+EXPORT READINESS STATUS — GO (foundation only)
+----------------------------------------------
+[GO] FinancialExportService — GL journal, cost center summary, bank metadata prep
+[GO] getExportReadiness dashboard signal
+[GO] Signed export download tokens (JWT)
+[GO] No bank posting / no GL posting to ERP
+[PARTIAL] Bank export — metadata only (bankReady: false by design)
+
+POLICY GOVERNANCE STATUS — GO
+-----------------------------
+[GO] PayrollPolicyOpsService — list, version history, create version
+[GO] Policy keys for deduction, overtime, correction, approval thresholds, etc.
+[GO] Effective dates and version visibility via APIs
+[GO] Audit log on policy version create
+
+AUDIT STATUS — GO
+-----------------
+[GO] payroll_audit_logs table + PayrollAuditQueryService
+[GO] Access logs, break-glass filter, correction history, export history, payslip ops
+[GO] Payslip PDF access logging on signed download
+[GO] Logger mirror retained
+
+REPORTING STATUS — GO
+---------------------
+[GO] hr.payroll.variance, correction.activity, warnings, component.summary,
+      locked.period.audit, exceptions
+[GO] Integrated with report-definition-registry and export_jobs
+[GO] POST /hr/payroll/ops/reports/generate
+
+PAYSLIP OPERATIONS — GO
+-----------------------
+[GO] voidDraftPayslip, recordReissueMetadata, logPdfAccess
+[GO] Ops audit payslip list API
+[GO] No email distribution
+
+GL MAPPING — GO
+---------------
+[GO] Migration 0012 — debit/credit/cost_center/export_code on payroll_components
+[GO] Component list + PATCH GL mapping APIs
+
+MONITORING APIs — GO
+--------------------
+[GO] GET /hr/payroll/ops/metrics — runs, corrections, locks, payslips, export jobs
+[GO] GET /hr/payroll/ops/alerts
+
+SMOKE TEST RESULTS
+------------------
+File: artifacts/api-server/src/lib/payroll/__tests__/payroll-operations.smoke.test.ts
+Combined payroll test run: 22 passed | 1 skipped (23 total across foundation + calc + ops)
+
+Coverage:
+  - Financial export signed token issue/verify
+  - Exception service surface
+  - Export readiness service surface
+  - Policy ops surface
+  - Payslip void guard
+  - Workspace isolation on export token
+
+DOCUMENTATION
+-------------
+[GO] p21-d-payroll-operations-center.md
+[GO] workflow-phase-21d-report.txt (this file)
+
+MIGRATION
+---------
+[GO] lib/db/drizzle/0012_payroll_operations_export.sql
+     — GL columns, payroll_audit_logs, payroll_exceptions
+
+READINESS GATES
+---------------
+| Area                              | Status   |
+|-----------------------------------|----------|
+| payroll operations center         | GO       |
+| payroll governance                | GO       |
+| export readiness                  | GO       |
+| payroll operational readiness     | PARTIAL  |
+| enterprise payroll readiness      | PARTIAL  |
+
+PARTIAL rationale:
+- Operational readiness: ops UI present; advanced diagnostics and deep drill-downs
+  remain incremental; no live bank/ERP connectors.
+- Enterprise readiness: multi-entity GL, tax, disbursement, and statutory filing
+  deferred to P22+.
+
+REMAINING BLOCKERS (non-blocking for P21-D close)
+-------------------------------------------------
+1. Bank file / payment rail integration (explicitly excluded)
+2. Accounting system posting connector (P22-A scope)
+3. Government / statutory reporting
+4. Payslip email distribution channel
+5. Full tax computation engine
+6. Run payroll-ops UI permission split (currently hr.manage gate; APIs use hr.payroll.*)
+
+CONFIRMATIONS
+-------------
+[x] No bank integrations
+[x] No accounting posting
+[x] No government integrations
+[x] No destructive migration
+[x] No ERP redesign
+[x] No salary disbursement automation
+[x] P22-A NOT started
+
+RECOMMENDED NEXT PHASE
+----------------------
+P22-A — Finance & Accounting Canonical Architecture Foundation
+
+================================================================================
+END OF REPORT
+================================================================================

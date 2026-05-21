@@ -1,0 +1,262 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-7b-report.txt
+- workflow-phase-7c-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- query cascade model
+- rollup tiers
+- trend extraction semantics
+- historical analytics gaps
+- governance API architecture
+
+ثم نفّذ فقط:
+P7-D — Governance Trend APIs Foundations
+
+ولا تنفّذ:
+- realtime analytics streaming
+- advanced BI dashboards
+- cross-workspace federation
+- ML forecasting
+- anomaly prediction
+- external analytics warehouses
+
+عنوان المهمة:
+WORKFLOW PHASE 7-D — Governance Trend APIs & Historical Analytics Surface
+
+المهمة الحالية:
+تحويل:
+internal historical analytics infrastructure
+
+إلى:
+safe long-term analytics API surface
+
+الهدف:
+تمكين:
+- trend dashboards
+- historical governance analysis
+- operational history visualization
+- long-term tenant health insights
+
+بطريقة:
+read-only deterministic analytics APIs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ANALYTICS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- selectQueryLayer()
+- queryRollupsByRange()
+- governance_snapshots
+- governance_snapshot_rollups
+- trend extraction helpers
+
+حدّد:
+- ما الذي جاهز للعرض عبر API
+- أين توجد payload risks
+- أين توجد tier ambiguity
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN TREND API SURFACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+REST analytics endpoints.
+
+الحد الأدنى المطلوب:
+
+GET /api/governance/trends/severity
+GET /api/governance/trends/error-rate
+GET /api/governance/trends/backlogs
+GET /api/governance/trends/storms
+
+مع:
+tenant-scoped semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — QUERY CASCADE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اربط:
+API layer
+
+مع:
+selectQueryLayer()
+
+بحيث:
+- ≤30d → raw
+- 31–90d → hourly
+- 91–365d → daily
+
+المطلوب:
+consistent response shape
+بغض النظر عن tier الداخلي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — TREND RESPONSE MODELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+stable DTOs تحتوي:
+
+SeverityTrendPoint:
+- timestamp
+- severity
+- sourceLayer
+
+NumericTrendPoint:
+- timestamp
+- value
+- sourceLayer
+
+BacklogTrendPoint:
+- timestamp
+- approvalBacklog
+- delayBacklog
+- stuckCount
+- sourceLayer
+
+StormTrendPoint:
+- timestamp
+- stormFrequency
+- dominantSeverity
+- sourceLayer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — RANGE VALIDATION & SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف safeguards تمنع:
+- unbounded historical queries
+- invalid ranges
+- future windows
+- absurd sampling density
+- huge payloads
+
+الحد الأقصى:
+365d.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — SERIALIZATION HARDENING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+API responses:
+- stable
+- pagination-ready
+- deterministic ordering
+- no raw snapshot leakage
+- no JSONB internals exposed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_trend_api_requested
+
+B)
+governance_trend_api_resolved
+
+C)
+governance_trend_query_rejected
+
+D)
+governance_trend_payload_truncated
+
+كلها تحتوي:
+- workspaceId
+- trendType
+- rangeDays
+- sourceLayer
+- resultCount
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Trend APIs MUST:
+- remain READ-ONLY
+- never mutate snapshots
+- never trigger rollups
+- never invoke pruning
+- never affect runtime execution
+
+أي:
+historical analytics isolation كاملة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+severity trend uses correct query layer
+
+T2:
+error-rate trend serializes correctly
+
+T3:
+backlog trend preserves deterministic ordering
+
+T4:
+storm trend returns stable frequency values
+
+T5:
+invalid ranges rejected safely
+
+T6:
+future windows rejected
+
+T7:
+payload truncation handled correctly
+
+T8:
+response contracts stable across layers
+
+T9:
+tenant isolation enforced
+
+T10:
+trend APIs remain read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- realtime charts
+- websocket analytics
+- BI query builders
+- export pipelines
+- predictive analytics
+- super-admin federation APIs
+
+خلك:
+minimal historical analytics surface.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-7d-report.txt
+
+ويحتوي:
+- analytics API architecture
+- query cascade integration
+- response models
+- range validation rules
+- serialization hardening strategy
+- observability additions
+- tests results
+- remaining analytics API gaps
+- readiness assessment قبل historical dashboard phase

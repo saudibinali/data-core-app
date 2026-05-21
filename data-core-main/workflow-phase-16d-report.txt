@@ -1,0 +1,211 @@
+================================================================================
+WORKFLOW PHASE 16-D — GRACE PERIOD & SUSPENSION RULES
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P16-D only — do not start P16-E)
+
+================================================================================
+1. POLICY MODEL
+================================================================================
+
+Table: workspace_subscription_policies
+Schema: lib/db/src/schema/workspace-subscription-policies.ts
+
+Fields:
+  id, workspaceId (unique per workspace), subscriptionId (optional),
+  policyName, gracePeriodDays, pastDueAfterDays, suspensionAfterDays,
+  terminationAfterDays (optional), allowReadOnlyDuringSuspension,
+  allowAdminAccessDuringSuspension, allowDataExportDuringSuspension,
+  enforcementMode (advisory_only | manual_required | automatic_recommended),
+  isActive, reason, internalNotes, createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - gracePeriodDays >= 0
+  - pastDueAfterDays >= gracePeriodDays
+  - suspensionAfterDays >= pastDueAfterDays
+  - terminationAfterDays >= suspensionAfterDays when set
+  - default enforcementMode = advisory_only
+  - one policy row per workspace (unique workspaceId)
+  - no hard delete — upsert via PUT only
+  - no enforcement in P16-D
+
+Defaults: artifacts/api-server/src/lib/subscription-policy-defaults.ts
+  grace=7, pastDue=14, suspension=30, termination=90, advisory_only
+
+Bootstrap: scripts/apply-p16-tables.cjs (workspace_subscription_policies)
+
+================================================================================
+2. EVALUATION HELPER (read-only)
+================================================================================
+
+File: artifacts/api-server/src/lib/workspace-subscription-policy-evaluator.ts
+
+  evaluateSubscriptionPolicy({ subscription, policy, asOf? })
+
+Returns:
+  currentSubscriptionStatus, daysSinceEndDate, recommendedStatus,
+  recommendedAction, reasons[], policy, isAutomaticAllowed (always false),
+  enforcementMode
+
+Logic:
+  - No subscription → review_required / review_required
+  - archived or terminated → no_change / none
+  - endDate in future → active / none
+  - endDate passed (days since end):
+      <= gracePeriodDays → grace_period
+      <= pastDueAfterDays → past_due
+      <= suspensionAfterDays → suspended
+      > terminationAfterDays (if set) → terminated
+      else → suspended
+  - Current status already matches recommendation → no_change
+  - Does NOT mutate subscription status
+
+================================================================================
+3. PERMISSIONS ADDED (42 total platform permissions)
+================================================================================
+
+  - platform.subscriptionPolicies.read
+  - platform.subscriptionPolicies.update
+  - platform.subscriptionPolicies.evaluate
+
+Role matrix (additive):
+  - root_platform_owner / platform_admin: read + update + evaluate
+  - finance_admin: read + update + evaluate
+  - sales_admin: read + evaluate only
+  - support_admin / auditor / read_only_operator: read + evaluate only
+  - workspace_support: none
+
+================================================================================
+4. BACKEND APIs (platform only)
+================================================================================
+
+Router: artifacts/api-server/src/routes/workspace-subscription-policies.ts
+
+  GET  /platform/tenants/:tenantId/subscription-policy
+       → platform.subscriptionPolicies.read (current or default)
+
+  PUT  /platform/tenants/:tenantId/subscription-policy
+       → platform.subscriptionPolicies.update (upsert, reason required)
+
+  GET  /platform/tenants/:tenantId/subscription-policy/evaluation
+       → platform.subscriptionPolicies.evaluate (advisory result only)
+
+Not implemented:
+  - DELETE policy
+  - Tenant-side policy APIs
+  - Enforcement / login blocking / module blocking endpoints
+  - Payment / Stripe / email / dunning endpoints
+  - Automatic status mutation
+
+================================================================================
+5. VALIDATION
+================================================================================
+
+  - Tenant must exist
+  - subscriptionId must belong to same workspace when provided
+  - Ordered day thresholds validated
+  - enforcementMode enum validated
+  - reason required on PUT (min 10 chars)
+  - Forbidden payload keys: payment, Stripe, checkout, tax, ledger, card, etc.
+
+================================================================================
+6. AUDIT EVENTS
+================================================================================
+
+  - workspace_subscription_policy_updated
+  - workspace_subscription_policy_evaluated
+  - workspace_subscription_policy_change_blocked
+
+Metadata: actorId, workspaceId/tenantId, subscriptionId, policyId,
+enforcementMode, recommendedStatus, recommendedAction, reason, timestamp
+
+================================================================================
+7. FRONTEND — GRACE & SUSPENSION POLICY SECTION
+================================================================================
+
+Location: Super Admin > Tenant Registry > Tenant > Subscription & Entitlements
+
+Component: artifacts/ops-platform/src/components/subscription/GraceSuspensionPolicyPanel.tsx
+
+Displays: policy thresholds, suspension flags, enforcementMode, evaluation
+(recommendedStatus, recommendedAction, reasons, daysSinceEndDate).
+
+Actions (permission-gated):
+  - Edit Policy → platform.subscriptionPolicies.update
+  - Evaluate → platform.subscriptionPolicies.evaluate
+  - Apply Recommended Status (manual) → platform.subscriptions.status.change
+    uses PATCH /platform/tenants/:tenantId/subscription/status (P16-A)
+
+Hooks:
+  - useTenantSubscriptionPolicy(tenantId)
+  - useUpsertTenantSubscriptionPolicy()
+  - useTenantSubscriptionPolicyEvaluation(tenantId)
+
+React Query keys:
+  ["platform","tenants",tenantId,"subscription-policy"]
+  ["platform","tenants",tenantId,"subscription-policy","evaluation"]
+
+Safety contract: artifacts/ops-platform/src/lib/subscription-policy-model-config.ts
+  SUBSCRIPTION_POLICY_MODEL_SAFETY_CONTRACT (all flags true)
+
+Forbidden UI: Auto Suspend Now, Block Login, Disable Modules, Send Email,
+Pay Now, Stripe, Checkout, Delete Policy
+
+================================================================================
+8. SAFETY GUARANTEES (P16-D)
+================================================================================
+
+  - Policy model + recommendations only
+  - advisory_only default enforcement mode
+  - isAutomaticAllowed always false in evaluation API
+  - No tenant login blocking
+  - No module access blocking
+  - No workspace shutdown
+  - No destructive workspace actions
+  - No hard quota enforcement
+  - No electronic payment / Stripe / checkout / gateway
+  - No invoice engine / tax / ZATCA / ledger
+  - No email / automated dunning / automated renewal actions
+  - No custom per-user permissions redesign
+  - Permission-gated UI and APIs
+  - Audit on policy update, evaluation, and blocked changes
+
+================================================================================
+9. TESTS RUN
+================================================================================
+
+api-server:
+  pnpm exec vitest run \
+    src/lib/__tests__/workspace-subscription-policy-evaluator.test.ts \
+    src/routes/__tests__/workspace-subscription-policies.test.ts
+  Result: 2 files, 19 tests passed
+
+ops-platform:
+  pnpm exec vitest run \
+    src/lib/__tests__/phase-16d-subscription-policies.test.ts \
+    src/lib/__tests__/phase-16c-quotas.test.ts
+  Result: 2 files, 21 tests passed
+
+DB bootstrap:
+  node scripts/apply-p16-tables.cjs
+  Tables: workspace_subscriptions, workspace_entitlements, workspace_quota_limits,
+          workspace_subscription_policies
+
+================================================================================
+10. LIMITATIONS LEFT FOR P16-E
+================================================================================
+
+P16-E (NOT STARTED): Commercial-to-Workspace Enforcement
+
+Intentionally deferred:
+  - Applying commercial contract/billing state to workspace access
+  - Automated enforcement of grace/suspension beyond advisory recommendations
+  - Login blocking, module lockout, workspace shutdown
+  - Dunning, email notifications, payment collection
+  - Hard quota enforcement tied to suspension
+
+P16-D provides the policy configuration and evaluation foundation only.
+
+================================================================================
+END OF REPORT — P16-D COMPLETE. DO NOT START P16-E.
+================================================================================

@@ -1,0 +1,480 @@
+================================================================================
+  ARCHITECTURE TICKET 03 — In-Memory Event Bus Implementation
+  lib/core-events  |  @workspace/core-events
+  Internal Operations Platform — Monorepo
+  تاريخ التنفيذ: مايو 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. CREATED FILES — الملفات الجديدة والمُعدَّلة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+lib/core-events/
+├── src/
+│   ├── listener-registry.ts   [جديد]   ~140 سطر
+│   │   هيكل البيانات الداخلي للـ EventBus — Map من نوع الحدث → قائمة المستمعين
+│   │   غير مُصدَّر من index.ts — تفصيل تنفيذي خاص بالـ bus
+│   │
+│   ├── bus.ts                 [جديد]   ~390 سطر
+│   │   EventBus class — التنفيذ الكامل لنظام الـ publish/subscribe
+│   │   createEventBus() factory — لإنشاء instances معزولة (للـ tests)
+│   │   eventBus singleton — الـ instance المشتركة عبر التطبيق
+│   │
+│   └── index.ts               [تم تحديثه]
+│       أُضيفت exports للـ bus: EventBus, createEventBus, eventBus
+│       وأنواع: BusLogger, SubscriptionToken, ListenerError, EmitResult,
+│               BusStats, EventBusOptions, EventInput, TypedEventHandler, WildcardHandler
+│
+└── tsconfig.json              [تم تحديثه]
+    أُضيف "dom" لمصفوفة "lib" لتمكين console وglobalThis في الـ library
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. EVENT BUS APIs — واجهات البرمجة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── 2.1 emit<K>(input: EventInput<K>): Promise<EmitResult> ──────────────────────
+
+  المسؤولية: ينشر حدثاً مكتوباً لجميع المستمعين المطابقين
+  الإدخال:   EventInput<K> — K مُستنتَج من حقل type تلقائياً
+  المخرج:    EmitResult — دائماً يُحلّ (resolve)، لا يرفض (reject) أبداً
+
+  ما يفعله الـ bus تلقائياً إذا حذف المُنتِج هذه الحقول:
+    id              ← UUID v4 جديد (Math.random based)
+    timestamp       ← new Date().toISOString() (UTC)
+    correlationId   ← UUID v4 جديد
+    schemaVersion   ← 1
+
+  مثال:
+    const result = await eventBus.emit({
+      type: EVENT_TYPES.TICKET_CREATED,    // K = "ticket.created" مُستنتَج
+      module: "tickets",
+      workspace: { workspaceId: req.workspaceId },
+      actor: { userId: req.userId, role: req.userRole },
+      metadata: {},
+      data: {                              // TicketCreatedPayload — مُقيَّد بـ K
+        ticketId: 5,
+        title: "Bug report",
+        ticketType: "bug",
+        priority: "high",
+        status: "open",
+        createdByUserId: req.userId,
+      },
+    });
+
+── 2.2 emitEvent(event: AnyTypedEvent): Promise<EmitResult> ────────────────────
+
+  المسؤولية: ينشر حدثاً مُكتملاً بالفعل (بدون ملء الحقول الافتراضية)
+  الاستخدام: لإعادة إطلاق حدث من مخزن، أو في الاختبارات مع fixtures جاهزة
+  الفرق عن emit(): لا يملأ id أو timestamp — يُرسَل كما هو
+
+── 2.3 subscribe<K>(type, handler): SubscriptionToken ──────────────────────────
+
+  المسؤولية: يسجّل مستمعاً دائماً لنوع حدث محدد
+  Type safety: TypeScript يُقيّد handler على TypedEventHandler<K> — النوع مُستنتَج
+  المخرج:    SubscriptionToken للإلغاء لاحقاً
+
+  مثال:
+    const token = eventBus.subscribe("ticket.created", async (event) => {
+      event.data.ticketId   // number ✓ — مُستنتَج من EventTypeMap
+      event.data.title      // string ✓
+      event.workspace.workspaceId  // number ✓
+      event.actor.userId    // number | undefined ✓
+    });
+
+── 2.4 subscribeOnce<K>(type, handler): SubscriptionToken ──────────────────────
+
+  المسؤولية: يسجّل مستمعاً يُنفَّذ مرةً واحدة فقط ثم يُزال تلقائياً
+  الضمان:    يُزال قبل الاستدعاء — لا إمكانية للتكرار حتى عند الـ concurrent emits
+  flag:       `consumed` boolean يمنع التنفيذ المزدوج من emits متزامنة
+
+── 2.5 subscribeToAll(handler): SubscriptionToken ──────────────────────────────
+
+  المسؤولية: يسجّل مستمعاً يستقبل كل الأحداث (wildcard — يُخزَّن تحت مفتاح "*")
+  الاستخدام: audit logging، distributed tracing، metrics collection
+  تحذير:     يُستدعى عند كل emit — استخدمه بتحفظ
+
+── 2.6 unsubscribe(token): boolean ─────────────────────────────────────────────
+
+  المسؤولية: يحذف مستمعاً بواسطة الـ SubscriptionToken
+  آمن:       الاستدعاء على token محذوف بالفعل يُعيد false دون خطأ
+
+── 2.7 stats(): BusStats ───────────────────────────────────────────────────────
+
+  المخرج:
+    {
+      totalListeners: number,
+      byEventType: Record<string, number>  // شامل "*" wildcard
+    }
+  الاستخدام: health check endpoints، observability dashboards
+
+── 2.8 listenerCount(type?): number ────────────────────────────────────────────
+
+  بدون معامل → إجمالي كل المستمعين
+  مع معامل  → عدد مستمعي نوع حدث محدد
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. LISTENER ARCHITECTURE — بنية المستمعين
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1 ListenerRegistry (listener-registry.ts) — غير مُصدَّر من index.ts
+──────────────────────────────────────────────────────────────────────
+
+  البنية الداخلية:
+    Map<string, ListenerEntry[]>
+    │
+    ├── "ticket.created" → [ListenerEntry, ListenerEntry, ...]
+    ├── "approval.created" → [ListenerEntry]
+    ├── "*" (wildcard) → [ListenerEntry]
+    └── ... باقي أنواع الأحداث
+
+  ListenerEntry:
+    id            string       معرّف فريد للـ unsubscribe
+    eventType     string       نوع الحدث أو "*"
+    handler       AnyHandler   (event: BaseEvent) => Promise<void>  ← type-erased
+    registeredAt  string       ISO-8601 وقت التسجيل
+
+  العمليات:
+    add(entry)           → يضيف entry لقائمة نوع الحدث
+    remove(id)           → يبحث في كل القوائم ويحذف بالـ id
+    getForEvent(type)    → يُعيد [specific listeners] + [wildcard listeners]
+    count(type?)         → يعدّ المستمعين
+    clear()              → يمسح الكل (للاختبارات فقط)
+    snapshot()           → Record<string, number> للـ diagnostics
+
+3.2 Fan-out Logic — منطق التوزيع
+───────────────────────────────────
+
+  الترتيب عند الاستدعاء:
+    1. listeners الخاصة بنوع الحدث (specific)
+    2. wildcard listeners ("*")
+
+  التنفيذ المتزامن:
+    Promise.allSettled([...specificListeners, ...wildcardListeners].map(fn))
+    ├── كل المستمعين يعملون بالتوازي (concurrent)
+    ├── فشل مستمع واحد لا يوقف الآخرين
+    └── النتائج تُجمَّع في EmitResult
+
+3.3 Error Isolation — عزل الأخطاء
+────────────────────────────────────
+
+  مستمع يرفض (rejects) أو يرمي (throws):
+    1. خطأه يُسجَّل في BusLogger.error()
+    2. يُضاف لـ EmitResult.errors
+    3. باقي المستمعين يُكملون تشغيلهم
+    4. emit() لا يرفض — دائماً يُحلّ مع EmitResult
+
+  سيناريوهات اللوج:
+    كل المستمعين فشلوا  → logger.error("All listeners failed during emit")
+    بعض فشلوا           → logger.warn("Some listeners failed during emit")
+    مستمع واحد فشل      → logger.error("Listener failed") لكل واحد
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. TYPE SAFETY APPROACH — نهج الأمان النوعي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Generic Type Inference — استنتاج الأنواع
+─────────────────────────────────────────────
+
+  المحور: EventTypeMap (من Ticket 02) يربط كل اسم حدث بـ payload interface:
+    "ticket.created" → TicketCreatedPayload
+    "approval.completed" → ApprovalCompletedPayload
+    ... إلخ
+
+  عند الاستدعاء:
+    subscribe<K extends keyof EventTypeMap>(type: K, handler: TypedEventHandler<K>)
+    emit<K extends EventType>(input: EventInput<K>)
+
+  TypeScript يستنتج K من قيمة type تلقائياً:
+    eventBus.subscribe("ticket.created", async (event) => {
+      // K = "ticket.created"
+      // event.data = TicketCreatedPayload — بدون أي casting يدوي
+    });
+
+4.2 Type Erasure داخلياً — المقايضة الصحيحة
+─────────────────────────────────────────────
+
+  المشكلة: Map<string, ListenerEntry[]> لا يمكنها تخزين أنواع generic
+  الحل: AnyHandler = (event: BaseEvent) => Promise<void>
+
+  عند subscribe():
+    const wrapped: AnyHandler = (event) =>
+      handler(event as unknown as TypedEvent<K, EventTypeMap[K]>);
+
+  الضمان: الـ cast آمن لأن emit() يوجّه الحدث فقط للمستمعين المسجَّلين
+    لنفس الـ type string — TypeScript يتحقق من هذا عند الإطلاق
+
+4.3 EventInput<K> — الحماية من مُنتِجي الحدث
+───────────────────────────────────────────────
+
+  type EventInput<K extends keyof EventTypeMap> = {
+    type: K;              ← discriminant
+    data: EventTypeMap[K] ← مُقيَّد بـ K تلقائياً
+    ...
+  }
+
+  هذا يجعل:
+    eventBus.emit({ type: "ticket.created", data: { wrong: "payload" } })
+    ← خطأ TypeScript عند وقت الترجمة ✓
+
+4.4 AnyTypedEvent union — الـ Discriminated Union
+──────────────────────────────────────────────────
+
+  emitEvent() يقبل AnyTypedEvent — union من جميع TypedEvent aliases.
+  عند switch(event.type) في المستمعين، TypeScript يُضيّق النوع تلقائياً:
+
+    eventBus.subscribeToAll(async (event) => {
+      if (event.type === "approval.completed") {
+        event.data.outcome  // ← هنا TypeScript لا يعرف — event هو BaseEvent
+      }
+    });
+
+  محدودية: subscribeToAll() يستقبل BaseEvent (not AnyTypedEvent) —
+    المستمع يحتاج type guard يدوي للوصول لـ data typed.
+    هذا قرار مقصود: wildcard handlers تعمل على أي event.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. CURRENT LIMITATIONS — القيود الحالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LIMIT-01: In-Memory فقط — لا توزيع
+─────────────────────────────────────
+  جميع المستمعين يعيشون في نفس الـ Node.js process.
+  عند تعدد api-server replicas (horizontal scaling)، كل replica لها bus خاص بها.
+  حدث مُطلَق في replica A لا يصل لمستمعي replica B.
+  الحل المستقبلي: Redis Streams adapter (أنظر §6).
+
+LIMIT-02: لا persistence — لا ضمان delivery
+──────────────────────────────────────────────
+  إذا crash الـ process أثناء emit()، الأحداث في الطريق تضيع.
+  الـ api-server EventDispatcher يكتب لـ workspace_event_logs قبل الـ fan-out —
+  هذا يوفر durability للكود الحالي. الـ bus الجديد لا يفعل ذلك.
+  الحل: wrap emit() لتسجيل الحدث في DB قبل fan-out (Ticket 04).
+
+LIMIT-03: لا retry handling
+─────────────────────────────
+  مستمع يفشل → يُسجَّل الخطأ في EmitResult ويتم التجاهل.
+  لا إعادة محاولة تلقائية، لا dead-letter queue.
+  الحل المستقبلي: retry counter في ListenerEntry + DLQ handler (أنظر §6).
+
+LIMIT-04: لا ordering guarantees بين المستمعين
+──────────────────────────────────────────────────
+  Promise.allSettled تُشغِّل المستمعين بالتوازي — ترتيب الإنهاء غير مضمون.
+  إذا كان المستمع A يجب أن ينتهي قبل B (مثلاً audit قبل notification)، الـ bus
+  لا يضمن ذلك حالياً.
+  الحل المستقبلي: خيار fanout: "sequential" في EventBusOptions.
+
+LIMIT-05: لا back-pressure
+─────────────────────────────
+  emit() يُطلق جميع المستمعين فوراً بغض النظر عن حجم العمل.
+  عند ارتفاع حجم الأحداث + مستمعين بطيئين، ستتراكم Promises في الذاكرة.
+  الحل المستقبلي: BullMQ adapter لإدارة قوائم الانتظار.
+
+LIMIT-06: subscribeToAll() يُعيد BaseEvent لا AnyTypedEvent
+──────────────────────────────────────────────────────────────
+  wildcard handler لا يحصل على narrowed type — يحتاج type guard يدوي.
+  سبب التصميم: لا يمكن تحديد نوع الـ data مسبقاً لأحداث غير معروفة.
+  الحل الجزئي: استخدم isEventType() type guard عند الإنجاز في Ticket 04.
+
+LIMIT-07: eventBus singleton يستخدم console logger
+────────────────────────────────────────────────────
+  في api-server، المطلوب pino logger (structured JSON) لا console.
+  الـ singleton الحالي غير مناسب للإنتاج مباشرةً.
+  الحل: في api-server، أنشئ bus محلي بـ pino adapter (أنظر §6).
+
+LIMIT-08: UUID generator بـ Math.random()
+────────────────────────────────────────────
+  الـ generateId() الداخلية تستخدم Math.random() — غير cryptographically secure.
+  مناسبة للـ event IDs لكن لا تصلح للـ session tokens أو auth codes.
+  الحل المستقبلي: استخدم crypto.randomUUID() (متاح في Node 19+).
+
+LIMIT-09: لا automatic listener cleanup
+─────────────────────────────────────────
+  المستمعون يتراكمون حتى يتم unsubscribe() صراحةً.
+  لا WeakRef-based cleanup للـ component-scoped subscriptions.
+  الخطر: memory leak في حالة نسيان unsubscribe() في long-running handlers.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. TECHNICAL DEBT — الديون التقنية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEBT-01: الـ eventBus الجديد والـ EventDispatcher الحالي — نظامان موازيان
+──────────────────────────────────────────────────────────────────────────
+  الوضع الحالي:
+    api-server لديه نظام أحداث كامل: EventDispatcher + EVENTS + REGISTRY + listeners
+    core-events لديه EventBus الجديد غير مرتبط بأي كود فعلي
+  الخطر: المطورون قد يستخدمون النظامَين بشكل عشوائي
+  الحل: Ticket 04 يربط الاثنين أو يُعلن واحداً منهم deprecated
+
+DEBT-02: الـ pino adapter غير مُنشأ
+──────────────────────────────────────
+  eventBus singleton يستخدم console بدلاً من pino.
+  يجب إنشاء adapter في api-server قبل الاستخدام في الإنتاج.
+
+DEBT-03: EventInput<K> يتطلب workspace و actor دائماً
+───────────────────────────────────────────────────────
+  بعض الأحداث (مثلاً أحداث النظام الداخلية) لا actor لها.
+  ActorContext جميع حقوله optional — هذا مناسب، لكن workspace.workspaceId إلزامي.
+  الأحداث على مستوى المنصة (super_admin actions) لا workspaceId لها.
+  الحل الجزئي: WorkspaceContext.workspaceId يمكن أن يكون 0 للأحداث المنصة-مستوى.
+  الحل الصحيح: PlatformEvent type بدون workspaceId (Ticket 04).
+
+DEBT-04: clearAll() في production — خطر
+──────────────────────────────────────────
+  clearAll() مُصدَّرة علناً — يمكن استدعاؤها خطأً في الكود الإنتاجي.
+  الحل: إخفاؤها خلف NODE_ENV check أو نقلها لـ test utilities فقط.
+
+DEBT-05: TypedEvent vs BaseEvent في subscribeToAll
+────────────────────────────────────────────────────
+  راجع LIMIT-06 أعلاه.
+  يحتاج إما: تغيير WildcardHandler لـ AnyTypedEvent، أو توثيق type guard pattern.
+
+DEBT-06: tsconfig lib: ["es2022", "dom"]
+──────────────────────────────────────────
+  أُضيف "dom" lib لتمكين console في الـ library.
+  "dom" يُدخل أنواع الـ browser (setTimeout, fetch, etc.) للـ type checking.
+  هذا مقبول لأن الأنواع لا تتعارض، لكنه يُضيف noise في الـ type system.
+  الحل البديل: استخدم @types/node بدلاً من "dom" (لكن يتطلب dep إضافية).
+  الحل الأنظف: حذف console من core-events وإلزام المستخدم بتمرير logger.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. NAMING CONFLICTS & ISSUES الجديدة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ISSUE-01: EventDispatcher vs EventBus — اسمان لمفهوم واحد
+────────────────────────────────────────────────────────────
+  api-server: EventDispatcher (dispatch, on, دون unsubscribe)
+  core-events: EventBus (emit, subscribe, unsubscribe, subscribeOnce)
+  يجب اختيار مصطلح واحد ودمجهما في Ticket 04.
+
+ISSUE-02: EventListener vs TypedEventHandler
+─────────────────────────────────────────────
+  api-server/src/lib/events/types.ts: type EventListener = (payload, logId) => Promise<void>
+  core-events/src/bus.ts: type TypedEventHandler<K> = (event) => Promise<void>
+  الاختلاف: EventListener تستقبل logId كمعامل ثانٍ — الـ bus لا يُمرّر logId
+  السبب: الـ bus لا يكتب للـ DB — logId مفهوم مرتبط بالـ persistence layer
+
+ISSUE-03: EventListenerFn في types.ts
+───────────────────────────────────────
+  lib/core-events/src/types.ts تعرّف EventListenerFn بـ (event, logId) —
+  هذا يعني أن EventListenerFn مُصمَّمة للنظام الحالي (مع DB).
+  الـ bus الجديد TypedEventHandler لا يحتاج logId.
+  هناك الآن نوعان للـ listener في نفس الـ package (EventListenerFn و TypedEventHandler).
+  الحل: في Ticket 04، قرر أيهما هو الكانوني وأزل الآخر.
+
+ISSUE-04: الـ bus لا يُمرِّر logId للمستمعين
+───────────────────────────────────────────────
+  المستمعون الحاليون في api-server يستخدمون logId للمعالجة:
+    async (payload: EventPayload, logId: number) => { ... }
+  الـ bus الجديد لا يُمرِّر logId — incompatible interface.
+  الحل: إما يُعيد الـ bus logId (يعني يكتب للـ DB)،
+         أو المستمعون يتوقفون عن الاحتياج لـ logId (Ticket 04 يقرر).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. VERIFICATION — التحقق
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm run typecheck:libs   → ✅ نظيف، 0 أخطاء
+  خطآن تم إصلاحهما:
+    1. "dom" lib مفقودة (console غير معرَّف في lib: ["es2022"]) → أُضيف "dom"
+    2. تعليق JSDoc يحتوي على */ داخله (يُغلق الـ block مبكراً) → حُذف التعليق
+  تأثير على runtime        → ✅ صفر — لا imports حالية للـ bus الجديد
+  تأثير على API routes     → ✅ صفر
+  تأثير على DB schema      → ✅ صفر
+  الكود الموجود في api-server → ✅ لم يُلمَس
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. SUGGESTIONS FOR TICKET 04 — اقتراحات التذكرة القادمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الهدف الرئيسي لـ Ticket 04: ربط EventBus الجديد بنظام الأحداث الحالي في api-server
+
+── المهام المقترحة (مرتبة بالأولوية) ──────────────────────────────────────────
+
+T04-A: إنشاء pino Logger Adapter في api-server (أساسي، قليل من الكود)
+  الملف: api-server/src/lib/events/bus-adapter.ts
+  المحتوى:
+    import { logger } from "../logger";
+    import { createEventBus } from "@workspace/core-events";
+    export const appEventBus = createEventBus({
+      logger: { error: logger.error.bind(logger), ... },
+      verboseEmit: process.env.NODE_ENV === "development",
+    });
+  ملاحظة: يتطلب إضافة "@workspace/core-events": "workspace:*" لـ api-server/package.json
+
+T04-B: إضافة @workspace/core-events كـ dependency لـ api-server
+  package.json:  "@workspace/core-events": "workspace:*"
+  tsconfig.json: إضافة reference لـ core-events
+  بدون هذا: لا يمكن لـ api-server استيراد EventBus أو EVENT_TYPES
+
+T04-C: قرر نهج التكامل مع EventDispatcher الحالي
+  الخيار A (موصى به): EventBus يلف EventDispatcher
+    appEventBus.emit() → EventDispatcher.dispatch() (للـ DB persistence)
+    EventDispatcher يُشغّل listeners كالمعتاد
+    يحافظ على DB logging دون تغيير الـ listeners
+  الخيار B (أبطأ): استبدل EventDispatcher بـ EventBus مع DB adapter
+    يتطلب تعديل كل الـ listeners لتزيل logId parameter
+    تأثير أكبر لكن نتيجة أنظف
+
+T04-D: حلّ تعارض logId في listener interface
+  إذا اخترت الخيار A: EventBus.subscribe يعمل، لكن listeners ترث logId من Dispatcher
+  إذا اخترت الخيار B: listeners تحصل على logId من event.metadata إذا احتاجتها
+
+T04-E: إنشاء isEventType() runtime type guard
+  الملف: api-server/src/lib/events/guards.ts أو core-events/src/guards.ts
+  المحتوى:
+    import type { IsEventTypeFn } from "@workspace/core-events";
+    export const isEventType: IsEventTypeFn = (event, type) => event.type === type;
+  الاستخدام في subscribeToAll():
+    eventBus.subscribeToAll(async (event) => {
+      if (isEventType(event, "ticket.created")) {
+        event.data.ticketId  // ✓ مُضيَّق النوع
+      }
+    });
+
+T04-F: Event Bus diagnostics endpoint في api-server
+  أضف route: GET /api/admin/event-bus/stats (super_admin فقط)
+  يُعيد: appEventBus.stats() — عدد المستمعين لكل نوع حدث
+
+── TODO Architecture Notes للمستقبل البعيد ─────────────────────────────────────
+
+TODO(redis-adapter):
+  إنشاء RedisEventBus يُنفِّذ نفس interface لكن بـ Redis Streams:
+    interface IEventBus { emit, subscribe, subscribeOnce, unsubscribe, stats }
+  EventBus وRedisEventBus كلاهما يُنفِّذان IEventBus.
+  api-server يختار بناءً على REDIS_URL env var.
+
+TODO(persistent-queues):
+  BullMQ adapter لضمان delivery حتى عند crash:
+    emit() → يضع الحدث في queue
+    workers → يُشغِّلون listeners من queue
+    نتيجة: at-least-once delivery
+
+TODO(retry):
+  RetryPolicy interface:
+    maxAttempts: number
+    backoffMs: (attempt) => number  // exponential
+    retryOn: (error: Error) => boolean
+  ListenerEntry يحمل RetryPolicy اختيارية
+
+TODO(dead-letter-queue):
+  بعد N محاولات فاشلة:
+    emit DeadLetterEvent مع original event + error history
+    DLQ handler يُقرِّر: تجاهل، تنبيه، أو حفظ لمراجعة يدوية
+
+TODO(distributed-events):
+  Event schema versioning عبر microservices:
+    EventMetadata.schemaVersion موجود بالفعل ✓
+    يحتاج: schema registry لتحديث versions آمنة
+
+================================================================================
+  نهاية التقرير — Architecture Ticket 03
+================================================================================

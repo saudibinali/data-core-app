@@ -1,0 +1,281 @@
+راجع:
+- workflow-phase-10a-report.txt
+- workflow-phase-10b-report.txt
+- workflow-phase-10c-report.txt
+خصوصًا:
+- RecoveryRecommendation
+- RecommendationConfidence
+- IncidentTimeline
+- WorkspaceTrend
+- MTTR
+- platformHealthTrend
+- suggestionActions
+- recoveryMoments
+
+ثم نفّذ فقط:
+P10-D — Recovery Orchestration Research & Human-In-The-Loop Remediation Foundations
+
+ولا تنفّذ:
+- autonomous remediation
+- self-healing systems
+- automatic scheduler mutation
+- AI remediation
+- automatic failover
+- unattended recovery execution
+
+عنوان المهمة:
+WORKFLOW PHASE 10-D — Recovery Orchestration Research & Human-In-The-Loop Remediation Foundations
+
+المهمة الحالية:
+تحويل:
+operator-guided advisory intelligence
+
+إلى:
+controlled recovery orchestration research infrastructure
+
+الهدف:
+تمكين:
+- operator-triggered remediation flows
+- audited recovery orchestration
+- remediation lifecycle tracking
+- rollback-safe recovery actions
+- orchestration-readiness experimentation
+
+بطريقة:
+deterministic human-controlled recovery orchestration layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT RECOVERY LIMITATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Remaining Resilience Gaps"
+
+خصوصًا:
+- no operator feedback loop
+- no recommendation persistence
+- no orchestration lifecycle
+- no remediation audit tracking
+
+حدّد:
+- أين operators ينفذون recovery يدويًا خارج النظام
+- أين remediation actions غير موثقة
+- أين recommendation history تضيع
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN RECOVERY ORCHESTRATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecoveryOrchestrationAction
+
+ليحتوي:
+- actionId
+- workspaceId
+- incidentId
+- recommendationId
+- orchestrationType
+- initiatedBy
+- initiatedAt
+- orchestrationStatus
+- rollbackEligible
+- relatedSignals
+- executionNotes
+
+مع:
+append-only orchestration semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — HUMAN-IN-THE-LOOP ORCHESTRATION ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+initiateRecoveryOrchestration()
+
+بحيث:
+- يتطلب explicit operator action
+- يربط recommendation → remediation
+- يسجل audit trail كامل
+- يدعم rollback-safe orchestration
+- يمنع duplicate orchestration spam
+
+لكن:
+بدون automatic execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ORCHESTRATION TYPES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecoveryOrchestrationType
+
+يحتوي:
+- scheduler_pressure_review
+- fairness_policy_review
+- containment_audit
+- noisy_tenant_investigation
+- advisory_threshold_review
+- recovery_stability_validation
+- escalation_monitoring
+- operational_watch
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ORCHESTRATION LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecoveryOrchestrationStatus
+
+يحتوي:
+- initiated
+- acknowledged
+- in_review
+- resolved
+- rolled_back
+- cancelled
+
+مع:
+strict deterministic transitions فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ORCHESTRATION SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+- append-only orchestration history
+- rollback eligibility tracking
+- operator attribution required
+- no concurrent active orchestration conflicts
+- audit-safe serialization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+POST /platform/reliability/orchestrations
+POST /platform/reliability/orchestrations/:id/acknowledge
+POST /platform/reliability/orchestrations/:id/resolve
+POST /platform/reliability/orchestrations/:id/rollback
+GET  /platform/reliability/orchestrations
+
+بحيث:
+- super-admin only
+- deterministic ordering
+- append-only orchestration history
+- audit-safe payloads
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+recovery_orchestration_initiated
+
+B)
+recovery_orchestration_acknowledged
+
+C)
+recovery_orchestration_resolved
+
+D)
+recovery_orchestration_rolled_back
+
+كلها تحتوي:
+- actionId
+- workspaceId
+- incidentId
+- orchestrationType
+- orchestrationStatus
+- initiatedBy
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Recovery orchestration MUST:
+- remain human-triggered
+- never auto-execute remediation
+- never mutate scheduler automatically
+- preserve rollback guarantees
+- fail closed on ambiguity
+
+أي:
+human-controlled remediation orchestration فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+orchestration creation deterministic
+
+T2:
+operator attribution required
+
+T3:
+duplicate orchestration conflicts rejected
+
+T4:
+lifecycle transitions deterministic
+
+T5:
+rollback eligibility preserved
+
+T6:
+append-only history guaranteed
+
+T7:
+audit serialization stable
+
+T8:
+super-admin enforcement valid
+
+T9:
+observability events scoped correctly
+
+T10:
+no autonomous remediation occurs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- autonomous remediation
+- AI recovery execution
+- self-healing runtimes
+- automatic scheduler balancing
+- automatic policy mutation
+- unattended orchestration flows
+
+خلك:
+minimal deterministic remediation orchestration infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-10d-report.txt
+
+ويحتوي:
+- remediation orchestration architecture
+- orchestration lifecycle semantics
+- rollback guarantees
+- auditability model
+- governance integration points
+- observability additions
+- tests results
+- remaining resilience gaps
+- readiness assessment قبل controlled remediation research

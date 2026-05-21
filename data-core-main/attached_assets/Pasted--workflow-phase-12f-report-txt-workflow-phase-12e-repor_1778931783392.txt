@@ -1,0 +1,392 @@
+راجع:
+- workflow-phase-12f-report.txt
+- workflow-phase-12e-report.txt
+- workflow-phase-12d-report.txt
+- workflow-phase-12c-report.txt
+- workflow-phase-12b-report.txt
+- workflow-phase-12a-report.txt
+- workflow-phase-11f-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceEvidencePackages page
+- useGovernanceEvidencePackages()
+- useGovernanceEvidenceReadiness()
+- GovernanceEvidencePackage
+- GovernanceEvidencePackageScope
+- GovernanceEvidenceSection
+- GovernancePackageIntegrityStatus
+- packageIntegrityHash
+- evidenceReferences
+- GovernanceEvidenceReferenceList
+- GovernanceBoundarySummaryTable
+- READINESS_DIMENSION_MAP
+- TOPOLOGY_LAYER_MAP
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-G — Evidence Packages UI & Controlled Package Review Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- package generation mutation
+- PDF/XLSX/CSV export rendering
+- external export submission
+- regulator integration
+- AI summaries
+- legal conclusions
+- package notarization
+- blockchain logic
+
+عنوان المهمة:
+WORKFLOW PHASE 12-G — Evidence Packages UI & Controlled Package Review Foundations
+
+المهمة الحالية:
+تحويل:
+Evidence Packages placeholder page
+
+إلى:
+frontend read-only evidence package review and integrity inspection experience
+
+الهدف:
+تمكين:
+- evidence package list review
+- package integrity visibility
+- package scope/section inspection
+- evidence reference review
+- package readiness visibility
+- hash/timestamp inspection
+- controlled export-readiness UX بدون تصدير فعلي
+
+بطريقة:
+frontend-only read-only evidence package review layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EVIDENCE PACKAGES PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-evidence-packages.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- governance-evidence-reference-list.tsx
+- governance-boundary-summary-table.tsx
+- shared governance components
+
+حدّد:
+- كيف تُعرض evidence packages حاليًا
+- كيف hooks ترجع packages/readiness
+- كيف تعرض packageIntegrityHash
+- كيف تعرض package sections
+- كيف تحافظ على read-only notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PACKAGE SCOPE VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+EVIDENCE_PACKAGE_SCOPE_MAP
+
+يدعم:
+- platform
+- workspace
+- entity
+- violation
+- workflow
+- readiness
+
+لكل scope:
+- label
+- description
+- order
+- tier
+- displayHint
+
+بدون:
+- export wording
+- legal wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EVIDENCE SECTION VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+EVIDENCE_SECTION_MAP
+
+يدعم:
+- audit_integrity
+- policy_violations
+- workflow_lifecycle
+- governance_analytics
+- topology_readiness
+- forensic_timeline
+- boundary_summary
+
+لكل section:
+- label
+- description
+- order
+- expectedSourceLayer
+- reviewMeaning
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PACKAGE INTEGRITY VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+PACKAGE_INTEGRITY_STATUS_MAP
+
+يدعم:
+- verified
+- warning
+- incomplete
+- compromised
+- unknown
+
+لكل status:
+- label
+- description
+- tier
+- order
+- badge semantics
+
+مهم:
+compromised يظهر critical visibility فقط، بدون fix/repair action.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — EVIDENCE PACKAGES PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceEvidencePackages
+
+لتحتوي:
+- evidence readiness overview banner
+- package integrity summary cards
+- package list/table
+- package detail expansion
+- section coverage grid
+- evidence references panel
+- package hash/timestamp panel
+- filters:
+  - scope
+  - integrityStatus
+  - workspaceId
+  - section
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PACKAGE LIST / DETAIL EXPANSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لكل package row/card:
+أضف expandable detail view يعرض:
+- packageId
+- packageScope
+- workspaceId
+- entityId
+- includedSections
+- generatedBy
+- generatedAt
+- packageIntegrityHash
+- integrityStatus إن وجد
+- readinessStatus إن وجد
+- evidenceReferences
+- summaries:
+  - auditChainSummary
+  - violationSummary
+  - workflowSummary
+  - analyticsSummary
+  - topologySummary
+  - readinessSummary
+
+مع:
+- hash preview + full hash copy-safe text
+- no download/export buttons
+- no generate package button
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — SECTION COVERAGE GRID COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceEvidenceSectionCoverageGrid
+
+يعرض:
+- all evidence sections بالترتيب
+- included / missing / unknown status
+- expectedSourceLayer
+- reviewMeaning
+- related evidence count إن وجد
+
+مع:
+- stable ordering
+- missing sections visible
+- empty/loading states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — PACKAGE INTEGRITY PANEL COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernancePackageIntegrityPanel
+
+يعرض:
+- packageIntegrityHash preview
+- full hash في collapsible أو copy-safe block
+- generatedAt
+- integrityStatus
+- warning codes إن وجدت
+- serialization/readiness notes
+
+بدون:
+- verify button
+- repair button
+- notarization wording
+- blockchain wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — EVIDENCE READINESS OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض readiness من:
+useGovernanceEvidenceReadiness()
+
+كـ:
+- readiness status
+- package count
+- incomplete package count
+- compromised package count
+- missing evidence count
+- warning codes
+
+إذا البيانات غير متوفرة:
+- اعرض empty state محترم
+- لا تستنتج readiness من نفسك
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Evidence Packages page لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no package data
+- no readiness data
+- no filters result
+- missing section visibility
+- compromised package visibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Evidence Packages UI MUST:
+- remain frontend-only
+- remain read-only
+- never generate packages
+- never export packages
+- never submit externally
+- never verify/repair packages via action
+- never notarize/hash externally
+- never create legal conclusions
+- never expose data outside super-admin
+
+أي:
+controlled package review UX فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+evidence package scope map stable
+
+T2:
+evidence section map stable
+
+T3:
+package integrity status map stable
+
+T4:
+evidence packages page remains super-admin scoped
+
+T5:
+section coverage ordering deterministic
+
+T6:
+missing sections always visible
+
+T7:
+compromised packages always visible
+
+T8:
+no generate/export/verify/legal/notarize labels exist
+
+T9:
+evidence package safety contract true
+
+T10:
+hooks remain read-only
+
+T11:
+filters config stable
+
+T12:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- package generation controls
+- PDF/XLSX/CSV export
+- download buttons
+- external submission
+- regulator integration
+- AI explanation cards
+- legal verdicts
+- verify/repair controls
+- blockchain/notarization logic
+
+خلك:
+minimal frontend evidence package review UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12g-report.txt
+
+ويحتوي:
+- evidence packages UI architecture
+- package scope visual model
+- evidence section visual model
+- package integrity visual model
+- package list/detail expansion design
+- section coverage grid design
+- package integrity panel design
+- evidence readiness overview behavior
+- read-only safety guarantees
+- tests results
+- remaining evidence package UI gaps
+- readiness assessment قبل Phase 12 final closure

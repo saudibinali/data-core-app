@@ -1,0 +1,790 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 11-C REPORT
+Compliance Workflow Orchestration & Human-Acknowledged Governance Resolution
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date         : 2026-05-15
+Phase        : P11-C
+Status       : COMPLETE
+Tests        : 2219 passed / 2219 total (39 files)
+New tests    : 60 (T1–T10)
+Typecheck    : CLEAN (zero errors, EXIT:0)
+DB migration : governance_workflow_actions table created + pushed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Convert the read-only governance intelligence layer (P11-B) into a
+human-governed compliance workflow orchestration infrastructure.
+
+P11-B gave us: violation detection — which policies are breached, how severe,
+what the evidence is.
+
+P11-C adds: violation lifecycle management — who acknowledged it, who
+investigated, who escalated it and why, and who ultimately resolved it with
+what classification — all persisted in an append-only DB table with full
+operator attribution on every transition.
+
+Governance gaps closed from P11-B "Remaining Compliance Gaps":
+
+  ✓ No violation status management      → 6-state workflow with typed transitions
+  ✓ No governance workflow lifecycle    → GovernanceWorkflowAction full lifecycle
+  ✓ No compliance escalation tracking   → GovernanceEscalationLevel (4 tiers)
+  ✓ No investigation assignment         → assignedOperatorId per workflow
+  ✓ Acknowledgments undocumented        → acknowledgedBy + acknowledgedAt per row
+  ✓ Resolution evidence not preserved   → resolutionClassification + note + resolvedBy
+  ✓ Escalations lost                    → escalatedBy + escalatedAt + level upgrade
+
+Safety constraints upheld (all from the task specification):
+  ✓ HUMAN-GOVERNED: every transition requires an explicit, non-empty operatorId
+  ✓ NO AUTO-RESOLVE: the engine never transitions a workflow autonomously
+  ✓ NO AUTO-DISMISS: dismissed status requires explicit human call + classification
+  ✓ NO AI: all transition logic is deterministic rule-based state machine
+  ✓ NO ENFORCEMENT: resolution never triggers downstream disciplinary actions
+  ✓ FAIL-CLOSED: invalid transitions return an error, never silently proceed
+  ✓ APPEND-ONLY HISTORY: the engine returns updated value objects; terminal
+    states block all further transitions permanently
+  ✓ DETERMINISTIC: same inputs → same state output, same ordering, every time
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. GOVERNANCE WORKFLOW ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  Design Decision: One Row Per Violation, In-Place Status Updates
+
+  Each GovernanceViolation (detected by P11-B) gets at most ONE non-terminal
+  workflow row in governance_workflow_actions. When an operator acknowledges,
+  escalates, or resolves the workflow, the row is UPDATE'd in place with
+  the new status and operator attribution fields.
+
+  This is a deliberate departure from the pure append-only pattern of the
+  audit chain (P11-A):
+
+  Audit chain (P11-A):  APPEND-ONLY — one INSERT per event, never UPDATE
+  Workflow actions (P11-C): ONE ROW per violation lifecycle, UPDATE on transition
+
+  Rationale for the UPDATE pattern:
+  - A violation workflow is a single lifecycle, not a stream of events
+  - Each transition adds NEW attribution fields (acknowledgedBy, escalatedBy, etc)
+    that didn't exist before — so the UPDATE is additive, not overwriting
+  - The full history is preserved in the attribution fields:
+    createdAt/initiatedBy → acknowledgedAt/acknowledgedBy → escalatedAt/escalatedBy
+    → resolvedAt/resolvedBy + resolutionClassification
+  - If full immutable history of each status change is needed, each workflow
+    transition can also record an audit chain entry (P11-A) — this is described
+    in the remaining gaps section as a future enhancement
+
+  NOTE: The engine itself (pure functions) never writes to DB. The route handlers
+  call the engine, receive a new value object, and then UPDATE the DB row.
+  The engine's immutability guarantee: it never mutates the input `existing` workflow.
+
+2.2  Duplicate Active Workflow Prevention
+
+  At most ONE non-terminal workflow may exist per violationId at any time.
+  This is enforced in initiateGovernanceWorkflow() via the `existingActiveWorkflows`
+  parameter — the caller loads non-terminal rows for the violationId and passes
+  them to the engine. The engine checks and returns DUPLICATE_ACTIVE_WORKFLOW.
+
+  Terminal workflows (resolved, dismissed) do NOT block new workflows for the
+  same violationId — a resolved violation can recur and need a new workflow.
+
+  This is an APPLICATION-LEVEL constraint, not a DB UNIQUE constraint, because:
+  - A DB unique index on (violationId, non-terminal) is not directly expressible
+    in standard PostgreSQL syntax
+  - The application layer provides full control over the check semantics
+
+2.3  GovernanceWorkflowAction Model
+
+  interface GovernanceWorkflowAction {
+    workflowActionId:         string;   // "gwf:<policyId>:<violationId>-<createdAtMs>"
+    violationId:              string;   // from GovernanceViolation.violationId (P11-B)
+    policyId:                 string;   // from GovernanceViolation.policyId (P11-B)
+    workspaceId:              number | null;
+    assignedOperatorId:       string | null;  // optional investigation assignee
+    initiatedBy:              string;   // operator who opened the workflow
+    workflowStatus:           GovernanceWorkflowStatus;  // 6 states (see 3.1)
+    escalationLevel:          GovernanceEscalationLevel; // 4 tiers (see 4.1)
+    resolutionClassification: ResolutionClassification | null; // null until resolved
+    resolutionNote:           string | null;  // operator-provided context
+    evidenceReferences:       string[];  // chainIds, executionIds from P11-B violation
+    acknowledgedBy:           string | null;
+    acknowledgedAt:           Date | null;
+    escalatedBy:              string | null;
+    escalatedAt:              Date | null;
+    resolvedBy:               string | null;
+    resolvedAt:               Date | null;
+    createdAt:                Date;
+    updatedAt:                Date;
+  }
+
+2.4  File Locations
+
+  lib/db/src/schema/governance-workflow-actions.ts    — DB schema (new)
+  lib/db/src/schema/index.ts                          — updated (new export)
+  artifacts/api-server/src/lib/workflows/
+    compliance-workflow-orchestration.ts              — pure engine (new)
+  artifacts/api-server/src/lib/workflows/__tests__/
+    compliance-workflow-orchestration.test.ts         — 60 tests (new)
+  artifacts/api-server/src/routes/platform.ts        — 5 new routes added
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. WORKFLOW STATUS MODEL & TRANSITION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  GovernanceWorkflowStatus — 6 States
+
+  open          Initial state. The violation has been detected by P11-B and a
+                workflow has been initiated, but no human has yet reviewed it.
+                
+  acknowledged  An operator has confirmed they are aware of the violation and
+                are investigating. acknowledgedBy and acknowledgedAt are set.
+                
+  under_review  Deeper investigation is in progress. Currently set as the
+                target when an acknowledged workflow is re-acknowledged, or
+                used as an intermediate state for future multi-stage review.
+                
+  escalated     A senior operator has determined the violation requires
+                elevated urgency. escalatedBy, escalatedAt, and escalationLevel
+                (upgraded) are set. May be triggered from open, acknowledged,
+                or under_review states.
+                
+  resolved      The investigation is complete. resolvedBy, resolvedAt, and
+                resolutionClassification are set. Terminal — no further transitions.
+                
+  dismissed     The investigation determined the violation is not actionable
+                (false positive or operational exception). dismiss=true in
+                resolveWorkflow(). Terminal — no further transitions.
+                
+  TERMINAL:     resolved, dismissed — isValidTransition() returns false for
+                any target status from these states.
+
+3.2  Valid Transition Graph
+
+  ┌──────────────┬────────────────────────────────────────────────────────────┐
+  │ From status  │ → allowed target statuses                                  │
+  ├──────────────┼────────────────────────────────────────────────────────────┤
+  │ open         │ → acknowledged  (acknowledgeWorkflow)                      │
+  │              │ → escalated     (escalateWorkflow — bypass for urgency)    │
+  │              │ → resolved      (resolveWorkflow — direct resolution)      │
+  │ acknowledged │ → under_review  (acknowledgeWorkflow on already-ack'd)     │
+  │              │ → escalated     (escalateWorkflow)                         │
+  │              │ → resolved      (resolveWorkflow)                          │
+  │ under_review │ → escalated     (escalateWorkflow)                         │
+  │              │ → resolved      (resolveWorkflow)                          │
+  │ escalated    │ → resolved      (resolveWorkflow)                          │
+  │ resolved     │ (terminal — no transitions)                                │
+  │ dismissed    │ (terminal — no transitions)                                │
+  └──────────────┴────────────────────────────────────────────────────────────┘
+
+  dismissed is reached via resolveWorkflow(..., dismiss=true) — it uses the
+  resolved transition path but sets workflowStatus="dismissed" in the result.
+  This means: isValidTransition(from, "resolved") is the guard for dismiss too.
+
+3.3  Transition Error Types
+
+  INVALID_TRANSITION             The from → to transition is not in the allowed graph.
+  TERMINAL_STATE                 The workflow is in a terminal state (resolved/dismissed).
+                                 Returned as HTTP 409 Conflict.
+  EMPTY_OPERATOR                 The operatorId argument is empty. Every transition
+                                 requires an explicit human identifier.
+  RESOLUTION_REQUIRES_CLASSIFICATION  resolveWorkflow called with no classification.
+  INVALID_RESOLUTION_CLASSIFICATION   Classification is not one of the 5 valid values.
+  INVALID_ESCALATION_LEVEL       escalateWorkflow tried to lower the escalation level.
+                                 Escalation can only go up, never down.
+
+3.4  Fail-Closed Semantics
+
+  Any transition that does not satisfy ALL of:
+  - non-empty operatorId
+  - valid from → to path
+  - non-terminal current state
+  - valid resolution classification (if resolving)
+  - non-decreasing escalation level (if escalating)
+
+  ...returns { updated: null, errors: [...] }. The caller MUST check errors
+  before proceeding. The engine never returns a partially-updated workflow.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. ESCALATION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  GovernanceEscalationLevel — 4 Tiers
+
+  informational     Low-severity violations (low policySeverity → POL-008 medium).
+                    Standard monitoring track. No urgency.
+                    
+  standard          Medium-severity violations (medium policySeverity → POL-004, POL-008).
+                    Requires timely review but not emergency response.
+                    
+  elevated          High-severity violations (high policySeverity → POL-002, POL-006, POL-007).
+                    Priority review required. Senior operator attention warranted.
+                    
+  critical          Critical-severity violations (critical policySeverity → POL-001, POL-003, POL-005).
+                    Maximum urgency. Requires immediate attention.
+                    governance_workflow_escalated emitted as WARN.
+
+4.2  Initial Escalation Level Assignment
+
+  classifyEscalationLevel(severity: PolicySeverity) → GovernanceEscalationLevel
+
+    critical → critical
+    high     → elevated
+    medium   → standard
+    low      → informational
+
+  This mapping is deterministic and pure. The initial escalation level is set at
+  workflow creation time from the violation's policySeverity (supplied by the caller).
+
+4.3  Escalation Level Monotonicity
+
+  The escalation level can only increase (or stay the same) via escalateWorkflow().
+  Attempting to set a LOWER escalation level than the current one returns
+  INVALID_ESCALATION_LEVEL.
+
+  SEVERITY ORDER: informational(0) < standard(1) < elevated(2) < critical(3)
+
+  This ensures that once a violation has been marked critical, it cannot be
+  quietly downgraded to informational without going through a full resolve cycle.
+  If the level needs to be reconsidered, the operator must resolve the current
+  workflow and open a new one.
+
+4.4  criticalUnresolved Count
+
+  buildWorkflowSummary() tracks criticalUnresolved:
+    = count of workflows where escalationLevel="critical" AND workflowStatus
+      is NOT in {resolved, dismissed}
+
+  This metric surfaces the number of highest-urgency violations that have not
+  yet been resolved. It is a primary governance health indicator.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. RESOLUTION CLASSIFICATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  ResolutionClassification — 5 Values
+
+  confirmed_violation
+    The investigation confirmed the violation is genuine. The underlying condition
+    (e.g., rollback without confirmation, missing audit chain) existed as flagged.
+    Action: the underlying process must be corrected by human operators.
+    workflowStatus → "resolved"
+
+  false_positive
+    The investigation determined the violation was triggered in error. The underlying
+    data pattern triggered the policy rule but does not represent a real compliance
+    risk in this specific case.
+    Typical usage: when dismissed=true is passed to resolveWorkflow.
+    workflowStatus → "dismissed"
+
+  operational_exception
+    The violation is real, but the specific instance is an accepted operational
+    exception (e.g., a rollback during a known planned maintenance window that
+    had authorization outside the system). Documented with a resolutionNote.
+    Typical usage: when dismissed=true is passed to resolveWorkflow.
+    workflowStatus → "dismissed"
+
+  policy_gap
+    The investigation revealed the policy itself (one of POL-001 to POL-008) has
+    a gap or edge case that produces false violations in specific scenarios.
+    Outcome: the policy definition should be reviewed and updated.
+    workflowStatus → "resolved"
+
+  unresolved_pending_review
+    The investigation is incomplete and requires additional information or a
+    senior review before a final classification can be made.
+    workflowStatus → "resolved" (the workflow is closed but marked as pending
+    further action — a new workflow may be opened when review is complete).
+
+5.2  Resolution Validation
+
+  resolveWorkflow() validates resolutionClassification against the
+  VALID_RESOLUTION_CLASSIFICATIONS set before producing an updated workflow.
+  An unrecognized classification returns INVALID_RESOLUTION_CLASSIFICATION.
+
+  This prevents free-form text from being stored as a classification,
+  ensuring downstream analytics can reliably group by classification type.
+
+5.3  Dismiss vs Resolve Semantics
+
+  dismiss = false → workflowStatus = "resolved"
+  dismiss = true  → workflowStatus = "dismissed"
+
+  Both paths require resolutionClassification and resolvedBy.
+  Both transitions use the same valid-from guard (isValidTransition(from, "resolved")).
+  The distinction is purely in the final workflowStatus value.
+
+  Recommended classification mapping (not enforced — for guidance only):
+    confirmed_violation      → resolve (dismiss=false)
+    false_positive           → dismiss (dismiss=true)
+    operational_exception    → dismiss (dismiss=true)
+    policy_gap               → resolve (dismiss=false)
+    unresolved_pending_review → resolve (dismiss=false)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. APPEND-ONLY WORKFLOW GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  Engine Immutability
+
+  All four engine functions (initiateGovernanceWorkflow, acknowledgeWorkflow,
+  escalateWorkflow, resolveWorkflow) are pure — they never mutate their input
+  arguments. Each returns a new value object (or an error result).
+
+  This is verified in T6: before/after JSON comparison of the input workflow
+  confirms no field is modified by any engine call.
+
+6.2  Terminal State Finality
+
+  Once a workflow reaches "resolved" or "dismissed", isValidTransition() returns
+  false for any target status. The route handlers return HTTP 409 Conflict when
+  a terminal-state workflow receives a transition request.
+
+  This makes resolved and dismissed workflows permanently immutable in their
+  current state. They can serve as permanent records of the investigation outcome.
+
+6.3  Evidence References as Immutable Snapshots
+
+  evidenceReferences (array of chainIds and executionIds from P11-B) are copied
+  at workflow initiation and never modified by subsequent transitions.
+  The evidence captured at initiation time is the forensic record of what
+  triggered the investigation — it must not be altered during the investigation.
+
+6.4  Attribution Completeness
+
+  Every transition records three pieces of information:
+  1. Who did it (operatorId as a string identifier)
+  2. When it happened (at: Date timestamp)
+  3. What was said (note or reason, optional)
+
+  These are append-only in the sense that they are NULL at initiation and set
+  once during the relevant transition — they are never overwritten:
+  - acknowledgedBy / acknowledgedAt — set by acknowledgeWorkflow, never reset
+  - escalatedBy / escalatedAt — set by escalateWorkflow, never reset
+  - resolvedBy / resolvedAt — set by resolveWorkflow, never reset
+
+  NOTE: If the same workflow is escalated twice (future enhancement: re-escalation),
+  escalatedBy would be overwritten. This is acceptable because the current model
+  stores only the MOST RECENT escalation attribution. Full escalation history would
+  require a separate escalation_events table (see remaining gaps).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  P11-C Reads From and Writes To
+
+  governance_workflow_actions table
+    - SELECT (list + single row lookup) in all 5 routes
+    - INSERT in POST /platform/governance/workflows
+    - UPDATE in acknowledge, escalate, resolve routes
+
+  No reads from: compliance_audit_chains, remediation_execution_attempts,
+  recovery_orchestration_actions, or any other P10-* tables.
+  P11-C is deliberately self-contained — it operates on the workflow table only.
+
+7.2  Connection to P11-B (Governance Policy Intelligence)
+
+  Violations are DETECTED by P11-B (evaluateGovernancePolicies, read-only).
+  Workflows are INITIATED by P11-C against violation IDs from P11-B output.
+
+  The violationId stored in governance_workflow_actions is the
+  GovernanceViolation.violationId from P11-B, which has the format:
+    "viol:<policyId>:<entityId>-<nowMs>"
+
+  Since P11-B violations are computed on-demand (not persisted), the violationId
+  in a workflow is a stable reference that encodes the violation's identity.
+  The caller is responsible for supplying violationId + policyId when initiating
+  a workflow — the P11-C routes do not re-validate that the violation still exists
+  in the current P11-B evaluation (see remaining gaps, item 1).
+
+7.3  Connection to P11-A (Immutable Audit Chains)
+
+  P11-C does not automatically record audit chain entries (P11-A) for each
+  workflow transition. This is a known gap (see remaining gaps, item 2).
+  A future enhancement could wrap each workflow transition in a corresponding
+  audit chain INSERT to create a permanent, hash-linked governance history.
+
+7.4  Complete P10-A → P11-C Stack
+
+  P10-A: Live reliability domain evaluation
+  P10-B: Append-only snapshot persistence + incident lifecycle
+  P10-C: Operator advisory recommendations
+  P10-D: Human-in-the-loop orchestration (recovery_orchestration_actions)
+  P10-E: Explicit-confirmation execution tracking (remediation_execution_attempts)
+  P10-F: Remediation outcome analytics (read-only)
+  P11-A: Immutable audit chain integrity + forensic reconstruction
+  P11-B: Policy evaluation engine — detects violations across P11-A + P10-E data
+  P11-C: Governance workflow orchestration — human-managed lifecycle for each
+         violation from P11-B (open → acknowledged → escalated → resolved/dismissed)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events are structured log entries. No external webhooks or integrations.
+
+Event payload (all 4 events share the same structure):
+  workflowActionId: string
+  violationId:      string
+  policyId:         string
+  escalationLevel:  string
+  workflowStatus:   string
+  action:           string
+
+A) governance_workflow_initiated    [INFO]
+   Fired: POST /platform/governance/workflows on successful INSERT.
+   Signals: a human operator has opened an investigation workflow for a violation.
+
+B) governance_workflow_acknowledged [INFO]
+   Fired: POST /platform/governance/workflows/:id/acknowledge on success.
+   Signals: an operator has confirmed the violation is under active investigation.
+
+C) governance_workflow_escalated    [WARN]
+   Fired: POST /platform/governance/workflows/:id/escalate on success.
+   Signals: the violation's urgency has been elevated. Requires senior attention.
+   Action field: "governance_workflow_escalated"
+
+D) governance_workflow_resolved     [INFO]
+   Fired: POST /platform/governance/workflows/:id/resolve on success.
+   Action field: "governance_workflow_resolved" or "governance_workflow_dismissed"
+   Signals: investigation is complete with a recorded classification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 5 routes:
+  - Require Authorization: Bearer <jwt> with role = super_admin
+  - Protected by requireAuth + requireSuperAdmin middleware
+  - Deterministic ordering (DESC createdAt for list routes)
+  - Forensic-safe serialization (Date objects as ISO strings in JSON)
+
+GET /platform/governance/workflows
+  Auth:    super_admin
+  Params:  workspaceId? (integer), workflowStatus?, policyId?,
+           limit (1–200, default 100), offset
+  Returns: { workflows: GovernanceWorkflowAction[], summary: GovernanceWorkflowSummary,
+             total, limit, offset }
+  Order:   DESC createdAt
+
+POST /platform/governance/workflows
+  Auth:    super_admin
+  Body:    { violationId, policyId, workspaceId?, assignedOperatorId?,
+             violationSeverity, evidenceReferences? }
+  Process: load existing non-terminal rows for violationId → duplicate check
+           → initiateGovernanceWorkflow() → INSERT
+  Returns: { workflow: row } (201 Created)
+  Errors:  409 { error: "DUPLICATE_ACTIVE_WORKFLOW" }
+           400 { error: "EMPTY_VIOLATION_ID" | "EMPTY_POLICY_ID" | "EMPTY_INITIATED_BY" }
+
+POST /platform/governance/workflows/:id/acknowledge
+  Auth:    super_admin
+  Params:  id (workflowActionId, path)
+  Body:    { note?: string }
+  Process: load row → acknowledgeWorkflow(req.userId, note) → UPDATE
+  Returns: { workflow: GovernanceWorkflowAction }
+  Errors:  404 { error: "WORKFLOW_NOT_FOUND" }
+           409 { error: "TERMINAL_STATE" }
+           400 { error: "INVALID_TRANSITION" | "EMPTY_OPERATOR" }
+
+POST /platform/governance/workflows/:id/escalate
+  Auth:    super_admin
+  Params:  id (workflowActionId, path)
+  Body:    { escalationLevel: GovernanceEscalationLevel, reason?: string }
+  Process: load row → escalateWorkflow(req.userId, escalationLevel, reason) → UPDATE
+  Returns: { workflow: GovernanceWorkflowAction }
+  Errors:  404 { error: "WORKFLOW_NOT_FOUND" }
+           409 { error: "TERMINAL_STATE" }
+           400 { error: "INVALID_TRANSITION" | "INVALID_ESCALATION_LEVEL" | "EMPTY_OPERATOR" }
+
+POST /platform/governance/workflows/:id/resolve
+  Auth:    super_admin
+  Params:  id (workflowActionId, path)
+  Body:    { resolutionClassification: ResolutionClassification,
+             note?: string, dismiss?: boolean (default false) }
+  Process: load row → resolveWorkflow(req.userId, classification, note, dismiss) → UPDATE
+  Returns: { workflow: GovernanceWorkflowAction }
+  Errors:  404 { error: "WORKFLOW_NOT_FOUND" }
+           409 { error: "TERMINAL_STATE" }
+           400 { error: "RESOLUTION_REQUIRES_CLASSIFICATION" | "INVALID_RESOLUTION_CLASSIFICATION"
+                        | "EMPTY_OPERATOR" }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. DB SCHEMA — governance_workflow_actions
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Table:   governance_workflow_actions
+Columns:
+
+  id                       serial PK
+  workflow_action_id       text UNIQUE NOT NULL    — "gwf:<policyId>:<violationId>-<ms>"
+  violation_id             text NOT NULL           — violationId from P11-B
+  policy_id                text NOT NULL           — policyId from P11-B
+  workspace_id             int FK → workspaces.id  — nullable (platform-level violations)
+                           ON DELETE CASCADE
+  assigned_operator_id     text                    — optional investigation assignee
+  initiated_by             text NOT NULL           — operator who opened the workflow
+  workflow_status          text NOT NULL DEFAULT "open"
+  escalation_level         text NOT NULL DEFAULT "informational"
+  resolution_classification text                  — null until resolved/dismissed
+  resolution_note          text                    — operator-provided context
+  evidence_references      json NOT NULL DEFAULT [] — copied from P11-B violation
+  acknowledged_by          text
+  acknowledged_at          timestamp
+  escalated_by             text
+  escalated_at             timestamp
+  resolved_by              text
+  resolved_at              timestamp
+  created_at               timestamp NOT NULL DEFAULT now()
+  updated_at               timestamp NOT NULL DEFAULT now()
+
+No DELETE operations are ever issued against this table from the API.
+CASCADE deletion applies when a workspace is deleted — see remaining gaps for
+the forensic risk this creates.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/compliance-workflow-orchestration.test.ts
+
+T1  (8 assertions)  workflow creation deterministic
+    ✓ initiateGovernanceWorkflow returns a valid workflow for correct input
+    ✓ workflow starts with status='open'
+    ✓ classifyEscalationLevel maps critical severity → critical level
+    ✓ classifyEscalationLevel maps high severity → elevated level
+    ✓ classifyEscalationLevel maps medium severity → standard level
+    ✓ classifyEscalationLevel maps low severity → informational level
+    ✓ workflowActionId includes policyId and violationId
+    ✓ resolutionClassification is null for new workflows
+
+T2  (6 assertions)  duplicate workflow prevention valid
+    ✓ returns DUPLICATE_ACTIVE_WORKFLOW when open workflow exists for same violationId
+    ✓ returns DUPLICATE_ACTIVE_WORKFLOW when acknowledged workflow exists
+    ✓ allows new workflow when only resolved workflow exists for same violationId
+    ✓ allows new workflow when only dismissed workflow exists
+    ✓ returns EMPTY_VIOLATION_ID error when violationId is empty
+    ✓ returns EMPTY_INITIATED_BY error when initiatedBy is empty
+
+T3  (7 assertions)  acknowledgment required before review
+    ✓ acknowledgeWorkflow transitions open → acknowledged
+    ✓ acknowledgedBy is recorded on acknowledge
+    ✓ acknowledge fails from escalated status (INVALID_TRANSITION)
+    ✓ acknowledge fails from resolved status (TERMINAL_STATE)
+    ✓ acknowledge fails when acknowledgedBy is empty (EMPTY_OPERATOR)
+    ✓ isValidTransition: open → acknowledged is valid
+    ✓ isValidTransition: resolved → acknowledged is invalid
+
+T4  (7 assertions)  escalation transitions deterministic
+    ✓ escalateWorkflow transitions open → escalated
+    ✓ escalateWorkflow transitions acknowledged → escalated
+    ✓ escalateWorkflow records escalatedBy and escalatedAt
+    ✓ escalateWorkflow fails when lowering escalation level (INVALID_ESCALATION_LEVEL)
+    ✓ escalateWorkflow fails from resolved status (TERMINAL_STATE)
+    ✓ isValidTransition: under_review → escalated is valid
+    ✓ isValidTransition: escalated → open is invalid
+
+T5  (6 assertions)  resolution classification preserved
+    ✓ resolveWorkflow transitions open → resolved with confirmed_violation
+    ✓ resolveWorkflow with dismiss=true sets workflowStatus='dismissed'
+    ✓ resolvedBy and resolvedAt recorded on resolve
+    ✓ resolveWorkflow fails from already-resolved status (TERMINAL_STATE)
+    ✓ resolveWorkflow fails with empty resolvedBy (EMPTY_OPERATOR)
+    ✓ resolveWorkflow from escalated → resolved is valid
+
+T6  (5 assertions)  append-only workflow history guaranteed
+    ✓ acknowledgeWorkflow does not mutate the input workflow
+    ✓ escalateWorkflow does not mutate the input workflow
+    ✓ resolveWorkflow does not mutate the input workflow
+    ✓ terminal statuses block further transitions from resolved
+    ✓ evidenceReferences in workflow is a copy, not a reference to input
+
+T7  (5 assertions)  forensic evidence references stable
+    ✓ evidenceReferences carried through from initiation input
+    ✓ buildWorkflowSummary counts correctly for mixed statuses
+    ✓ buildWorkflowSummary activeWorkflows excludes resolved and dismissed
+    ✓ buildWorkflowSummary byResolutionClass tracks classification counts
+    ✓ buildWorkflowSummary returns criticalUnresolved=0 when all resolved
+
+T8  (5 assertions)  serialization ordering deterministic
+    ✓ GovernanceWorkflowAction is fully JSON-serializable
+    ✓ GovernanceWorkflowSummary is fully JSON-serializable
+    ✓ workflow transition results are fully JSON-serializable
+    ✓ buildWorkflowSummary evaluatedAt is ISO 8601
+    ✓ two calls to buildWorkflowSummary with same inputs produce identical JSON
+
+T9  (5 assertions)  super-admin enforcement valid
+    ✓ initiateGovernanceWorkflow is synchronous
+    ✓ acknowledgeWorkflow is synchronous
+    ✓ isValidTransition: all terminal states correctly block all transitions
+    ✓ resolveWorkflow with unresolved_pending_review classification is valid
+    ✓ buildWorkflowSummary is synchronous and returns plain object
+
+T10 (6 assertions)  workflow engine remains human-governed
+    ✓ no automatic transition functions exist on workflow objects
+    ✓ GovernanceWorkflowSummary has no execute/trigger methods
+    ✓ acknowledgeWorkflow requires an explicit human operator — empty string rejected
+    ✓ emitGovernanceWorkflowInitiatedEvent returns void
+    ✓ emitGovernanceWorkflowResolvedEvent returns void
+    ✓ workflow transitions never produce an auto-enforced downstream action
+
+  Total P11-C: 60 assertions (10 test groups)
+  Cumulative:  2219 tests / 2219 passed (39 files)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. REMAINING GOVERNANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P11-C is intentionally minimal — workflow lifecycle foundations only.
+
+  1. VIOLATION EXISTENCE NOT RE-VALIDATED AT WORKFLOW INITIATION
+     POST /platform/governance/workflows accepts a violationId from the caller
+     but does NOT re-run evaluateGovernancePolicies() to confirm the violation
+     still exists in the current data state. If a violation has been corrected
+     between detection and workflow initiation, the workflow will reference a
+     stale violationId.
+     Gap: a validation step that re-evaluates the specific policy for the specific
+     entityId before accepting the workflow initiation would close this gap.
+     However, since P11-B violations are ephemeral (not persisted), the caller
+     is responsible for providing a recently-detected violationId.
+
+  2. WORKFLOW TRANSITIONS NOT RECORDED AS AUDIT CHAIN ENTRIES
+     Each workflow status transition (acknowledge, escalate, resolve) updates
+     the governance_workflow_actions row but does NOT create a corresponding
+     audit chain entry in compliance_audit_chains (P11-A).
+     Gap: wrapping each workflow transition in a POST to P11-A audit chain would
+     create a permanent, tamper-detectable history of every governance action.
+     This would enable: "show all governance decisions that affected this entity
+     from detection to resolution" via forensic timeline (P11-A).
+
+  3. SINGLE ESCALATION ATTRIBUTION ONLY
+     escalatedBy and escalatedAt store the MOST RECENT escalation only.
+     If a workflow is escalated multiple times (e.g., from standard → elevated
+     then elevated → critical), only the final escalation is attributed.
+     Gap: a governance_escalation_events table (workflowActionId, escalatedBy,
+     fromLevel, toLevel, reason, escalatedAt) would provide full escalation
+     history per workflow.
+
+  4. WORKSPACE CASCADE DELETES WORKFLOW HISTORY
+     governance_workflow_actions uses ON DELETE CASCADE on workspaceId.
+     Deleting a workspace removes all its governance investigation history.
+     Gap: same as P11-A — forensic retention requires detach-on-delete rather
+     than cascade-on-delete for compliance-critical records.
+
+  5. NO FRONTEND VIEWS FOR GOVERNANCE WORKFLOWS
+     The 5 API routes are live but the ops-platform React frontend has no pages
+     for: workflow list (pending violations), workflow detail (acknowledge/escalate/
+     resolve actions), or governance dashboard (summary stats).
+     Gap: super admin UI at /super-admin/governance/workflows would complete the
+     human-facing surface.
+
+  6. NO ASSIGNMENT WORKFLOW
+     assignedOperatorId can be set at initiation but there is no PATCH route
+     to reassign a workflow to a different operator, and no notification
+     mechanism to inform the assignee.
+     Gap: POST /platform/governance/workflows/:id/assign with an operatorId
+     would enable proper investigation assignment with attribution.
+
+  7. RESOLUTION NOTE IS THE ONLY DOCUMENTATION FIELD
+     Operators can add a resolutionNote when resolving, but there is no field
+     for structured investigation findings, supporting evidence links added during
+     investigation, or intermediate notes added during the investigation.
+     Gap: an investigation_notes table (workflowActionId, authorId, note, createdAt)
+     would enable append-only investigation documentation without a free-text blob.
+
+  8. NO SLA / DURATION TRACKING
+     There is no SLA enforcement or alerting for workflows that remain open too long.
+     buildWorkflowSummary() returns criticalUnresolved but no duration metric.
+     Gap: "open for > N hours without acknowledgment" and "escalated for > N hours
+     without resolution" monitoring would enable proactive SLA compliance.
+
+  9. NO PAGINATION FOR TRANSITION HISTORY
+     GET /platform/governance/workflows returns workflows but not the history of
+     transitions for a specific workflow (only the current state). To see who
+     acknowledged vs escalated vs resolved, you must inspect the individual
+     acknowledgedBy/escalatedBy/resolvedBy fields on the workflow row.
+     Gap: a dedicated GET /platform/governance/workflows/:id/history would be
+     useful once audit chain entries (gap #2) are recorded per transition.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. READINESS ASSESSMENT — BEFORE COMPLIANCE OPERATIONS ANALYTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Human-governed compliance workflow infrastructure is operational.
+
+  WORKFLOW ORCHESTRATION READINESS
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ DB table governance_workflow_actions — fully pushed, cascade FK
+  ✓ 6-state workflow status model (open/acknowledged/under_review/escalated/
+    resolved/dismissed) with fully typed transition graph
+  ✓ initiateGovernanceWorkflow() — duplicate-proof, operator-attributed initiation
+  ✓ acknowledgeWorkflow() — open → acknowledged with full attribution
+  ✓ escalateWorkflow() — monotonic level upgrade with operator + reason
+  ✓ resolveWorkflow() — 5-classification resolution + dismiss support
+  ✓ buildWorkflowSummary() — byStatus, byEscalationLevel, byResolutionClass,
+    criticalUnresolved, activeWorkflows counts
+  ✓ classifyEscalationLevel() — deterministic severity → escalation tier
+  ✓ isValidTransition() — complete transition graph enforcement
+  ✓ 4 structured observability events (INFO + WARN levels)
+  ✓ 5 governance API routes live (super_admin gated)
+  ✓ Full typecheck clean (EXIT:0)
+  ✓ 60 new assertions, 2219 total passing (39 files)
+
+  COMPLETE P10-A → P11-C GOVERNANCE STACK
+  ─────────────────────────────────────────────────────────────────────────────
+  P10-A: Reliability domain evaluation
+  P10-B: Append-only incident + snapshot persistence
+  P10-C: Operator advisory recommendations
+  P10-D: Human-in-the-loop orchestration
+  P10-E: Explicit-confirmation execution tracking
+  P10-F: Remediation outcome analytics (read-only)
+  P11-A: Immutable audit chain integrity + forensic reconstruction
+  P11-B: Policy evaluation — detects violations from audit + execution data
+  P11-C: Governance workflow orchestration — human-managed violation lifecycle
+         from detection (P11-B) to resolution with full operator attribution
+
+  WHAT IS NOW HUMAN-GOVERNED
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ Violation acknowledgment — explicitly attributed to an operator with timestamp
+  ✓ Investigation assignment — assignedOperatorId at initiation
+  ✓ Escalation — monotonic level upgrade with operator attribution and reason
+  ✓ Resolution — 5-class classification with operator attribution and optional note
+  ✓ Dismissal — structured dismissal with classification (false_positive, operational_exception)
+  ✓ Duplicate prevention — only one active investigation per violation at a time
+  ✓ Terminal finality — resolved/dismissed workflows cannot be re-transitioned
+  ✓ Evidence preservation — evidenceReferences from P11-B copied at initiation
+
+  SAFETY BOUNDARIES (must remain respected in all future phases)
+  ─────────────────────────────────────────────────────────────────────────────
+  ⚠ HUMAN-GOVERNED: no automated transitions. Every transition must be
+    triggered by an explicit human HTTP POST with a non-empty operatorId.
+  ⚠ NO AUTO-RESOLVE: resolved/dismissed status MUST NOT be set by any background
+    job, scheduler, or trigger. Only human-initiated API calls may resolve.
+  ⚠ NO DOWNSTREAM ENFORCEMENT: a resolved workflow MUST NOT automatically trigger
+    disciplinary actions, policy changes, or system modifications.
+  ⚠ ESCALATION MONOTONICITY: the escalation level must never be lowered in-place.
+    Reconsidering a level requires resolving the current workflow and opening a new one.
+  ⚠ CLASSIFICATION REQUIRED: resolveWorkflow() must always require a classification.
+    Never allow resolution with an empty or null classification field.
+  ⚠ AUDIT CHAIN INTEGRATION: if audit chain entries are added for workflow transitions
+    (gap #2), they must use INSERT-only (P11-A append-only semantics). The audit
+    chain must never be modified to reflect a workflow status change.
+  ⚠ WORKSPACE CASCADE: changing governance_workflow_actions to ON DELETE RESTRICT
+    (instead of CASCADE) for workspace FK must go through a legal/compliance review
+    before implementation — it would affect workspace deletion flows.
+
+  VERDICT: READY for Compliance Operations Analytics
+  Condition: analytics layer must:
+    (a) treat governance_workflow_actions as the authoritative workflow state store
+    (b) compute metrics from existing columns — do not add new state to the table
+    (c) never modify workflowStatus, escalationLevel, or resolutionClassification
+        outside of the defined engine functions (acknowledge/escalate/resolve)
+    (d) analytics routes must be super_admin gated and read-only
+    (e) aggregate metrics (resolution time, escalation rate, policy breach frequency)
+        must be computed from raw data — no denormalized counters in the DB
+    (f) maintain the 39-file / 2219-test baseline as the quality floor
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 11-C REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

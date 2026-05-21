@@ -1,0 +1,229 @@
+راجع:
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- H-01
+- Section 3.3 (Execution Snapshot)
+- approval resume architecture
+- resumeExecution() flow
+- steps drift scenario
+
+ثم نفّذ فقط:
+P5-A — Execution Steps Snapshot
+
+ولا تنفّذ:
+- workflow version history
+- rollback
+- DAG execution
+- simulation
+- background workers
+- publish gates
+
+عنوان المهمة:
+WORKFLOW PHASE 5-A — Immutable Execution Steps Snapshot
+
+المهمة الحالية:
+منع:
+definition drift corruption
+
+داخل:
+approval resume lifecycle
+
+الهدف:
+كل execution تستخدم:
+frozen workflow steps
+
+من لحظة trigger
+حتى completion
+
+حتى لو:
+workflow definition تغيّرت لاحقًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — SCHEMA CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف إلى:
+workflow_executions
+
+الحقول التالية:
+
+steps_snapshot JSONB NULL
+workflow_version INTEGER NULL
+
+المطلوب:
+- backward compatible
+- existing executions تبقى سليمة
+- no destructive migration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — ENGINE SNAPSHOT CAPTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+engine.ts
+
+عند إنشاء execution جديدة:
+
+احفظ:
+steps_snapshot = workflow.steps
+workflow_version = workflow.version (إذا موجود)
+
+مهم:
+- deep clone قبل التخزين
+- no shared references
+- snapshot immutable by convention
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — RESUME EXECUTION SOURCE OF TRUTH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+resumeExecution()
+
+غيّر behavior بالكامل:
+
+بدل:
+قراءة الخطوات من:
+workflow_definitions.steps
+
+اجعل:
+source of truth =
+execution.steps_snapshot
+
+المطلوب:
+A)
+إذا:
+steps_snapshot موجودة
+→ استخدمها فقط
+
+B)
+إذا:
+steps_snapshot = NULL
+(legacy executions)
+→ fallback إلى behavior الحالي
+مع structured warning log:
+action='legacy_resume_live_definition'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — REMOVE LIVE DEFINITION DEPENDENCY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل resume flow:
+
+لا تعتمد على:
+workflow_definitions.steps
+
+إلا legacy fallback فقط.
+
+المطلوب:
+أي execution جديدة بعد P5-A
+لا يمكن أن تتأثر بأي تعديل لاحق
+على workflow definition.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SNAPSHOT IMMUTABILITY COMMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why definition drift is catastrophic
+- why resumable workflows require immutable execution snapshots
+- why snapshots stored per execution
+- why legacy fallback still exists
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف structured logs:
+
+A)
+execution_snapshot_created
+
+B)
+execution_resume_using_snapshot
+
+C)
+legacy_resume_live_definition
+
+كل log يحتوي:
+- executionId
+- workflowId
+- workflowVersion
+- snapshotPresent
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DIAGNOSTICS INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+GET execution details
+يعرض:
+- workflowVersion
+- snapshot presence indicator
+
+لكن:
+لا ترجع كامل steps_snapshot افتراضيًا
+(حتى لا تنفجر payloads).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+execution stores immutable steps snapshot
+
+T2:
+resumeExecution uses snapshot instead of live definition
+
+T3:
+live workflow edits do not affect resumed execution
+
+T4:
+legacy executions fallback safely
+
+T5:
+snapshot deep clone prevents shared mutation
+
+T6:
+workflowVersion persisted correctly
+
+T7:
+resume preserves exact-once behavior after snapshot introduction
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- workflow version history table
+- rollback
+- publish lifecycle
+- DAG execution
+- branching
+- simulation
+- schema migration system
+
+هذه المهمة:
+execution snapshot correctness فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5a-report.txt
+
+ويحتوي:
+- schema changes
+- snapshot capture flow
+- resume snapshot behavior
+- legacy fallback behavior
+- observability additions
+- diagnostics integration
+- tests results
+- storage impact estimate
+- remaining versioning limitations قبل P7

@@ -1,0 +1,227 @@
+# Phase 13-E — Usage Limits, Quotas & Capacity Intelligence
+
+**Date:** 2026-05-16
+**Status:** ✅ Complete
+**Branch:** main
+**Commit:** 90350ff
+
+---
+
+## Objective
+
+Deliver a read-only **capacity intelligence foundation** for super-admins: view seat/storage/API/workflow usage versus plan limits, detect approaching and exceeded signals, and display capacity risk summaries — with no billing, enforcement, or suspension logic of any kind.
+
+---
+
+## Safety Contract (enforced at import time)
+
+All 11 properties of `USAGE_SAFETY_CONTRACT` are `true`:
+
+| Property | Value |
+|---|---|
+| `superAdminOnly` | ✅ true |
+| `readOnly` | ✅ true |
+| `noPaymentProcessing` | ✅ true |
+| `noInvoiceGeneration` | ✅ true |
+| `noChargeCollection` | ✅ true |
+| `noAutoWorkspaceSuspension` | ✅ true |
+| `noDataDeletion` | ✅ true |
+| `noHardLimitEnforcement` | ✅ true |
+| `noEmailOrLegalNotices` | ✅ true |
+| `prefersUnknownOverInference` | ✅ true |
+| `failsClosedOnInvalidTenant` | ✅ true |
+
+A runtime guard (`if (!USAGE_SAFETY_CONTRACT.superAdminOnly || ...)`) throws at module load time if any property is ever flipped to `false`.
+
+---
+
+## New Files
+
+### Backend (API Server)
+
+#### `artifacts/api-server/src/lib/tenant-usage-metrics.ts`
+Static registry of all 10 usage metric codes mirroring `FeatureLimitCode`.
+
+Key exports:
+- `UsageMetricCode` — type alias for `FeatureLimitCode`
+- `MetricSourceType` — `"live_db" | "derived" | "configured" | "unavailable"`
+- `UsageMetricDef` — metric descriptor (label, unit, order, sourceType, supportsLimitComparison, nullableMeansUnlimited)
+- `USAGE_METRIC_REGISTRY` — record of all 10 metrics
+- `ALL_USAGE_METRIC_CODES` — stable array in defined order
+- `isKnownMetricCode()` — type guard
+
+Current source types per metric:
+
+| Metric | Source | Supports Limit Comparison |
+|---|---|---|
+| `seats` | `live_db` | ✅ Yes |
+| `workflows` | `live_db` | ✅ Yes |
+| `audit_retention_days` | `configured` | ❌ No |
+| `workspaces` | `derived` | ❌ No |
+| `storage_gb`, `monthly_api_calls`, `documents`, `custom_reports`, `integrations`, `ai_actions` | `unavailable` | ❌ No |
+
+#### `artifacts/api-server/src/lib/tenant-usage-intelligence.ts`
+Pure derivation library — no DB, no HTTP, no side effects.
+
+Key exports:
+- `USAGE_APPROACHING_THRESHOLD` = `0.8` (80%)
+- `USAGE_EXCEEDED_THRESHOLD` = `1.0` (100%)
+- `deriveUsageLimitStatus(usage, limit, supportsComparison, nullableMeansUnlimited)` → `UsageLimitStatus`
+- `calculateUsagePercentage(usage, limit)` → `number | null`
+- `isUsageApproachingLimit(row)` / `isUsageLimitExceeded(row)` — row-level helpers
+- `buildUsageMetricRows(rawUsage, entitlementProfile, now)` → `UsageMetricRow[]`
+- `deriveCapacityRiskLevel(rows)` → `RiskLevel`
+
+  | Condition | Risk Level |
+  |---|---|
+  | All rows unknown/not_applicable/unlimited | `"unknown"` |
+  | All comparable rows normal | `"none"` |
+  | 1 approaching | `"low"` |
+  | 2+ approaching | `"medium"` |
+  | 1 exceeded | `"high"` |
+  | 2+ exceeded | `"critical"` |
+
+- `deriveTenantUsageProfile(tenantId, workspaceId, rawUsage, entitlementProfile, now)` → `TenantUsageProfile`
+- `summarizeUsageWarnings(rows)` → `{ warnings: string[] }` — human-readable warning strings for approaching/exceeded metrics
+
+### Frontend (ops-platform)
+
+#### `artifacts/ops-platform/src/lib/platform-usage-config.ts`
+Static UI config matching the backend registry.
+
+Key exports:
+- `USAGE_METRIC_CONFIG` — 10 entries with label, unit, description, order, supportsLimitComparison
+- `USAGE_STATUS_CONFIG` — 6 statuses (unknown, normal, approaching, exceeded, unlimited, not_applicable) with label, description, badgeClass
+- `CAPACITY_RISK_CONFIG` — 6 risk levels (none, low, medium, high, critical, unknown) with label, description, badgeClass
+- `METRIC_SOURCE_CONFIG` — 4 source types with label, description, badgeClass
+- `USAGE_API_PATHS.usage(tenantId)` → `/api/platform/tenants/:tenantId/usage`
+- `USAGE_READ_HOOK_NAMES` = `["useTenantUsage"]` (exactly 1 entry — read-only)
+- `USAGE_SAFETY_CONTRACT` — 11-property const (all true)
+- `USAGE_EMPTY_STATE` — localised empty-state strings
+
+---
+
+## Modified Files
+
+### `artifacts/api-server/src/lib/tenant-registry.ts`
+
+**`TenantUsageSummary`** — expanded with 3 new fields:
+```typescript
+usageWarningCount:  number;   // count of metrics with status "approaching"
+usageExceededCount: number;   // count of metrics with status "exceeded"
+capacityRiskLevel:  string;   // "none" | "low" | "medium" | "high" | "critical" | "unknown"
+```
+
+**`buildUsageSummary(userCount, now, opts?)`** — optional `opts` accepts seatLimit, storageLimit, apiLimit, documentsLimit, usageWarningCount, usageExceededCount, capacityRiskLevel. All default to 0 / "unknown".
+
+**`deriveRiskSignalSummary(..., usageSignals?)`** — 5th optional parameter:
+```typescript
+usageSignals?: { usageLimitApproaching: boolean; usageLimitExceeded: boolean }
+```
+Now factors into `riskLevel`: exceeded → medium; approaching → low (both below suspended/disabled).
+
+### `artifacts/api-server/src/routes/tenants.ts`
+
+**Added `workflowDefinitionsTable`** to the `@workspace/db` destructure.
+
+**Added `collectTenantRawUsage(workspaceId, entitlementLimits)`** — local async helper:
+- Queries `usersTable` for active seat count (live DB)
+- Queries `workflowDefinitionsTable` for active workflow count (live DB)
+- Reads `audit_retention_days` from entitlement limits (configured)
+- Sets `workspaces = 1` (derived)
+- Returns all 10 others as `unavailable`
+
+**Added `GET /platform/tenants/:tenantId/usage`** (super-admin only, read-only):
+1. Validates `tenantId` — 400 if invalid, 404 if workspace not found
+2. Fetches subscription + entitlement overrides
+3. Derives entitlement profile via `deriveTenantEntitlementProfile`
+4. Collects raw usage via `collectTenantRawUsage`
+5. Derives full usage profile via `deriveTenantUsageProfile`
+6. Computes warning strings via `summarizeUsageWarnings`
+7. Logs with `req.log.info` (warningCount, exceededCount, unknownCount, capacityRiskLevel)
+8. Returns structured JSON:
+```json
+{
+  "usageProfile":              { ... TenantUsageProfile },
+  "entitlementProfileSummary": { planCode, planTier, enabledCount, customOverrides, limits },
+  "rawUsageSources":           { metricCode → { sourceType, notes } },
+  "warnings":                  ["Approaching limit...", ...]
+}
+```
+
+### `artifacts/ops-platform/src/lib/tenant-registry-hooks.ts`
+
+- **`TenantUsageSummary`** — expanded with `usageWarningCount`, `usageExceededCount`, `capacityRiskLevel`
+- **New interfaces** — `UsageLimitStatus`, `MetricSourceType`, `UsageMetricRow`, `TenantUsageProfile`, `TenantUsageData`
+- **`useTenantUsage(tenantId: string | null)`** — `useQuery` hook (staleTime 30s), disabled when tenantId is null; queryKey `["platform", "tenants", tenantId, "usage"]`
+- **Re-exports** — `USAGE_READ_HOOK_NAMES` now re-exported from platform-usage-config
+
+### `artifacts/ops-platform/src/pages/super-admin-tenants.tsx`
+
+**Added imports:** `BarChart3` (Lucide), `useTenantUsage` (hooks), full platform-usage-config set.
+
+**Added `USAGE_SAFETY_CONTRACT` guard** at module load:
+```typescript
+if (!USAGE_SAFETY_CONTRACT.superAdminOnly || !USAGE_SAFETY_CONTRACT.readOnly || ...) {
+  throw new Error("USAGE_SAFETY_CONTRACT violated");
+}
+```
+
+**Added `<UsagePanel tenant={tenant} />`** component:
+- Header row: BarChart3 icon + "Usage & Capacity Intelligence" + capacity risk badge + approaching/exceeded/unknown count chips
+- Loading skeleton (Loader2 spinner)
+- Error state (AlertTriangle)
+- Warnings panel (amber box, per-warning line with icon)
+- Metric rows table — 10 rows, columns: Metric name (unit) | Source badge | Usage | Limit | Utilisation bar (progress) + % | Status badge
+  - Progress bar colours: emerald (normal), amber (approaching), red (exceeded)
+  - Unavailable metrics show "—" for usage, limit, and utilisation
+- Footer note explaining unavailable metrics
+
+**Wired into `TenantDetailPanel`** below `EntitlementPanel` with `md:col-span-3 border-t` wrapper.
+
+---
+
+## Test Coverage
+
+### Backend — T1–T12 (`tenant-usage.test.ts`)
+
+| Test | Description |
+|---|---|
+| T1 | Usage metric registry: 10 codes, required fields, unique orders, isKnownMetricCode |
+| T2 | Threshold constants: approaching=0.8, exceeded=1.0, ordering |
+| T3 | calculateUsagePercentage: null cases, division, over-100% |
+| T4 | unknown/unlimited/not_applicable: all edge cases |
+| T5 | normal/approaching/exceeded derivation: boundary values + helpers |
+| T6 | deriveTenantUsageProfile: tenantId/workspaceId, approaching/exceeded counts, unknown count, row count |
+| T7 | deriveCapacityRiskLevel: empty→unknown, all-not_applicable→unknown, all-unknown→unknown, normal→none, 1 approaching→low, 2 approaching→medium, 1 exceeded→high, 2 exceeded→critical, exceeded>approaching priority |
+| T8 | unavailable sources: produce null usage safely, get not_applicable status |
+| T9 | API safety: non-comparable metrics always get not_applicable regardless of value |
+| T10 | summarizeUsageWarnings: empty→no warnings, exceeded message, approaching message with %, both together |
+| T11 | buildUsageSummary new fields: defaults (0/0/unknown), opts applied correctly |
+| T12 | deriveRiskSignalSummary + usageSignals: defaults false, passing through, low/medium elevation, suspended overrides, disabled always critical |
+
+### Frontend — T13–T17 (`platform-usage.test.ts`)
+
+| Test | Description |
+|---|---|
+| T13 | USAGE_METRIC_CONFIG: 10 codes, required fields, unique sequential orders, seats/workflows support comparison, others do not |
+| T14 | USAGE_STATUS_CONFIG: 6 statuses, required fields, badgeClass Tailwind patterns; METRIC_SOURCE_CONFIG: 4 sources |
+| T15 | CAPACITY_RISK_CONFIG: 6 risk levels, required fields, critical≠none styling; USAGE_READ_HOOK_NAMES: exactly 1 entry |
+| T16 | No forbidden wording (payment/billing/invoice/charge/suspend/delete-data/legal-notice) in any config string; USAGE_SAFETY_CONTRACT all-true; expected key set |
+| T17 | Frontend/backend symmetry: same 10 codes, same 6 statuses, same 6 risk levels |
+
+### Final counts
+
+| Suite | Passed | Failed |
+|---|---|---|
+| Backend (api-server) | **2775** | 0 |
+| Frontend (ops-platform) | **842** | 0 |
+
+---
+
+## Architecture Notes
+
+- **Contract-first**: metric codes are derived from `FeatureLimitCode` (single source of truth); adding a new feature limit automatically adds a new usage metric slot.
+- **Fail-safe defaults**: missing/unavailable data returns `"unknown"` status, not `"normal"` — the system never under-reports problems.
+- **No auto-actions**: the usage profile is a pure read-only view. All riskLevel and status values are informational only — no enforcement, suspension, or notification is triggered by this system.
+- **Incrementally extensible**: to add live tracking for `storage_gb`, change its `defaultSourceType` from `"unavailable"` to `"live_db"` in the registry and add the DB query to `collectTenantRawUsage`. The UI, tests, and risk derivation all pick it up automatically.

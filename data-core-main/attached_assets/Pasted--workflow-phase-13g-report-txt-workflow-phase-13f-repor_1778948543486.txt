@@ -1,0 +1,373 @@
+راجع:
+- workflow-phase-13g-report.txt
+- workflow-phase-13f-report.txt
+- workflow-phase-13e-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- super-admin-tenants.tsx
+- tenant-registry-hooks.ts
+- tenant-registry-config.ts
+- workspace-lifecycle-config.ts
+- subscription-lifecycle-config.ts
+- platform-entitlements-config.ts
+- platform-usage-config.ts
+- renewal-intelligence-config.ts
+- tenant-health-config.ts
+- tenant-registry.ts
+- tenants.ts routes
+- all P13 safety contracts
+
+ثم نفّذ فقط:
+P13-H — Tenant Administration Console Consolidation
+
+ولا تنفّذ:
+- payment provider integration
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic workspace locking
+- entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing portal
+- background jobs
+- HR module implementation
+- destructive tenant actions
+- new billing actions
+
+عنوان المهمة:
+WORKFLOW PHASE 13-H — Tenant Administration Console Consolidation
+
+المهمة الحالية:
+ترتيب وتجميع واجهة إدارة المستأجرين في السوبر أدمن إلى Console منظم واحترافي.
+
+الهدف:
+تحويل Tenant Detail من مجموعة Panels متتالية إلى Tenant Administration Console واضح يحتوي:
+- overview summary
+- lifecycle section
+- subscription section
+- entitlements section
+- usage section
+- renewal section
+- health section
+- safety notices
+- consistent loading/error/empty states
+
+بطريقة:
+UI consolidation and operator experience improvement
+بدون إضافة enforcement أو billing أو actions تلقائية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TENANT DETAIL UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- TenantDetailPanel
+- Lifecycle Controls
+- Subscription Management
+- Entitlements & Module Access
+- Usage & Capacity Intelligence
+- Renewal & Grace Intelligence
+- Tenant Health & Operational Monitoring
+- Tenant Registry table
+- all hooks used inside detail panel
+- loading/error patterns
+- safety notice patterns
+- repeated layout/cards/badges
+
+حدّد:
+- هل الصفحة صارت طويلة جدًا؟
+- أين التكرار في badges/safety notices؟
+- هل يوجد duplicate fetch غير ضروري؟
+- هل layout يحتاج tabs أو accordion؟
+- كيف نحافظ على كل الوظائف بدون حذفها؟
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CONSOLE INFORMATION ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم Tenant Administration Console داخل TenantDetailPanel:
+
+Tabs أو segmented navigation:
+
+- Overview
+- Lifecycle
+- Subscription
+- Entitlements
+- Usage
+- Renewal
+- Health
+
+Overview يعرض:
+- workspace name
+- owner
+- tenant status
+- workspace status
+- subscription status
+- plan
+- health status
+- risk level
+- renewal urgency
+- capacity risk
+- enabled modules count
+- custom overrides count
+- active users / seat limit
+- key warnings count
+- last activity
+
+مهم:
+- لا تحذف أي panel
+- انقلها داخل tabs/sections
+- كل panel يحتفظ بسلوك السلامة الحالي
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SHARED UI HELPERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا مناسب، استخرج helpers داخل نفس الملف أو ملف UI صغير:
+
+- StatusBadge
+- RiskBadge
+- SectionHeader
+- SafetyNotice
+- MetricCard
+- EmptyState
+- ErrorState
+- LoadingState
+
+لكن:
+لا تعمل refactor ضخم يكسر الاختبارات.
+إذا المشروع حساس، خلك minimal.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — OVERVIEW TAB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف Overview tab يحتوي:
+- summary cards:
+  - Lifecycle State
+  - Subscription
+  - Plan
+  - Health
+  - Usage Capacity
+  - Renewal
+- key risk/warning list
+- recommended internal action
+- module summary
+- usage summary
+- safety banner:
+  "Platform visibility only. Actions remain controlled by their dedicated sections."
+
+مهم:
+Overview read-only فقط.
+لا تضع أزرار suspend/lock/edit في Overview.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TAB CONTENT MAPPING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+رتّب:
+- Lifecycle tab → Lifecycle Controls
+- Subscription tab → Subscription Management
+- Entitlements tab → Entitlements & Module Access
+- Usage tab → Usage & Capacity Intelligence
+- Renewal tab → Renewal & Grace Intelligence
+- Health tab → Tenant Health & Operational Monitoring
+
+مهم:
+- كل tab يحافظ على data-testid قدر الإمكان
+- لا تكسر الاختبارات الحالية
+- لا تغير API contracts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — REGISTRY TABLE SUMMARY IMPROVEMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن Tenant Registry table بإضافة/ترتيب مختصر واضح:
+
+Columns preferred:
+- Workspace
+- Owner
+- Status
+- Subscription
+- Plan
+- Risk
+- Health
+- Renewal
+- Usage
+- Last Activity
+- Actions/Details
+
+لكن:
+إذا الأعمدة كثيرة، لا تزحم.
+استخدم compact badges.
+
+مهم:
+لا تضف action buttons خطيرة في table.
+فتح التفاصيل فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DATA FETCHING HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع hooks داخل detail panel:
+- useTenantSubscription
+- useTenantEntitlements
+- useTenantUsage
+- useTenantRenewalIntelligence
+- useTenantHealth
+
+حاول:
+- لا تعمل fetch إذا tenantId null
+- لا تضاعف نفس hook داخل أكثر من مكان
+- Overview يستخدم الموجود من tenant summary قدر الإمكان
+- tabs ممكن lazy render حسب الموجود، لكن لا تكسر loading states
+
+مهم:
+لا تغيّر backend إلا إذا ضروري.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SAFETY CONTRACT CONSOLIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف Console Safety Contract:
+
+TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT:
+- superAdminOnly
+- readOnlyOverview
+- noPaymentProcessing
+- noInvoiceGeneration
+- noChargeCollection
+- noAutoWorkspaceSuspension
+- noWorkspaceLocking
+- noEntitlementEnforcement
+- noEmailOrLegalNotices
+- noDestructiveTenantActions
+- dedicatedActionsOnly
+- preservesExistingSafetyContracts
+
+كلها true.
+
+Import-time guard:
+- إذا أي قيمة false يرمي error.
+
+مهم:
+هذا لا يلغي عقود السلامة السابقة، فقط يجمعها.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/حدّث tests تغطي:
+
+T1:
+console safety contract all true
+
+T2:
+tabs/sections config stable
+
+T3:
+overview tab renders summary cards
+
+T4:
+lifecycle tab preserves lifecycle controls
+
+T5:
+subscription tab preserves subscription management
+
+T6:
+entitlements tab preserves entitlements panel
+
+T7:
+usage tab preserves usage panel
+
+T8:
+renewal tab preserves renewal panel
+
+T9:
+health tab preserves health panel
+
+T10:
+overview contains no dangerous action buttons
+
+T11:
+registry table includes health/renewal/usage summary safely
+
+T12:
+no payment/invoice/charge/billing/tax/legal/email/auto-suspend/auto-lock/enforcement wording exists
+
+T13:
+frontend tests pass
+
+Backend:
+- لا يلزم backend tests إذا لم يتغير backend
+- إذا تغير types/shared contracts أضف tests مناسبة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tenant Admin Console MUST:
+- remain super-admin only
+- preserve all existing safety contracts
+- keep overview read-only
+- never add payment/billing actions
+- never add invoice/charge/tax UI
+- never add auto suspension/lock UI
+- never add entitlement enforcement UI
+- never add email/legal notice UI
+- never add destructive tenant actions
+- keep lifecycle actions only in dedicated lifecycle section
+- keep subscription metadata edits only in dedicated subscription section
+- keep entitlement overrides only in dedicated entitlements section
+
+أي:
+console organization فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- new backend mutation
+- payment provider
+- invoice generation
+- charge collection
+- tax
+- automatic suspension
+- automatic workspace lock
+- entitlement enforcement
+- email notifications
+- legal notices
+- tenant self-service
+- HR module pages
+- destructive actions
+- bulk actions
+
+خلك:
+UI consolidation and operator experience فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13h-report.txt
+
+ويحتوي:
+- console information architecture
+- overview tab design
+- tab mapping
+- registry table improvements
+- data fetching hygiene
+- safety contract
+- tests results
+- preserved P13 capabilities
+- remaining console gaps
+- readiness assessment قبل Automated Lifecycle Evaluation Engine

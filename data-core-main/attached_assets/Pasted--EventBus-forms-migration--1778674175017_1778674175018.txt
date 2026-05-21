@@ -1,0 +1,117 @@
+راجع جميع التقارير السابقة الخاصة بالفورمز والـ EventBus ثم نفّذ فقط forms migration الرسمية بدون أي refactor واسع خارج نطاقها.
+
+عنوان المهمة:
+FORMS MIGRATION — Canonical form.submitted Event Activation
+
+المهمة الحالية:
+هجرة forms.ts من:
+eventDispatcher.dispatch()
+
+إلى:
+appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED)
+
+باستخدام الـ architecture النهائية المعتمدة:
+- canonical generic form event
+- workflowEventHint secondary routing
+- bridge compatibility
+- typed FormSubmittedPayload
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- forms.ts
+- workflowengine-hint-matching-report.txt
+- forms-pre-migration-stabilization-report.txt
+- app-bus.ts
+- bridge.ts
+- activity.ts
+- notifications-bus.ts
+- EVENT_TYPES
+- FormSubmittedPayload
+
+2- داخل:
+POST /forms/:id/submissions
+
+استبدل:
+eventDispatcher.dispatch()
+
+بـ:
+appEventBus.emit({
+  type: EVENT_TYPES.FORM_SUBMITTED,
+  ...
+})
+
+باستخدام الـ payload والتصميم الموثق داخل forms.ts comments.
+
+3- payload يجب أن يحتوي:
+- submissionId
+- formId
+- formName
+- owningModule
+- submittedByUserId
+- answers
+- workflowEventHint
+
+مع metadata/idempotency مناسب.
+
+4- حافظ على:
+workflow compatibility الحالية عبر:
+bridge.ts
++
+WorkflowEngine secondary hint matching.
+
+5- فعّل رسميًا:
+- activity.ts form.submitted listener
+- notifications-bus.ts form.submitted listener
+- workspace_event_logs bridge path
+
+6- لا تغيّر:
+- API behavior
+- response payloads
+- form schema
+- workflow definitions
+- HR service architecture
+- workflow execution logic
+
+7- لا تضف:
+- leave lifecycle
+- approval sagas
+- dynamic domain events
+- new routes
+
+8- تأكد من:
+- no duplicate workflow execution
+- no duplicate activity logs
+- no duplicate notifications
+- no broken workflow triggers
+- no regression للـ hr.{slug}.submitted workflows
+
+9- إذا أصبح:
+eventDispatcher
+غير مستخدم داخل forms.ts:
+احذف الـ import فقط.
+
+10- حدّث:
+- migration progress comments
+- bridge migration table
+- أي architecture notes مرتبطة بحالة forms migration
+
+11- أضف comments واضحة تشرح:
+- forms.ts emits generic canonical events only
+- domain events must come from dedicated domain routes
+- workflowEventHint purpose
+- bridge compatibility behavior
+
+12- في النهاية:
+أنشئ ملف TXT باسم:
+
+forms-migration-report.txt
+
+ويحتوي:
+- جميع التعديلات المنفذة
+- شكل الـ final emitted payload
+- كيف أصبحت workflows تعمل
+- كيف أصبح bridge behavior يعمل
+- أي listeners أصبحت active
+- أي legacy behavior بقي intentional
+- readiness assessment بعد migration

@@ -1,0 +1,526 @@
+راجع:
+- workflow-phase-13h-report.txt
+- workflow-phase-13g-report.txt
+- workflow-phase-13f-report.txt
+- workflow-phase-13e-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- tenant-admin-console-config.ts
+- tenant-health-intelligence.ts
+- subscription-renewal-intelligence.ts
+- tenant-usage-intelligence.ts
+- tenant-entitlements.ts
+- subscription-lifecycle.ts
+- workspace-lifecycle.ts
+- tenant-registry.ts
+- tenants.ts routes
+- super-admin-tenants.tsx
+- all P13 safety contracts
+- activity_logs audit/log pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-I — Automated Lifecycle Evaluation Engine
+
+ولا تنفّذ:
+- payment provider integration
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic workspace locking
+- automatic entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing portal
+- destructive tenant actions
+- background jobs that mutate state
+- HR module implementation
+
+عنوان المهمة:
+WORKFLOW PHASE 13-I — Automated Lifecycle Evaluation Engine
+
+المهمة الحالية:
+تأسيس محرك تقييم تلقائي يقرأ بيانات المستأجر ويقترح حالة/إجراء داخلي بدون تنفيذ أي إجراء تلقائي.
+
+الهدف:
+تمكين المنصة من إنتاج:
+- lifecycle evaluation profile
+- evaluation signals
+- recommended internal action
+- review eligibility
+- suspension review eligibility
+- grace period review eligibility
+- renewal review eligibility
+- usage review eligibility
+- entitlement review eligibility
+- manual review required
+
+بطريقة:
+deterministic read-only evaluation engine
+بدون أي enforcement أو mutations تلقائية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT INTELLIGENCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- TenantHealthProfile
+- SubscriptionRenewalProfile
+- TenantUsageProfile
+- EntitlementProfile
+- WorkspaceLifecycleState
+- TenantRiskSignalSummary
+- Tenant Admin Console Overview
+- Lifecycle Controls
+- Subscription Management
+- Health Panel
+
+حدّد:
+- ما الإشارات المتوفرة حاليًا
+- ما الإشارات التي تؤهل لمراجعة داخلية
+- كيف نمنع الخلط بين recommendation و action
+- كيف نعرض evaluation بدون زر تنفيذ تلقائي
+- كيف نحافظ على P13-H console safety
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — EVALUATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+tenant-lifecycle-evaluation.ts
+
+EvaluationSignalCode:
+- subscription_metadata_missing
+- trial_ending_requires_review
+- renewal_due_requires_review
+- grace_period_active_requires_monitoring
+- grace_period_expired_requires_review
+- subscription_expired_requires_review
+- workspace_suspended_requires_review
+- workspace_locked_requires_review
+- usage_approaching_requires_review
+- usage_exceeded_requires_review
+- entitlement_overrides_require_review
+- custom_plan_requires_review
+- health_high_risk_requires_review
+- health_critical_requires_review
+- governance_warning_requires_review
+- operational_data_missing_requires_review
+- manual_review_required
+
+EvaluationSeverity:
+- none
+- info
+- low
+- medium
+- high
+- critical
+- unknown
+
+EvaluationRecommendedAction:
+- none
+- monitor
+- review_subscription
+- review_usage
+- review_entitlements
+- review_lifecycle
+- review_governance
+- prepare_customer_contact
+- prepare_restriction_review
+- manual_review_required
+
+ReviewEligibility:
+- renewalReviewEligible
+- graceReviewEligible
+- suspensionReviewEligible
+- usageReviewEligible
+- entitlementReviewEligible
+- lifecycleReviewEligible
+- governanceReviewEligible
+- manualReviewRequired
+
+مهم:
+كلها توصيات داخلية فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EVALUATION DERIVATION LIB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Exports:
+- deriveLifecycleEvaluationSignals(input)
+- deriveEvaluationSeverity(signals)
+- deriveEvaluationRecommendedAction(signals, severity)
+- deriveReviewEligibility(signals, severity)
+- deriveTenantLifecycleEvaluationProfile(input)
+- buildEvaluationWarnings(profile)
+- buildEvaluationSummary(profile)
+
+TenantLifecycleEvaluationInput:
+- tenantProfile
+- lifecycleState
+- subscriptionStatus
+- renewalProfile
+- usageProfile
+- entitlementProfile
+- healthProfile
+- governanceRiskSummary optional
+
+TenantLifecycleEvaluationProfile:
+- tenantId
+- workspaceId
+- signals[]
+- severity
+- recommendedAction
+- reviewEligibility
+- warnings[]
+- summary
+- evaluatedAt
+- safetyNotice
+
+Rules:
+- critical health → critical severity + manualReviewRequired
+- grace expired → critical + suspensionReviewEligible true لكن بدون suspend
+- subscription expired → high + renewalReviewEligible true
+- renewal due now/soon → medium + renewalReviewEligible true
+- usage exceeded → high + usageReviewEligible true
+- usage approaching → medium + usageReviewEligible true
+- entitlement overrides → low/medium + entitlementReviewEligible true
+- workspace suspended/locked → high + lifecycleReviewEligible true
+- governance warning → medium/high + governanceReviewEligible true
+- missing data → unknown/medium + manualReviewRequired true
+
+مهم:
+لا يوجد mutation.
+لا يوجد تغيير workspace.status.
+لا يوجد enforcement.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+GET /platform/tenants/:tenantId/lifecycle-evaluation
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- load tenant profile
+- load subscription
+- derive renewal profile
+- derive entitlement profile
+- derive usage profile
+- derive health profile
+- derive lifecycle evaluation profile
+- return:
+  - evaluationProfile
+  - componentSummaries
+  - warnings
+  - safetyNotice
+
+مهم:
+- read-only
+- no mutation
+- no status update
+- no suspension
+- no lock
+- no billing
+- no emails
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث TenantRiskSignalSummary أو أضف summary fields:
+- lifecycleEvaluationSeverity
+- lifecycleEvaluationRecommendedAction
+- manualReviewRequired
+- suspensionReviewEligible
+- renewalReviewEligible
+- usageReviewEligible
+- entitlementReviewEligible
+- governanceReviewEligible
+
+في Tenant Registry table:
+اعرض مختصر:
+- evaluation severity
+- manual review required badge
+- recommended action
+
+بدون action buttons.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- LIFECYCLE_EVALUATION_SIGNAL_CONFIG
+- LIFECYCLE_EVALUATION_SEVERITY_CONFIG
+- LIFECYCLE_EVALUATION_ACTION_CONFIG
+- REVIEW_ELIGIBILITY_CONFIG
+- LIFECYCLE_EVALUATION_SAFETY_CONTRACT
+
+Safety contract:
+- superAdminOnly
+- readOnly
+- recommendationsOnly
+- noPaymentProcessing
+- noInvoiceGeneration
+- noChargeCollection
+- noAutoWorkspaceSuspension
+- noAutoWorkspaceLocking
+- noEntitlementEnforcement
+- noEmailOrLegalNotices
+- noDestructiveTenantActions
+- noStateMutation
+- failsClosedOnMissingData
+
+كلها true.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND HOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantLifecycleEvaluation(tenantId)
+
+GET hook فقط.
+
+مع:
+- loading/error/empty states
+- no mutation
+- staleTime مناسب
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantAdminConsole أضف tab جديد:
+
+Evaluation
+
+أو إذا تفضل:
+داخل Overview + Health
+
+الأفضل:
+أضف tab مستقل:
+- Overview
+- Lifecycle
+- Subscription
+- Entitlements
+- Usage
+- Renewal
+- Health
+- Evaluation
+
+Evaluation tab يعرض:
+- severity badge
+- recommended action badge
+- manual review required badge
+- review eligibility grid:
+  - renewal
+  - grace
+  - suspension
+  - usage
+  - entitlement
+  - lifecycle
+  - governance
+- evaluation signals
+- warnings
+- summary
+- safety notice:
+  "Evaluation is advisory only. No automated lifecycle action is performed."
+
+مهم:
+- لا أزرار suspend/lock
+- لا execute action
+- لا payment/billing
+- لا legal/email
+- لا enforcement wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — CONSOLE UPDATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث:
+- CONSOLE_TABS بإضافة evaluation
+- CONSOLE_TAB_CONFIG
+- Overview cards إذا مناسب:
+  - Evaluation Severity
+  - Manual Review
+- Tenant Admin Console tab bar
+- tests القديمة بحيث تتوقع 8 tabs بدل 7
+
+مهم:
+لا تكسر tabs السابقة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured log:
+- tenant_lifecycle_evaluation_read
+
+Fields:
+- actorId
+- tenantId
+- workspaceId
+- severity
+- recommendedAction
+- manualReviewRequired
+- signalCount
+
+بدون بيانات حساسة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Lifecycle Evaluation MUST:
+- remain super-admin only
+- remain read-only
+- never mutate workspace status
+- never suspend workspace
+- never lock workspace
+- never enforce entitlements
+- never process payments
+- never generate invoices
+- never charge customers
+- never send email/legal notices
+- never perform destructive tenant actions
+- recommendations only
+- fail closed on missing data
+
+أي:
+evaluation intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+evaluation signal config stable
+
+T2:
+severity config stable
+
+T3:
+safety contract all true
+
+T4:
+healthy/no issue evaluation
+
+T5:
+subscription missing evaluation
+
+T6:
+renewal due evaluation
+
+T7:
+grace expired evaluation
+
+T8:
+subscription expired evaluation
+
+T9:
+usage approaching/exceeded evaluation
+
+T10:
+entitlement overrides evaluation
+
+T11:
+workspace suspended/locked evaluation
+
+T12:
+health high/critical evaluation
+
+T13:
+governance warning evaluation
+
+T14:
+manual review required derivation
+
+T15:
+review eligibility derivation
+
+T16:
+recommended action derivation stable
+
+T17:
+evaluation API super-admin only
+
+T18:
+evaluation API read-only no mutation
+
+T19:
+tenant registry reflects evaluation summary
+
+T20:
+frontend evaluation hook read-only
+
+T21:
+evaluation tab renders major states
+
+T22:
+console tabs updated to 8 without removing old tabs
+
+T23:
+no payment/invoice/charge/suspend/lock/legal/email/enforcement/execute wording exists
+
+T24:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- automatic lifecycle jobs
+- workspace suspension mutation
+- workspace lock mutation
+- payment provider
+- invoice generation
+- charge collection
+- tax
+- entitlement enforcement
+- module access enforcement
+- email notifications
+- legal notices
+- tenant self-service actions
+- HR module logic
+- destructive tenant actions
+- bulk actions
+
+خلك:
+read-only lifecycle evaluation engine فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13i-report.txt
+
+ويحتوي:
+- lifecycle evaluation model
+- evaluation derivation library
+- backend API surface
+- tenant registry evaluation summary updates
+- frontend evaluation UI
+- console tab updates
+- observability behavior
+- safety guarantees
+- tests results
+- remaining automation gaps
+- readiness assessment قبل Phase 13 Closure Report

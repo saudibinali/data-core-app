@@ -1,0 +1,146 @@
+================================================================================
+WORKSPACE / HR FOUNDATION DISCOVERY — FINAL REPORT
+================================================================================
+Date: 2026-05-19
+Mode: READ-ONLY DISCOVERY (no code, schema, API, permission, or UI changes)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+The project has a mature **Workspace = Tenant** model (`workspaces.id`) with
+40+ workspace-scoped tables. **HR Foundation is largely built**: hierarchical
+org units, job grades/titles, positions, work locations, configurable lookups,
+a full **employees** domain (contracts, documents, custom fields, payroll,
+attendance, services), and extensive REST APIs in a single `hr.ts` router
+(~130 endpoints).
+
+Major risks before any redesign:
+  1) **departments** (legacy, user-centric) vs **hr_org_units** (HR-centric)
+  2) **hr_employee_leaves** vs **leave_requests** (schema for latter may not
+     be in applied migration 0000_sad_midnight.sql)
+  3) **employees** vs **users** as duplicate person records
+  4) Almost **no automated HR tests**
+  5) Coarse HR permissions (hr.view / hr.manage only)
+
+Recommendation: **Consolidate and extend existing models** — do not add parallel
+tables or a greenfield HR stack.
+
+================================================================================
+REPORTS CREATED
+================================================================================
+1. workspace-current-architecture-report.md
+2. hr-database-inventory-report.md
+3. hr-module-inventory-report.md
+4. workspace-hr-api-inventory-report.md
+5. workspace-hr-frontend-inventory-report.md
+6. workspace-hr-duplication-conflict-risk-report.md
+7. workspace-hr-redesign-readiness-report.md
+8. workspace-hr-discovery-final-report.txt  (this file)
+
+================================================================================
+KEY TABLES (HR / WORKSPACE)
+================================================================================
+Workspace shell:
+  workspaces, workspace_module_settings, hr_workspace_settings,
+  hr_workspace_counters
+
+Organization:
+  hr_org_units, hr_job_grades, hr_job_titles, hr_work_locations, hr_positions
+  departments (legacy parallel), user_departments
+
+Employee core:
+  employees, hr_custom_field_defs, hr_custom_field_values,
+  hr_employee_contracts, hr_employee_documents, hr_employee_position_history,
+  hr_employee_notes, hr_employee_activity
+
+Foundation lookups:
+  hr_employee_statuses, hr_employment_types, hr_contract_types,
+  hr_document_types, hr_leave_policies, hr_probation_policies
+
+Leave (dual):
+  hr_employee_leaves, hr_leave_balances, leave_requests*, leave_approval_steps*
+  (* schema present; verify migration applied)
+
+Payroll:
+  hr_salary_components, hr_salary_structures, hr_salary_structure_components,
+  hr_salary_bands, hr_employee_compensations, hr_employee_compensation_items,
+  hr_payroll_runs, hr_payslips, hr_payslip_lines
+
+Attendance:
+  hr_shifts, hr_work_calendars, hr_calendar_holidays, hr_attendance,
+  hr_overtime_policies, hr_overtime_records
+
+Services:
+  hr_services, hr_service_categories
+
+================================================================================
+KEY MODULES (STATUS)
+================================================================================
+Complete:     HR Foundation admin, employees CRUD+detail, org units, job
+              catalog, HR services, workspace modules, legacy departments
+Partial:      Leave (two models), payroll UI, attendance UI, HR dashboard,
+              self-service portal, employee-user linking
+Placeholder:  Recruitment, performance, LMS, succession (entitlement names only)
+Unknown:      DB state for leave_requests vs Drizzle schema
+
+================================================================================
+KEY APIs (~145 workspace/HR endpoints)
+================================================================================
+Primary: artifacts/api-server/src/routes/hr.ts
+Leave:   artifacts/api-server/src/routes/leave.ts
+Shell:   workspaces.ts, departments.ts, modules.ts
+Permissions: hr.view, hr.manage, hr.services.manage, requireWorkspaceAdmin
+
+================================================================================
+KEY FRONTEND PAGES
+================================================================================
+/hr, /hr/employees, /hr/employees/new, /hr/employees/:id
+/admin/hr/foundation, /admin/hr/payroll, /admin/hr/attendance
+/hr/services, /admin/hr/services, /self-service, /self-service/leave
+/departments, /users, /roles  (legacy overlap)
+
+App: artifacts/ops-platform (single client SPA)
+
+================================================================================
+BIGGEST DUPLICATION RISKS
+================================================================================
+1. departments vs hr_org_units
+2. hr_employee_leaves vs leave_requests
+3. employees vs users
+4. employees.leave_balances jsonb vs hr_leave_balances table
+5. Entitlement catalog modules without implementation
+
+================================================================================
+BIGGEST DESIGN ISSUES
+================================================================================
+1. tenant/workspace naming used interchangeably
+2. Monolithic hr.ts (~4000+ lines) — maintenance hazard
+3. self_service.view missing from permission registry API
+4. Schema–migration drift for leave_requests
+5. No HR test coverage
+
+================================================================================
+FINAL RECOMMENDATION (BEFORE ANY CODE CHANGES)
+================================================================================
+1. Audit production/staging DB against Drizzle schema (especially leave_requests).
+2. Decide canonical org (hr_org_units) and leave (leave_requests) models.
+3. Document employee↔user linking rules.
+4. Extend workspace RBAC — do not copy platform P17 override model.
+5. Only then plan API split / UI consolidation / new HR permissions.
+
+Do NOT start greenfield HR tables or parallel Foundation.
+
+================================================================================
+CONFIRMATION
+================================================================================
+- No code changed
+- No migrations added
+- No tables added
+- No APIs added
+- No permissions added
+- No frontend changes
+- Discovery only
+
+================================================================================
+END
+================================================================================

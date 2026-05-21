@@ -1,0 +1,230 @@
+راجع leave-domain-phase-1-report.txt ثم نفّذ فقط Validation & Stability Testing للـ Leave Domain بدون أي refactor أو feature additions.
+
+عنوان المهمة:
+LEAVE DOMAIN VALIDATION SUITE — Lifecycle, Concurrency & Integrity Testing
+
+المهمة الحالية:
+اختبار الـ Leave Domain الحالي كـ Production-grade Enterprise Domain والتأكد أن:
+- lifecycle transitions صحيحة
+- balance reservations سليمة
+- concurrency handling يعمل
+- events لا تتكرر
+- side effects صحيحة
+- authorization boundaries سليمة
+
+لا تنفذ أي feature جديدة.
+لا تعدّل architecture.
+فقط اختبارات + fixes صغيرة إذا ظهرت bugs حقيقية.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — LIFECYCLE TEST MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اختبر السيناريوهات التالية فعليًا عبر API requests:
+
+A) Approval Flow
+pending_approval → approved
+
+تحقق من:
+- leave_requests.status
+- leave_approval_steps.status
+- pending decrement
+- used increment
+- leave.approved emitted مرة واحدة
+- notification واحدة فقط
+- activity log واحد فقط
+
+B) Rejection Flow
+pending_approval → rejected
+
+تحقق:
+- pending restored
+- used unchanged
+- rejection event emitted مرة واحدة
+- approval step updated correctly
+
+C) Withdraw Flow
+pending/pending_approval → withdrawn
+
+تحقق:
+- approval steps skipped
+- pending restored
+- withdrawn event emitted
+- no further approval possible
+
+D) Auto Approval Flow
+policy.requiresApproval = false
+
+تحقق:
+- status مباشرة approved
+- no approval steps created
+- leave.requested + leave.approved emitted
+- used increment مباشرة
+
+E) Invalid Transitions
+
+اختبر:
+- approve rejected request
+- reject approved request
+- withdraw approved request
+- double approval
+- double rejection
+
+المطلوب:
+- proper 4xx responses
+- no state corruption
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CONCURRENCY TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+نفّذ concurrent requests حقيقية.
+
+سيناريو:
+رصيد = 10 أيام
+
+نفّذ طلبين بنفس اللحظة:
+- request A = 8 أيام
+- request B = 7 أيام
+
+تحقق:
+- واحد فقط ينجح
+- الثاني يفشل بسبب insufficient balance
+- balances لا تصبح negative
+- no duplicate pending reservations
+
+اختبر أيضًا:
+- simultaneous approve/reject race
+- simultaneous duplicate submissions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — BUSINESS RULE TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اختبر:
+- overlapping requests
+- weekends exclusion
+- holiday exclusion
+- invalid date ranges
+- zero business days
+- unauthorized approval
+- unauthorized withdrawal
+- cross-workspace access attempts
+
+تحقق:
+- validations صحيحة
+- proper status codes
+- no data leaks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EVENT INTEGRITY TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تحقق من:
+- leave.requested emitted once
+- leave.approved emitted once
+- leave.rejected emitted once
+- leave.withdrawn emitted once
+
+تحقق:
+- no duplicate activity logs
+- no duplicate notifications
+- no duplicate workflow executions
+- no duplicate workspace_event_logs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FAILURE & RECOVERY TESTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اختبر:
+- listener throw simulation
+- notification failure
+- activity listener failure
+- transaction rollback behavior
+
+تحقق:
+- DB transaction integrity
+- no partial balance updates
+- no broken statuses
+- EventBus error isolation يعمل
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — DATABASE CONSISTENCY AUDIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع consistency بين:
+- leave_requests
+- leave_approval_steps
+- hr_leave_balances
+- activity_logs
+- notifications
+- workspace_event_logs
+
+تحقق:
+- no orphan records
+- no invalid states
+- no negative balances
+- no mismatched approval states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — PERFORMANCE OBSERVATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+سجّل:
+- average request latency
+- transaction duration
+- listener execution timing
+- slow queries إن وجدت
+
+لا تنفذ optimization إلا إذا يوجد bug حقيقي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — WHAT NOT TO CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- attendance integration
+- payroll integration
+- calendar sync
+- queues
+- Redis
+- caching systems
+- new architecture changes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FIX POLICY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا ظهرت:
+- bugs حقيقية
+- race conditions
+- integrity problems
+- duplicate events
+
+قم بإصلاحها فقط إذا كانت:
+- isolated
+- low-risk
+- directly related to validation failures
+
+أي redesign واسع:
+وثّقه فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+leave-domain-validation-report.txt
+
+ويحتوي:
+- جميع السيناريوهات المختبرة
+- pass/fail matrix
+- أي bugs مكتشفة
+- أي fixes تم تنفيذها
+- concurrency results
+- event integrity results
+- DB consistency results
+- performance observations
+- remaining risks
+- final production-readiness assessment

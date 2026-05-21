@@ -1,0 +1,132 @@
+================================================================================
+WORKFLOW PHASE 25-A — Inventory Canonical DB & Warehouse Runtime Foundation
+Generated: 2026-05-20
+Status: COMPLETE
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P25-A delivers the first inventory runtime foundation: canonical PostgreSQL tables,
+warehouse and item master services, goods receipt persistence linked to procurement
+POs, finance readiness signals, inventory policies, permissions, document registry
+integration for GRN attachments, five report definitions, monitoring APIs, and
+smoke tests. Receipt post updates PO received quantities but does NOT mutate stock
+balances or create movement ledger rows (deferred to P25-B).
+
+No movement posting engine, barcode scanning, MRP, AP, accounting posting, or
+destructive migrations were introduced. P25-B was NOT started.
+
+FILES CREATED / UPDATED (primary)
+---------------------------------
+Schema & migration:
+  lib/db/src/schema/inventory-canonical.ts (NEW)
+  lib/db/src/schema/procurement-canonical.ts (PO item columns)
+  lib/db/src/schema/index.ts
+  lib/db/drizzle/0018_inventory_canonical_foundation.sql (NEW)
+  lib/db/drizzle/meta/_journal.json (0017 + 0018 entries)
+
+Services:
+  artifacts/api-server/src/lib/inventory/inventory-audit.ts
+  artifacts/api-server/src/lib/inventory/inventory-guards.ts
+  artifacts/api-server/src/lib/inventory/inventory-policy-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-finance-readiness-service.ts
+  artifacts/api-server/src/lib/inventory/warehouse-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-item-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-receipt-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-document-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-monitoring-service.ts
+  artifacts/api-server/src/lib/inventory/inventory-reports.ts
+  artifacts/api-server/src/lib/inventory/__tests__/p25a-inventory.smoke.test.ts
+
+Routes & platform:
+  artifacts/api-server/src/routes/inventory.ts (NEW)
+  artifacts/api-server/src/routes/index.ts
+  artifacts/api-server/src/lib/platform/module-governance-service.ts
+  artifacts/api-server/src/seed/modules.ts
+  artifacts/api-server/src/routes/workspace-roles.ts
+  artifacts/api-server/src/lib/documents/document-access-service.ts
+  artifacts/api-server/src/lib/reports/report-definition-registry.ts
+  artifacts/api-server/src/lib/reports/report-generators.ts
+  artifacts/api-server/src/routes/reports.ts
+
+Documentation:
+  p25-a-inventory-runtime-foundation.md
+  workflow-phase-25a-report.txt
+
+TABLES ADDED
+------------
+inventory_warehouses, inventory_locations, inventory_items, inventory_item_variants,
+inventory_stock_balances, inventory_receipts, inventory_receipt_items,
+inventory_receipt_documents, inventory_reservations, inventory_adjustments,
+inventory_adjustment_items, inventory_count_sessions, inventory_count_items,
+inventory_inventory_policies, inventory_approval_links
+
+NOT added (by design): inventory_stock_movements, cost layers, barcode tables
+
+Procurement additive: procurement_po_items.inventory_item_id, quantity_received,
+receiving_status
+
+SERVICES ADDED
+--------------
+WarehouseService, InventoryItemService, InventoryReceiptService,
+InventoryPolicyService, InventoryFinanceReadinessService, InventoryDocumentService,
+InventoryMonitoringService, generateInventoryFoundationReport
+
+WAREHOUSE RUNTIME STATUS: GO (foundation)
+- Create/archive warehouse, locations, quarantine/damaged/receiving seeds, hierarchy
+- APIs live under /inventory/warehouses
+
+ITEM MASTER STATUS: GO (foundation)
+- SKU uniqueness, variants, status lifecycle, search
+- APIs under /inventory/items
+
+RECEIVING FOUNDATION STATUS: PARTIAL
+- GO: draft, PO attach, lines, over-receive policy, readiness, post (PO qty only)
+- BLOCKED: stock balance mutation, movement ledger, full void rollback
+
+SECURITY STATUS: GO (foundation)
+- inventory.* permissions seeded
+- Module inventory depends on procurement + hr
+- Confidential receipt docs gated
+- Workspace isolation on all entities
+
+REPORTING STATUS: GO (definitions only)
+- 5 inventory.* report keys registered + generator
+- Export via inventory.export / generated_reports
+
+SMOKE TEST RESULTS
+------------------
+File: p25a-inventory.smoke.test.ts
+Result: 7 passed / 7 total (vitest run)
+
+READINESS DECISION MATRIX
+-------------------------
+inventory DB:                 GO
+warehouse runtime:            GO
+item master:                  GO
+receiving foundation:         PARTIAL (no stock mutation)
+ERP inventory readiness:      PARTIAL
+
+REMAINING BLOCKERS (P25-B)
+--------------------------
+- inventory_stock_movements immutable ledger
+- Transactional balance updates on receipt/issue/void
+- Compensating movements on void
+- Reservation hold/release runtime
+- Adjustment/count posting workflows
+
+RECOMMENDED NEXT PHASE
+----------------------
+P25-B — Inventory Movement Ledger & Stock Runtime Engine
+
+CONFIRMATION (constraints honored)
+----------------------------------
+[x] No full movement posting engine (no movements table)
+[x] No stock balance mutation on post
+[x] No barcode/mobile scanning
+[x] No manufacturing/MRP
+[x] No accounting posting
+[x] No destructive migration
+[x] P25-B NOT started
+
+END OF REPORT

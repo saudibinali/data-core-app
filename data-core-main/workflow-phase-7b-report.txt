@@ -1,0 +1,528 @@
+═══════════════════════════════════════════════════════════════════════════════
+WORKFLOW PHASE 7-B REPORT
+Automated Snapshot Scheduling & Retention Lifecycle
+Generated: 2026-05-14
+═══════════════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Convert manual governance snapshot capture (POST /governance/snapshots/capture)
+into a self-sustaining operational history lifecycle with automatic capture,
+deterministic workspace iteration, and bounded retention pruning.
+
+Prior to P7-B:
+  • captureGovernanceSnapshot() existed (P7-A) but required an explicit API call.
+  • governance_snapshots grew without bound — no pruning was ever executed.
+  • Historical continuity depended entirely on human or automation triggering
+    POST /governance/snapshots/capture for each workspace.
+
+After P7-B:
+  • GovernanceSnapshotScheduler polls every 5 minutes, captures all active
+    workspaces automatically, and prunes raw rows older than 30 days.
+  • Zero manual intervention required after server startup.
+  • Retention lifecycle is deterministic and bounded — no unbounded growth.
+  • The governance scheduler started at the same lifecycle stage as the
+    workflow delay scheduler (P6-A), via runInitSequence().
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCHEDULER ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Class: GovernanceSnapshotScheduler
+File:  artifacts/api-server/src/lib/workflows/governance-scheduler.ts
+
+Follows the WorkflowScheduler (P6-A) design exactly:
+
+  SETTIMEOUT CHAIN (NOT setInterval):
+    setTimeout(fn, CAPTURE_INTERVAL_MS).finally(() => _schedule())
+    → Next cycle starts only AFTER the current one completes.
+    → If a cycle takes 6 minutes and the interval is 5 minutes, the next
+      cycle fires 5 minutes after the previous finished — not 1 minute later.
+
+  NON-REENTRANT GATE (isCapturing flag):
+    Prevents overlapping capture passes even if a cycle runs long.
+    When the gate is held, a new cycle returns buildOverlapSkipResult()
+    immediately with skippedOverlap=true and zero counts.
+
+  IDEMPOTENT START:
+    start() checks `if (this.running) return` — second call is a no-op.
+    Safe to call from init-sequence.ts without checking server state.
+
+  NON-DESTRUCTIVE STOP:
+    stop() cancels the next scheduled timer and clears running=false.
+    Any in-flight cycle completes naturally.
+    Restart-safe: all state is in the DB — no in-memory timer IDs to recover.
+
+  SINGLETON EXPORT:
+    export const governanceScheduler = new GovernanceSnapshotScheduler();
+    Mirror of workflowScheduler singleton from P6-A.
+
+Key constants:
+  CAPTURE_INTERVAL_MS        = 300,000 ms (5 min, derived from RECOMMENDED_CAPTURE_INTERVAL_MINUTES)
+  RETENTION_RAW_DAYS         = 30         (aligned with RECOMMENDED_RETENTION_RAW_DAYS)
+  PRUNE_MIN_AGE_HOURS        = 1          (min-age floor — see Retention Safety Rules)
+  PRUNE_MAX_DELETE_PER_CYCLE = 500        (bounded DELETE per workspace per cycle)
+  WORKSPACE_BATCH_SIZE       = 50         (max active workspaces per cycle)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKSPACE ITERATION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+queryActiveWorkspaceIds(database, limit = 50):
+  SELECT id FROM workspaces WHERE status = 'active' ORDER BY id ASC LIMIT 50
+
+Design rationale:
+
+  ONLY ACTIVE WORKSPACES:
+    status='suspended' and status='disabled' workspaces are skipped.
+    Suspended tenants are not generating workflow activity → no new governance
+    data to capture.  Disabled workspaces should not accrue new history.
+
+  DETERMINISTIC ORDER:
+    ORDER BY id ASC ensures the scheduler always visits workspaces in the
+    same sequence across restarts.  After process restart, the first cycle
+    visits workspace 1 first — no randomness, no starvation.
+
+    sortWorkspaceIds() is applied in-memory after the DB query as an
+    additional guarantee (pure, injectable, testable).
+
+  PAGINATION-READY BOUNDED BATCH:
+    LIMIT 50 via WORKSPACE_BATCH_SIZE.  Remaining workspaces past position 50
+    would be captured in a future multi-page implementation.
+    At current scale (< 50 active workspaces per deployment), this covers all
+    workspaces in a single cycle.
+
+  SKIP DELETED WORKSPACES:
+    The governanceSnapshotsTable has ON DELETE CASCADE on workspaceId FK →
+    workspaces(id).  If a workspace is deleted, its snapshots are automatically
+    removed.  The scheduler never encounters or processes deleted workspace IDs.
+
+  NO DISTRIBUTED SHARDING:
+    Single-process model.  No partition key, no worker affinity, no distributed
+    coordinator.  Future multi-process deployments can use a guarded
+    acquisition model (similar to P6-A execution resumption) if needed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RETENTION ENFORCEMENT BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Pruning runs after every capture pass in the same cycle.  The same workspace
+batch that received new snapshots is also pruned.
+
+pruneSnapshotsOlderThan(workspaceId, cutoff, now, maxDelete, dryRun, database):
+
+  Step 1 — SELECT eligible IDs:
+    SELECT id FROM governance_snapshots
+    WHERE workspace_id = ? AND captured_at < cutoff AND captured_at <= now
+    LIMIT 500
+
+  Step 2 — Dry-run check:
+    If dryRun=true → return { deleted: 0, eligible: count } immediately.
+
+  Step 3 — Bounded DELETE by primary key:
+    DELETE FROM governance_snapshots WHERE id IN (...)
+    Bounded to the SELECT result set — prevents unbounded single statement.
+
+Why SELECT + DELETE by PK instead of DELETE WHERE ... LIMIT:
+  Drizzle ORM does not support LIMIT on DELETE for PostgreSQL.
+  The SELECT-then-DELETE-by-PK pattern is equivalent in correctness and
+  achieves the same safety guarantee with an extra round-trip.
+
+Cutoff computation (computePruneCutoff):
+  retentionDate = now - 30 days
+  minAgeDate    = now - 1 hour
+  cutoff = min(retentionDate, minAgeDate)   ← more conservative / earlier
+
+  Normal case (30d retention): cutoff = 30 days ago ✓
+  Edge case (0d retention):    cutoff = 1 hour ago ✓ (min-age floor kicks in)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPEND-ONLY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The P7-A append-only contract is fully preserved through P7-B:
+
+  ✓ captureGovernanceSnapshot() in the scheduler loop uses INSERT (P7-A Layer 3).
+  ✓ pruneSnapshotsOlderThan() is the ONLY DELETE path in the codebase.
+    It never deletes rows inside the retention window.
+    It never issues UPDATE statements.
+  ✓ Surviving rows remain immutable after pruning — no UPDATE is ever run.
+  ✓ The scheduler does not modify workflow_executions or any other runtime table.
+  ✓ Structural proof: the pruning WHERE clause requires capturedAt < cutoff
+    (strictly less than) — rows at the boundary are preserved.
+  ✓ isEligibleForPruning() uses strict less-than (< cutoff) — boundary row
+    survives, consistent with the DB query.
+
+What "append-only" means in practice under the P7-B retention lifecycle:
+  • Rows 0–30 days old: immutable, never touched after INSERT.
+  • Rows > 30 days old: eligible for pruning (deleted in bounded batches).
+  • No row is ever mutated — only created or deleted.
+  • A snapshot that existed at T=0 and is still within 30 days is bit-identical
+    at T=30d.  No background job ever modifies its JSONB columns, severity,
+    or any other field.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRUNING SAFETY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Six safety rules enforced:
+
+  RULE 1 — Never delete recent snapshots:
+    PRUNE_MIN_AGE_HOURS = 1.  computePruneCutoff() is always at most 1 hour
+    before now, regardless of the retentionDays value.  Even if retentionDays
+    is accidentally set to 0, snapshots from the last hour are protected.
+
+  RULE 2 — Never delete all history:
+    Since PRUNE_MIN_AGE_HOURS > 0, the pruning cutoff is always strictly before
+    now.  At any given moment, all snapshots captured within the last hour are
+    guaranteed to survive.  Combined with the 5-minute capture interval,
+    at least 12 snapshots are always preserved per active workspace.
+
+  RULE 3 — Never prune future-dated rows:
+    WHERE captured_at <= now in the SELECT query.  Snapshots with capturedAt
+    in the future (clock skew, test data) are never returned by the
+    eligibility query and cannot be deleted.
+
+  RULE 4 — Bounded delete queries:
+    LIMIT 500 (PRUNE_MAX_DELETE_PER_CYCLE) in the SELECT phase.
+    The DELETE is then bounded to those IDs.  Prevents:
+      • Lock contention from large in-flight DELETE statements.
+      • Statement timeouts from runaway DELETE scans.
+      • Backlog-burst DELETE after scheduler downtime.
+    Residual rows beyond 500 are pruned in subsequent cycles.
+
+  RULE 5 — Dry-run mode:
+    dryRun=true: queries eligible count, returns PruneSingleWorkspaceResult
+    with deleted=0 and eligible=N.  Zero DB mutations.
+    Available via GovernanceSnapshotScheduler.runCaptureOnce(now, { dryRun: true }).
+
+  RULE 6 — Per-workspace error isolation:
+    If pruning fails for one workspace, the error is logged and the cycle
+    continues with the next workspace.  One workspace's prune failure does
+    not affect other workspaces or the capture pass.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Five new structured log events:
+
+A) governance_snapshot_scheduler_started
+   Level:  INFO
+   When:   GovernanceSnapshotScheduler.start() called
+   Fields: captureIntervalMs, retentionDays, workspaceBatchSize,
+           pruneMaxPerCycle, action
+
+B) governance_snapshot_cycle_completed
+   Level:  INFO
+   When:   runCaptureOnce() finishes one full pass
+   Fields: workspaceCount, snapshotCount, failedCount,
+           cycleDurationMs, retentionWindow, action
+
+C) governance_snapshot_pruning_completed
+   Level:  INFO
+   When:   Real pruning pass completes (dryRun=false)
+   Fields: workspaceCount, prunedCount, eligibleCount,
+           retentionWindow, cutoffDate, dryRun, action
+
+D) governance_snapshot_pruning_dry_run
+   Level:  INFO
+   When:   Pruning pass runs in dry-run mode (dryRun=true)
+   Fields: same as above, dryRun=true, prunedCount=0
+
+E) governance_snapshot_scheduler_failed
+   Level:  ERROR
+   When:   Per-workspace capture or prune failure (non-fatal, cycle continues)
+   Fields: workspaceId, error, action
+
+Additional:
+  governance_snapshot_cycle_overlap_skipped (WARN)
+    When:   runCaptureOnce() called while isCapturing=true
+    Non-fatal, cycle skipped, logged for visibility.
+
+  governance_snapshot_scheduler_stopped (INFO)
+    When:   stop() is called.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STORAGE GOVERNANCE METRICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+StorageGovernanceMetrics interface (pure, injectable):
+  totalSnapshots            — total rows across all workspaces
+  oldestSnapshotAt          — ISO 8601 | null
+  newestSnapshotAt          — ISO 8601 | null
+  estimatedStoragePressure  — "low" | "medium" | "high" | "critical"
+  snapshotsPrunedLastCycle  — integer
+
+computeStorageGovernanceMetrics(totalSnapshots, oldestAt, newestAt, prunedLastCycle)
+
+Storage pressure thresholds:
+  "low"      < 50,000  rows (~5 workspaces at 30d capacity)
+  "medium"   < 150,000 rows (~17 workspaces at capacity)
+  "high"     < 300,000 rows (~34 workspaces at capacity)
+  "critical" ≥ 300,000 rows
+
+Capacity reference:
+  1 workspace × 5-min intervals × 30 days = 8,640 rows at steady state.
+  50 workspaces at full capacity = 432,000 rows → "critical" pressure signal.
+  With daily pruning, raw rows per workspace stays bounded at ≤ 8,640.
+
+estimatedSnapshotsAtCapacity(intervalMin=5, retentionDays=30) = 8,640
+  — pure helper for capacity planning displays.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INTEGRATION POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/init-sequence.ts
+
+Startup sequence (updated):
+  1. runMigrations()
+  2. workflowEngine.start()           ← P6-A delay scheduler starts here
+  3. governanceScheduler.start()      ← P7-B governance scheduler (NEW)
+  4. Seed reference data (modules, events, workflows, forms)
+  5. bootstrapDevAdmin()
+
+The governance scheduler starts AFTER the workflow engine so that all
+workflow execution state is accessible when the first capture cycle fires.
+
+Start behavior at server boot:
+  • Scheduler emits governance_snapshot_scheduler_started.
+  • First cycle fires after CAPTURE_INTERVAL_MS (5 minutes).
+  • Server startup is not delayed — start() is synchronous and non-blocking.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/governance-scheduler.test.ts
+New tests: 79 across 11 describe blocks (T1–T10 + storage metrics group)
+
+Previous suite total: 795 (P7-A)
+New total: 874 / 874 passed (0 failures)
+
+Test groups:
+
+  T1  buildCycleStats assembles correct result shape                    (8 tests)
+      ✓ captures workspaceCount, snapshotCount, failedCount correctly
+      ✓ includes prunedCount in stats
+      ✓ uses RETENTION_RAW_DAYS as default retentionWindow
+      ✓ accepts retentionWindow override
+      ✓ skippedOverlap is false for normal cycles
+      ✓ dryRun defaults to false
+      ✓ dryRun=true is preserved in stats
+      ✓ cycleDurationMs is recorded accurately
+
+  T2  Non-reentrant overlap guard                                        (7 tests)
+      ✓ buildOverlapSkipResult returns skippedOverlap=true
+      ✓ returns zero workspaceCount, snapshotCount, prunedCount
+      ✓ records cycleDurationMs correctly
+      ✓ dryRun is false for overlap skip
+      ✓ GovernanceSnapshotScheduler.start() is idempotent
+
+  T3  Workspace iteration is deterministic and bounded                  (10 tests)
+      ✓ sortWorkspaceIds ascending order
+      ✓ does not mutate input
+      ✓ handles empty array
+      ✓ single element unchanged
+      ✓ already-sorted input stays sorted
+      ✓ boundWorkspaceBatch caps at limit
+      ✓ takes first (lowest) IDs
+      ✓ limit >= length returns all
+      ✓ does not mutate input
+      ✓ uses WORKSPACE_BATCH_SIZE as default
+
+  T4  Append-only integrity (pruning never touches non-eligible rows)   (7 tests)
+      ✓ row at cutoff boundary NOT eligible (strict lt)
+      ✓ row 1ms before cutoff IS eligible
+      ✓ row 1ms after cutoff NOT eligible
+      ✓ yesterday NOT eligible (inside 30d retention window)
+      ✓ 60 days ago IS eligible
+      ✓ buildPruneCycleResult totalPruned = sum of deleted
+      ✓ buildPruneCycleResult totalEligible = sum of eligible
+
+  T5  Old snapshots correctly identified as prunable                    (6 tests)
+      ✓ computePruneCutoff(30d) returns ~30 days ago
+      ✓ snapshot 31 days old is eligible
+      ✓ snapshot 60 days old is eligible
+      ✓ snapshot 30.1 days old is eligible
+      ✓ buildPruneCycleResult records cutoffDate as ISO string
+      ✓ buildPruneCycleResult workspaceCount matches results length
+
+  T6  Min-age floor protects recent snapshots                           (6 tests)
+      ✓ 30-minute-old snapshot NOT eligible
+      ✓ 59-minute-old snapshot NOT eligible
+      ✓ 0-day retention clamps to 1h ago
+      ✓ 1-day retention returns 1 day ago (> 1h min-age)
+      ✓ exact boundary row NOT deleted (strict less-than)
+      ✓ PRUNE_MIN_AGE_HOURS constant is positive
+
+  T7  Future-dated snapshots excluded from pruning                      (5 tests)
+      ✓ 1 hour in the future NOT eligible
+      ✓ 7 days in the future NOT eligible
+      ✓ exactly at NOW NOT eligible (inside retention window)
+      ✓ 1ms after NOW NOT eligible
+      ✓ future snapshot never eligible regardless of cutoff
+
+  T8  Dry-run pruning returns count without deleting                    (6 tests)
+      ✓ buildPruneCycleResult with dryRun=true has totalPruned=0
+      ✓ preserves totalEligible count
+      ✓ records dryRun=true flag
+      ✓ buildCycleStats with dryRun=true
+      ✓ PRUNING_DRY_RUN action distinct from PRUNING_COMPLETED
+      ✓ dry-run result never has deleted > 0
+
+  T9  Retention constants applied consistently                         (10 tests)
+      ✓ RETENTION_RAW_DAYS matches RECOMMENDED_RETENTION_RAW_DAYS
+      ✓ CAPTURE_INTERVAL_MS matches RECOMMENDED_CAPTURE_INTERVAL_MINUTES
+      ✓ getEffectiveRetentionDays() returns RETENTION_RAW_DAYS
+      ✓ getEffectiveRetentionDays() is idempotent
+      ✓ estimatedSnapshotsAtCapacity defaults to 8,640
+      ✓ estimatedSnapshotsAtCapacity(1min, 7d) = 10,080
+      ✓ computePruneCutoff with RETENTION_RAW_DAYS=30
+      ✓ PRUNE_MAX_DELETE_PER_CYCLE is a positive integer
+      ✓ WORKSPACE_BATCH_SIZE is a positive integer
+      ✓ all 5 observability action constants are distinct strings
+
+  T10 Scheduler is restart-safe                                         (7 tests)
+      ✓ start() does not throw on first call
+      ✓ start() is idempotent — second call no-op
+      ✓ stop() does not throw when running
+      ✓ stop() is idempotent
+      ✓ stop() before start() does not throw
+      ✓ start → stop → start cycle works
+      ✓ multiple instances are independent
+
+  Additional: Storage governance metrics                                (7 tests)
+      ✓ estimateStoragePressure all four thresholds
+      ✓ computeStorageGovernanceMetrics zero snapshots → null timestamps
+      ✓ Date → ISO string conversion
+      ✓ pure function — same inputs → same outputs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TYPECHECK RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  @workspace/api-server   → 0 errors
+  @workspace/db           → 0 errors
+  @workspace/api-spec     → 0 errors
+  @workspace/ops-platform → 2 pre-existing errors in workflow-detail.tsx /
+                            workflows.tsx (isActive on UpdateWorkflowBody —
+                            not introduced by P7-B)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING STORAGE GOVERNANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. WORKSPACE PAGINATION (not in P7-B):
+   WORKSPACE_BATCH_SIZE = 50 covers current scale.  Deployments with > 50
+   active workspaces will silently miss workspaces ranked > 50 by ID.
+   A future multi-page iteration (page cursor in DB or memory) would fix this.
+
+2. HOURLY / DAILY ROLLUP (not in P7-B):
+   Raw rows older than 30 days are deleted, not aggregated.  There is no
+   hourly or daily rollup table.  Long-term trends (> 30 days) are not available.
+   The retention recommendation model (P7-A) defined 90-day hourly and 365-day
+   daily tiers but no schema or migration implements them yet.
+
+3. PRUNE CALLBACK / QUOTA ENFORCEMENT (not in P7-B):
+   No mechanism notifies the platform owner when a workspace crosses a
+   storage pressure threshold ("critical" = 300k+ rows).  A future webhook
+   or notification event would close this gap.
+
+4. PER-WORKSPACE RETENTION OVERRIDES (not in P7-B):
+   All workspaces share RETENTION_RAW_DAYS = 30.  A workspace_settings column
+   could allow enterprise tenants to configure longer raw retention.
+
+5. SCHEDULER HEALTH ENDPOINT (not in P7-B):
+   No API endpoint exposes scheduler status (last cycle time, failure count,
+   storage metrics).  A future GET /governance/scheduler/status endpoint would
+   surface CycleStats and StorageGovernanceMetrics to the super-admin dashboard.
+
+6. CROSS-WORKSPACE STORAGE VIEW (super_admin — not in P7-B):
+   No super_admin endpoint shows platform-wide snapshot volume or which
+   workspaces are at/near storage capacity.
+
+7. CONFIGURABLE INTERVAL (not in P7-B):
+   CAPTURE_INTERVAL_MS is a compile-time constant.  A platform setting (or
+   env var) for the capture interval would allow ops teams to tune the
+   scheduler without redeploying.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ADVANCED ANALYTICS READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+READY (both P7-A + P7-B complete):
+
+  ✓ Automatic data collection
+    The scheduler populates governance_snapshots every 5 minutes without
+    manual triggers.  Trend data is always available after startup.
+
+  ✓ Bounded storage footprint
+    30-day rolling window, up to 8,640 rows/workspace.  Storage is controlled
+    and predictable.  Platform can confidently onboard new workspaces.
+
+  ✓ Append-only historical record
+    Every snapshot is immutable and timestamped.  Historical comparisons
+    (e.g., "this week vs last week") can trust that past rows were not mutated.
+
+  ✓ Alert frequency history
+    GOV-* codes are stored in alert_codes JSONB on every snapshot row.
+    Chronic alert detection (P7-A) runs against the accumulated history.
+
+  ✓ All five trend series available
+    severityHistory, errorRateTrend, approvalBacklogTrend, delayBacklogTrend,
+    stuckCountTrend — all backed by real accumulated snapshot rows.
+
+  ✓ Generated React Query hooks ready
+    useGetGovernanceSnapshots, usePostGovernanceSnapshotsCapture,
+    useGetGovernanceSnapshotsChronicAlerts — wired and codegen-verified.
+
+NOT YET READY (data model is ready, these are UI/API gaps):
+
+  ○ Frontend governance trend chart components
+    Recharts sparklines and severity timeline UI not built yet.
+
+  ○ "Capture Now" manual trigger button in governance dashboard
+    POST /governance/snapshots/capture route exists but no UI button.
+
+  ○ Scheduler status / storage pressure API
+    No GET endpoint exposes last cycle stats to the super-admin dashboard.
+
+  ○ > 30-day historical analytics
+    Without rollup tables, queries beyond 30 days return empty results.
+    Long-term trend analysis requires the hourly/daily rollup phase.
+
+  ○ Cross-workspace trend comparison (super_admin view)
+    No endpoint compares trend data across multiple workspaces simultaneously.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATED
+  artifacts/api-server/src/lib/workflows/governance-scheduler.ts
+    — 370 lines; 3 layers: pure model (Sections 1–3) + DB layer (Section 4)
+      + GovernanceSnapshotScheduler class + singleton (Section 5)
+    — 19 exported symbols: 7 constants, 4 types, 8 pure functions + class + singleton
+
+  artifacts/api-server/src/lib/workflows/__tests__/governance-scheduler.test.ts
+    — 79 tests across 11 describe blocks (T1–T10 + storage metrics)
+
+  workflow-phase-7b-report.txt
+
+MODIFIED
+  artifacts/api-server/src/lib/init-sequence.ts
+    + import { governanceScheduler } from "./workflows/governance-scheduler"
+    + governanceScheduler.start() call at step 3 of runInitSequence()
+    + comment numbering corrected (4. Seed reference data)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS: COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tests:     874 / 874 passed  (79 new P7-B tests)
+Typecheck: 0 new errors introduced by P7-B
+Scheduler: wired into init-sequence, starts automatically with the server
+Retention: bounded 30-day rolling window, bounded DELETE, min-age floor
+═══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,34 @@
+P-HCM3 WORKFLOW PHASE REPORT
+============================
+Date: 2026-05-20
+Phase: P-HCM3 — Legacy Leave Migration & Employee Provision
+Status: COMPLETE
+
+OBJECTIVES
+----------
+1. Idempotent legacy leave → canonical leave_requests migration
+2. Reconciliation report API
+3. Lightweight employee provision (create + auto-link)
+
+DELIVERABLES
+------------
+  - 0021_hr_leave_migration_map.sql + schema
+  - leave-migration-service.ts
+  - hr-leave-migration.ts routes
+  - employee-provision-service.ts + hr-employee-provision.ts
+  - platform-stabilization leaveMigration block
+  - platform-stabilization.tsx — leave migration dry-run / execute
+  - p-hcm3-leave-migration.md
+
+EXIT CRITERIA
+-------------
+[x] Migration map + dry-run / execute APIs
+[x] No balance side-effects on historical import
+[x] Provision endpoint for EC-style onboarding
+[x] Smoke tests
+
+DEFERRED
+--------
+- Legacy row purge
+- Payroll bulk migration
+- Finance GL posting

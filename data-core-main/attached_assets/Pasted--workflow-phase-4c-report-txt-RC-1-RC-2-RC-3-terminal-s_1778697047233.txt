@@ -1,0 +1,261 @@
+راجع:
+- workflow-phase-4c-report.txt
+خصوصًا:
+- RC-1
+- RC-2
+- RC-3
+- terminal status ownership
+- executor transition flow
+
+ثم نفّذ فقط:
+P4-D — Status Transition Safety
+
+ولا تنفّذ أي جزء من:
+- P4-E
+- P4-F
+
+عنوان المهمة:
+WORKFLOW PHASE 4-D — Exact-Once Status Transition Safety
+
+المهمة الحالية:
+إغلاق آخر race conditions الحرجة
+داخل workflow runtime
+وتحويل status transitions من:
+best-effort consistency
+
+إلى:
+strict guarded transitions
+
+الهدف:
+منع:
+- terminal status overwrites
+- completion-after-timeout
+- completion-after-cancel
+- duplicate terminal transitions
+- concurrent transition corruption
+
+بدون:
+- distributed locks
+- queues
+- transactions redesign
+- orchestration rewrite
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — GUARDED TERMINAL TRANSITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+executor.ts
+
+جميع UPDATEs التي تنقل execution إلى terminal status:
+- completed
+- failed
+- error
+- timed_out
+- cancelled
+
+يجب أن تصبح:
+
+WHERE status IN ('running', 'waiting_approval')
+
+أو:
+WHERE status NOT IN (...TERMINAL_STATUSES)
+
+المطلوب:
+- conditional guarded updates فقط
+- no blind UPDATEs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — USE RETURNING() RACE DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بعد كل guarded UPDATE:
+
+استخدم:
+.returning()
+
+إذا:
+result.length === 0
+
+فهذا يعني:
+race condition سبقك.
+
+المطلوب:
+- logger.warn structured
+- return safely
+- no throw
+- no retry
+
+أمثلة:
+- timeout lost race to cancellation
+- completion lost race to timeout
+- cancellation lost race to completion
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PROTECT OPENING TRANSITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+executor startup
+
+الانتقال:
+pending → running
+
+يجب أن يصبح guarded:
+
+WHERE status = 'pending'
+
+إذا returning() فارغة:
+- execution already transitioned elsewhere
+- logger.warn
+- return safely
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PROTECT FORCE-TIMEOUT ROUTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+POST /executions/:id/timeout
+
+استبدل:
+blind UPDATE
+
+بـ:
+guarded UPDATE
+
+WHERE status NOT IN (...TERMINAL_STATUSES)
+
+إذا .returning() فارغة:
+- 409 conflict
+- structured warning log
+- no overwrite
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — PROTECT CANCEL ROUTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+POST /executions/:id/cancel
+
+استبدل:
+blind UPDATE cancel_requested=true
+
+بـ:
+guarded UPDATE
+
+WHERE:
+- cancel_requested = false
+- status NOT IN (...TERMINAL_STATUSES)
+
+إذا .returning() فارغة:
+- detect:
+    already cancelled
+    already terminal
+    already requested
+- return proper conflict response
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — TRANSITION OWNERSHIP DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+
+- executor owns terminal transitions
+- routes only request intent
+- guarded UPDATEs prevent overwrite races
+- .returning() used as optimistic concurrency control
+- why no distributed lock needed yet
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured warn logs للحالات التالية:
+- transition race lost
+- duplicate completion prevented
+- timeout prevented by cancellation
+- cancellation prevented by completion
+- running transition lost
+
+كل log يحتوي:
+- executionId
+- workflowId
+- previousStatus
+- attemptedTransition
+- actualWinner (if known)
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+completion cannot overwrite timed_out
+
+T2:
+completion cannot overwrite cancelled
+
+T3:
+duplicate terminal transition prevented
+
+T4:
+pending→running guarded correctly
+
+T5:
+cancel route guarded correctly
+
+T6:
+timeout route guarded correctly
+
+T7:
+.returning() empty treated as race safely
+
+T8:
+terminal states remain immutable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- DB locks
+- advisory locks
+- distributed mutexes
+- queues
+- retries
+- transaction redesign
+- saga patterns
+
+خلك:
+simple optimistic concurrency model.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- retries
+- execution recovery
+- scheduler
+- DAG execution
+- workflow snapshots
+- distributed workers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-4d-report.txt
+
+ويحتوي:
+- جميع guarded transitions
+- race prevention behavior
+- .returning() concurrency behavior
+- remaining race windows إن وجدت
+- observability behavior
+- tests results
+- readiness assessment قبل P4-E

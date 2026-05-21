@@ -1,0 +1,572 @@
+راجع:
+- workflow-phase-13j-final-report.txt
+- workflow-phase-13i-report.txt
+- workflow-phase-13h-report.txt
+- workflow-phase-13g-report.txt
+- workflow-phase-13f-report.txt
+- workflow-phase-13e-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- current authentication model
+- current users table/model إن وجد
+- current super-admin detection logic
+- requireSuperAdmin middleware
+- SuperAdminRoute
+- activity_logs audit pattern
+- platform admin routes
+- super-admin navigation/sidebar
+- existing role/permission assumptions
+- tenant admin console safety contracts
+
+ثم نفّذ فقط:
+P14-A — Platform User Account Creation Foundation + Root Protection Policy
+
+ولا تنفّذ:
+- full permission matrix
+- tenant user management
+- customer user management
+- HR employee users
+- SSO
+- MFA
+- password reset flow
+- email invitation sending
+- billing/commercial modules
+- invoice modules
+- payment provider
+- tenant-side billing visibility
+- destructive account deletion
+- root recovery procedure
+- break-glass implementation
+
+عنوان المهمة:
+WORKFLOW PHASE 14-A — Platform User Account Creation Foundation + Root Protection Policy
+
+المهمة الحالية:
+تأسيس إدارة مستخدمي المنصة الداخليين داخل Platform Administration، مع حماية صارمة لحساب مالك المنصة الجذري.
+
+الهدف:
+تمكين Platform Owner / authorized platform admin لاحقًا من:
+- إنشاء Platform User داخلي
+- عرض قائمة Platform Users
+- عرض تفاصيل Platform User
+- تغيير حالة Platform User بشكل مضبوط
+- ربط المستخدم بدور مبدئي
+- منع إنشاء أو تعيين Root من الواجهة
+- حماية Root Platform Owner من التعديل أو التعطيل أو تغيير كلمة المرور من لوحة الإدارة
+
+بطريقة:
+controlled platform user foundation
+بدون permission matrix كاملة وبدون tenant users وبدون reset password وبدون email invite sending
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT AUTH / SUPER ADMIN MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- كيف يتم تعريف super admin حاليًا
+- هل يوجد users table حالي
+- هل يوجد role field حالي
+- هل يوجد isSuperAdmin flag
+- كيف تعمل requireSuperAdmin
+- كيف تعمل SuperAdminRoute
+- كيف يتم تسجيل activity_logs
+- هل يوجد password management داخلي أو خارجي
+
+اكتب ملاحظات داخل التقرير:
+- current auth source
+- current super admin detection
+- migration impact
+- limitations
+
+مهم:
+لا تكسر تسجيل الدخول الحالي.
+لا تغير auth provider جذريًا.
+لا تضف SSO/MFA/password reset.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PLATFORM USER MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/عرّف Platform User model حسب بنية المشروع الحالية.
+
+إذا يوجد users table:
+- لا تنشئ جدول مكرر بدون داعي
+- أضف fields أو profile layer مناسب
+- حافظ على compatibility
+
+إذا لا يوجد model مناسب:
+أنشئ table/model:
+
+platform_users — مستخدمي إدارة المنصة
+
+Fields:
+- id — المعرّف
+- email — البريد الإلكتروني
+- displayName — الاسم الظاهر
+- status — الحالة
+- roleCode — كود الدور المبدئي
+- isRootOwner — هل هو مالك جذري
+- isProtected — هل الحساب محمي
+- createdBy — من أنشأ المستخدم
+- createdAt — تاريخ الإنشاء
+- updatedAt — آخر تحديث
+- disabledAt — تاريخ التعطيل
+- lockedAt — تاريخ القفل
+- lastLoginAt — آخر دخول، nullable
+- metadata — بيانات إضافية
+
+PlatformUserStatus:
+- invited — تمت إضافته ولم يفعّل بعد
+- active — نشط
+- disabled — معطل
+- locked — مقفل
+
+InitialPlatformRoleCode:
+- root_platform_owner — مالك المنصة الجذري
+- platform_admin — مدير المنصة
+- support_admin — مسؤول الدعم
+- workspace_support — دعم مساحات العمل
+- sales_admin — مسؤول المبيعات
+- finance_admin — مسؤول المالية
+- auditor — مدقق قراءة فقط
+- read_only_operator — مستخدم قراءة فقط
+
+مهم:
+root_platform_owner لا يمكن تعيينه من create/update UI العادي.
+وجوده فقط للحساب الجذري الحالي أو seed/internal migration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ROOT PLATFORM OWNER PROTECTION POLICY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف policy/lib:
+
+root-platform-owner-policy.ts
+
+ROOT_PLATFORM_OWNER_PROTECTION_POLICY:
+- root_platform_owner — مالك المنصة الجذري
+- protected_account — حساب محمي
+- immutable_role — الدور غير قابل للتغيير
+- non_deletable — غير قابل للحذف
+- non_disableable — غير قابل للتعطيل
+- non_lockable — غير قابل للقفل
+- password_reset_blocked_from_admin_ui — منع إعادة تعيين كلمة المرور من لوحة الإدارة
+- email_change_blocked — منع تغيير البريد من لوحة الإدارة
+- self_promotion_blocked — منع ترقية النفس
+- root_role_assignment_blocked — منع تعيين دور Root من الواجهة
+- cannot_manage_equal_or_higher_privilege — منع إدارة مستخدم بنفس أو أعلى من صلاحيتك
+- cannot_disable_last_root_owner — منع تعطيل آخر مالك جذري
+- requires_break_glass_recovery — يتطلب إجراء طوارئ للاسترداد لاحقًا
+- audit_required — كل محاولة ممنوعة تسجل
+
+كلها true.
+
+Exports:
+- isRootPlatformOwner(user)
+- isProtectedPlatformAccount(user)
+- canAssignPlatformRole(actor, targetRole)
+- canManagePlatformUser(actor, targetUser)
+- canChangePlatformUserStatus(actor, targetUser, nextStatus)
+- canResetPlatformUserPasswordFromAdmin(actor, targetUser)
+- canChangePlatformUserEmail(actor, targetUser)
+- validatePlatformUserCreate(actor, payload)
+- validatePlatformUserStatusChange(actor, targetUser, nextStatus)
+- buildBlockedPlatformUserActionAuditEvent(actor, targetUser, action, reason)
+
+Rules:
+- لا يمكن إنشاء root_platform_owner من API العادي
+- لا يمكن تعيين root_platform_owner من role update العادي
+- لا يمكن actor يرقّي نفسه
+- لا يمكن actor يدير مستخدم بنفس أو أعلى من صلاحياته
+- لا يمكن تعطيل/قفل/حذف root protected account
+- لا يمكن تغيير بريد root من admin UI
+- لا يمكن reset password للـ root من admin UI
+- كل blocked attempt يسجل audit
+
+مهم:
+لا تنفذ break-glass الآن.
+فقط policy + guard + audit.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف APIs تحت Platform Administration:
+
+GET /platform/users
+- يعرض قائمة Platform Users
+- requireAuth
+- requireSuperAdmin حاليًا
+- لاحقًا يتحول requirePlatformPermission
+- read-only
+
+GET /platform/users/:userId
+- يعرض تفاصيل Platform User
+- requireAuth
+- requireSuperAdmin
+- read-only
+
+POST /platform/users
+- ينشئ Platform User
+- requireAuth
+- requireSuperAdmin
+- payload:
+  - email — البريد الإلكتروني
+  - displayName — الاسم الظاهر
+  - roleCode — الدور المبدئي
+- يمنع roleCode = root_platform_owner
+- status الافتراضي invited
+- isProtected false
+- isRootOwner false
+- يسجل audit:
+  - platform_user_created
+
+PATCH /platform/users/:userId/status
+- يغير الحالة فقط:
+  - active
+  - disabled
+  - locked
+- requireAuth
+- requireSuperAdmin
+- يحتاج:
+  - nextStatus
+  - reason
+  - confirmation
+- يمنع تعديل root/protected حسب policy
+- يمنع actor يدير equal/higher privilege
+- يسجل audit:
+  - platform_user_status_changed
+  - أو platform_user_status_change_blocked
+
+مهم:
+لا تضف delete endpoint.
+لا تضف password reset endpoint.
+لا تضف email invite sending.
+لا تضف role update endpoint في P14-A إلا إذا ضروري جدًا؛ الأفضل تأجيله P14-B.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+platform-users-config.ts
+
+Config:
+- PLATFORM_USER_STATUS_CONFIG
+- INITIAL_PLATFORM_ROLE_CONFIG
+- PLATFORM_USER_ACTION_CONFIG
+- ROOT_PLATFORM_OWNER_PROTECTION_POLICY_CONFIG
+- PLATFORM_USER_SAFETY_CONTRACT
+
+مع ترجمة عربية مختصرة بجانب المصطلحات داخل labels/descriptions قدر الإمكان:
+
+مثال:
+- root_platform_owner — مالك المنصة الجذري
+- platform_admin — مدير المنصة
+- finance_admin — مسؤول المالية
+- support_admin — مسؤول الدعم
+- invited — تمت إضافته ولم يفعّل بعد
+- active — نشط
+- disabled — معطل
+- locked — مقفل
+
+Safety contract:
+- superAdminOnly
+- controlledPlatformUserCreation
+- noTenantUserManagement
+- noCustomerUserManagement
+- noHrEmployeeUserManagement
+- noPasswordReset
+- noEmailInviteSending
+- noSso
+- noMfa
+- noDeleteUser
+- noRootCreationFromUi
+- noRootRoleAssignmentFromUi
+- noRootPasswordResetFromAdminUi
+- noRootEmailChangeFromAdminUi
+- noRootDisableOrLock
+- noSelfPromotion
+- noManageEqualOrHigherPrivilege
+- auditBlockedAttempts
+
+كلها true.
+
+Import-time guard:
+- إذا أي قيمة false يرمي error.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف hooks:
+- usePlatformUsers()
+- usePlatformUser(userId)
+- useCreatePlatformUser()
+- useUpdatePlatformUserStatus()
+
+مهم:
+- create/status فقط mutations
+- لا password reset
+- لا delete
+- لا role update
+- لا invite email send
+- optimistic update بحذر أو لا تستخدمه
+- error states واضحة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف صفحة داخل Platform Administration:
+
+Platform Users & Access
+
+المسار المقترح:
+- /super-admin/platform-users
+أو حسب routing الحالي:
+- /platform-admin/users
+
+تحت Super Admin sidebar.
+
+تعرض:
+- Platform Users table
+  - displayName — الاسم الظاهر
+  - email — البريد الإلكتروني
+  - roleCode — الدور
+  - status — الحالة
+  - protected badge — حساب محمي
+  - lastLoginAt — آخر دخول
+  - createdAt — تاريخ الإنشاء
+- Create Platform User dialog
+  - email
+  - displayName
+  - roleCode
+  - يمنع root_platform_owner من الاختيار
+- User detail drawer/panel
+  - معلومات المستخدم
+  - حالة الحساب
+  - الدور
+  - protected/root badges
+  - status change controls فقط إذا مسموح
+- Protected root notice:
+  "Root Platform Owner is protected. It cannot be disabled, locked, demoted, email-changed, or password-reset from Platform Administration."
+
+ترجمة داخلية مختصرة:
+"مالك المنصة الجذري حساب محمي ولا يمكن تعديله من لوحة الإدارة."
+
+مهم:
+لا تضف:
+- reset password button
+- delete button
+- change email button
+- assign root button
+- role update button
+- send invite email button
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — NAVIGATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف item في Super Admin navigation:
+
+Platform Users
+أو:
+Users & Access
+
+مع وصف:
+- إدارة مستخدمي المنصة الداخليين وصلاحياتهم المبدئية
+
+لكن:
+- لا تعرضها لغير Super Admin حاليًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — OBSERVABILITY / AUDIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Audit events:
+- platform_user_created
+- platform_user_create_blocked
+- platform_user_status_changed
+- platform_user_status_change_blocked
+- protected_root_action_blocked
+- platform_user_access_policy_violation
+
+Fields:
+- actorId — منفذ العملية
+- targetUserId — المستخدم المستهدف
+- targetEmail — بريد المستخدم المستهدف
+- action — الإجراء
+- result — النتيجة
+- reason — السبب
+- blockedReason — سبب المنع
+- roleCode — الدور
+- nextStatus — الحالة الجديدة
+- timestamp — الوقت
+
+لا تحفظ password.
+لا تحفظ secrets.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P14-A MUST:
+- allow platform user creation
+- keep root account protected
+- block root role creation from UI/API
+- block root status changes
+- block root password reset from admin UI
+- block root email change from admin UI
+- block self-promotion
+- block managing equal/higher privilege users
+- audit blocked attempts
+- avoid tenant users
+- avoid HR users
+- avoid customer users
+- avoid password reset
+- avoid email invite sending
+- avoid SSO/MFA
+- avoid delete user
+- avoid full permission matrix
+
+أي:
+Platform user foundation فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+platform user status config stable
+
+T2:
+initial platform role config stable
+
+T3:
+platform user safety contract all true
+
+T4:
+root protection policy all true
+
+T5:
+cannot create root_platform_owner via normal API
+
+T6:
+can create non-root platform user as invited
+
+T7:
+duplicate email blocked
+
+T8:
+invalid email blocked
+
+T9:
+cannot disable protected root owner
+
+T10:
+cannot lock protected root owner
+
+T11:
+cannot reset root password from admin policy
+
+T12:
+cannot change root email from admin policy
+
+T13:
+cannot self-promote
+
+T14:
+cannot manage equal/higher privilege user
+
+T15:
+status change requires reason + confirmation
+
+T16:
+blocked attempt audit event created
+
+T17:
+platform users list API super-admin only
+
+T18:
+platform user detail API super-admin only
+
+T19:
+create platform user API audit event created
+
+T20:
+status change API audit event created
+
+T21:
+frontend create dialog excludes root_platform_owner
+
+T22:
+frontend root detail shows protected notice
+
+T23:
+frontend root detail has no reset/delete/change-email buttons
+
+T24:
+frontend users page renders list/create/status states
+
+T25:
+no tenant/customer/HR user management wording exists
+
+T26:
+no password reset/delete/send invite/SSO/MFA implementation exists
+
+T27:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- full permission matrix
+- role update endpoint
+- permission editor
+- tenant users
+- customer users
+- HR employee users
+- password reset
+- email invite sending
+- SSO
+- MFA
+- delete user
+- root recovery
+- break-glass implementation
+- billing/commercial
+- invoice/payment
+- tenant-side billing
+- HR modules
+
+خلك:
+Platform User creation + Root Protection فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-14a-report.txt
+
+ويحتوي:
+- current auth/super-admin review
+- platform user model
+- root protection policy
+- backend API surface
+- frontend users/access UI
+- navigation updates
+- audit/observability behavior
+- safety guarantees
+- tests results
+- limitations intentionally left for P14-B
+- readiness assessment قبل Platform Roles & Permission Matrix

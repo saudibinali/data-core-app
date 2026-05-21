@@ -1,0 +1,281 @@
+راجع:
+- workflow-phase-4d-report.txt
+خصوصًا:
+- RC-3
+- waiting_approval behavior
+- transition ownership model
+- guarded transitions
+- cancellation lifecycle
+
+ثم نفّذ فقط:
+P4-E — Execution Resume & Approval Re-entry
+
+ولا تنفّذ:
+- DAG execution
+- parallel execution
+- retries
+- scheduler
+- recovery sweeper
+- background workers
+
+عنوان المهمة:
+WORKFLOW PHASE 4-E — Approval Resume & Safe Executor Re-entry
+
+المهمة الحالية:
+تحويل:
+waiting_approval
+
+من:
+dead-end paused state
+
+إلى:
+safe resumable execution state
+
+بدون كسر:
+- exact-once guarantees
+- guarded transitions
+- diagnostics
+- observability
+- current approval behavior
+
+الهدف:
+تمكين:
+approval → workflow resume
+
+بطريقة:
+safe cooperative re-entry model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT APPROVAL FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- approval step handler
+- waitForApproval behavior
+- workflow_executions.currentStepIndex
+- approval persistence
+- approval APIs/routes
+- approval notifications
+- any existing approval actions
+
+حدّد:
+كيف approval يتم حفظه حاليًا
+وكيف execution تتوقف وتخرج من loop.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN SAFE RESUME MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم ونفّذ:
+resumeExecution(executionId)
+
+كنقطة دخول رسمية وآمنة لإعادة تشغيل executor.
+
+المطلوب:
+- execution يعيد الدخول من next step الصحيح
+- no duplicate previous step execution
+- no repeated side effects
+- no replay of completed steps
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — APPROVAL RESUME TRANSITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف guarded transition جديد:
+
+waiting_approval → running
+
+لكن فقط إذا:
+- approval resolved
+- status ما زال waiting_approval
+- execution ليست terminal
+- cancel_requested = false
+
+المطلوب:
+guarded UPDATE + .returning()
+
+نفس P4-D model.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RESUME ENTRY SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+resumeExecution()
+
+أضف protections ضد:
+- duplicate resume requests
+- concurrent approval actions
+- resume-after-timeout
+- resume-after-cancel
+- resume-after-completion
+
+المطلوب:
+إذا .returning() فارغة:
+- structured warn log
+- safe return
+- no throw
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — STEP RESUME POSITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+إذا:
+step i = approval step
+
+فبعد approval:
+لا تعيد تنفيذ:
+step i
+
+بل:
+ابدأ من:
+step i + 1
+
+المطلوب:
+- no duplicate notifications
+- no duplicate assignments
+- no duplicate side effects
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — APPROVAL OUTCOME HANDLING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+كيف approval result يؤثر على execution.
+
+الحد الأدنى المطلوب الآن:
+
+A)
+approved
+→ resume execution
+
+B)
+rejected
+→ execution.status='failed'
+أو terminal equivalent واضح
+
+لكن:
+لا تدخل branching/DAG بعد.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — CANCELLATION + TTL COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+resume flow يحترم:
+- cancel_requested
+- timed_out
+- TERMINAL_STATUSES
+
+إذا execution:
+- timed_out
+- cancelled
+- completed
+- failed
+
+لا يسمح resume.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY & DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف structured logs واضحة لـ:
+- approval_resume_started
+- approval_resume_completed
+- approval_resume_race_lost
+- approval_rejected
+- approval_resume_blocked_terminal
+
+كلها تحتوي:
+- executionId
+- workflowId
+- workspaceId
+- approvalStepIndex
+- resumedBy
+- previousStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+approval resumes execution from next step
+
+T2:
+approval step not re-executed
+
+T3:
+duplicate resume prevented
+
+T4:
+resume blocked for terminal states
+
+T5:
+resume blocked for cancel_requested=true
+
+T6:
+approval rejection transitions safely
+
+T7:
+waiting_approval → running guarded correctly
+
+T8:
+resume preserves exact-once semantics
+
+T9:
+resume cannot overwrite terminal states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- retries
+- background resume workers
+- scheduler
+- queues
+- DAG execution
+- branch routing
+- replay engine
+
+خلك:
+single-process cooperative re-entry.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why approval uses executor re-entry
+- why approval step never re-runs
+- why guarded transitions still required
+- why resume starts from next step
+- relation between:
+  waiting_approval
+  running
+  cancelled
+  timed_out
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-4e-report.txt
+
+ويحتوي:
+- resume architecture
+- approval lifecycle
+- guarded resume transitions
+- rejection behavior
+- race prevention behavior
+- exact-once guarantees
+- diagnostics behavior
+- tests results
+- remaining limitations قبل P4-F

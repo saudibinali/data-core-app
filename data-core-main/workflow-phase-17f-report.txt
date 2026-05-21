@@ -1,0 +1,138 @@
+WORKFLOW PHASE 17-F — Platform Users Console Integration
+================================================================
+Completed: 2026-05-18
+Scope: UI/console integration only — unified Platform Users experience (no new permission semantics, no new auth flows)
+
+NEXT PHASE (NOT STARTED): P17-G — Final Platform Users Custom Access Control Closure
+
+────────────────────────────────────────────────────────────────
+1) CONSOLE INTEGRATION SUMMARY
+────────────────────────────────────────────────────────────────
+Unified Platform Administration > Platform Users into a single console:
+  - Summary cards (directory metrics)
+  - Enriched main table (badges, overrides, invitation status, risk, last reviewed)
+  - Side drawer with six tabs: Overview, Permissions, Protection, Invitations, Access Review, Audit
+  - Reuses P17-A directory, P17-B permissions, P17-C protection, P17-D access review, P17-E invitations
+
+Page: artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+Components: artifacts/ops-platform/src/components/platform-users/*
+
+────────────────────────────────────────────────────────────────
+2) NAVIGATION CHANGES
+────────────────────────────────────────────────────────────────
+super-admin-layout.tsx reorganized:
+  Primary: Dashboard, Tenants, Commercial, Platform Users, Access Review
+  More dropdown: Workspaces, Platform Activity, Audit / Event Log, Platform Settings
+  Governance section unchanged (collapsed under separator)
+
+────────────────────────────────────────────────────────────────
+3) SUMMARY CARDS
+────────────────────────────────────────────────────────────────
+PlatformUsersSummaryCards.tsx — data-testid platform-users-summary-cards
+  - Total platform users
+  - Active / Invited / Suspended+Disabled
+  - Protected users / Custom overrides / Pending invitations / High risk users
+
+Data: GET /api/platform/users/console-summary (read-only aggregation)
+
+────────────────────────────────────────────────────────────────
+4) MAIN TABLE
+────────────────────────────────────────────────────────────────
+PlatformUsersTable.tsx
+Columns: Display Name, Email, Type/Role, Status, Badges, Overrides, Invitation, Last login, Last reviewed, Created
+Filters: search, status, user type, protected only, has overrides, high risk only, invitation status
+Client-side enrichment via console-summary directory map
+
+────────────────────────────────────────────────────────────────
+5) USER DETAIL SECTIONS (DRAWER TABS)
+────────────────────────────────────────────────────────────────
+PlatformUserDetailDrawer.tsx
+  A) Overview — profile, lifecycle (status/role), edit profile (embedded UserDetailPanel)
+  B) Permissions — CustomPermissionsSection (P17-B, read-only when protected)
+  C) Protection — PlatformUserProtectionTab (reasons, policy snapshot, blocked actions)
+  D) Invitations — InvitationActivationSection (P17-E, one-time activation URL)
+  E) Access Review — risk, critical permissions, recent events, mark reviewed (P17-D update only)
+  F) Audit — PlatformUserAuditTab (sanitized timeline, no raw metadata payload)
+
+────────────────────────────────────────────────────────────────
+6) HOOKS / APIs USED
+────────────────────────────────────────────────────────────────
+Unified: artifacts/ops-platform/src/lib/platform-users-console-hooks.ts
+  - usePlatformUsers / usePlatformUser
+  - usePlatformUserPermissions
+  - usePlatformUserInvitations (query key: platform/users/:id/invitations)
+  - usePlatformAccessReviewSummary / usePlatformUserAccessReview
+  - usePlatformUserAuditEvents
+  - usePlatformUsersConsoleSummary / usePlatformUserConsole
+
+New read-only backend:
+  GET /platform/users/console-summary
+  GET /platform/users/:userId/console
+Service: artifacts/api-server/src/lib/platform-user-console.ts
+Routes: artifacts/api-server/src/routes/platform-user-console.ts
+
+Existing mutations unchanged (create user, status, role, permissions, invitations, access review record).
+
+────────────────────────────────────────────────────────────────
+7) PERMISSION GATING
+────────────────────────────────────────────────────────────────
+No matrix changes. Actions remain gated via canPerformPlatformAction / hasPlatformPermissionClient.
+Console summary requires platform.users.read.
+Access review tab record requires platform.accessReview.update.
+Invitation/permission actions use existing P17-B/E permissions + P17-C service blocks.
+
+────────────────────────────────────────────────────────────────
+8) PROTECTION UX
+────────────────────────────────────────────────────────────────
+Protection tab shows reasons, safe policy snapshot, blocked action explanations.
+formatProtectionBlockedReason used for human-readable messages.
+Protected/root badges in table and drawer notice.
+
+────────────────────────────────────────────────────────────────
+9) INVITATION UX
+────────────────────────────────────────────────────────────────
+Invitations tab reuses P17-E section: create/resend/revoke, one-time URL + copy, no email.
+
+────────────────────────────────────────────────────────────────
+10) ACCESS REVIEW UX
+────────────────────────────────────────────────────────────────
+Read-only visibility + mark reviewed form when permitted.
+No grant/deny/status/role changes from this tab.
+
+────────────────────────────────────────────────────────────────
+11) AUDIT VISIBILITY
+────────────────────────────────────────────────────────────────
+Audit tab uses access review audit API with severity filter.
+Displays action label, severity, blocked reason, reason, timestamp — not full metadata JSON.
+
+────────────────────────────────────────────────────────────────
+12) SAFETY GUARANTEES (all true)
+────────────────────────────────────────────────────────────────
+PLATFORM_USERS_CONSOLE_SAFETY_CONTRACT in:
+  - artifacts/ops-platform/src/lib/platform-users-console-config.ts
+  - artifacts/api-server/src/lib/platform-user-console-config.ts
+
+platformUsersConsoleIntegrationOnly, noNewPermissionSemantics, noRoleMatrixRedesign,
+noApprovalWorkflow, noEmergencyAccess, noEmailSending, noSmtp, noPasswordReset,
+noMfaManagement, noSsoManagement, noTenantWorkspaceUserManagement,
+noTenantWorkspaceInvitations, noRootOwnerPromotion, noRootOwnerRemoval,
+noHardDeleteUsers, noDestructiveBulkActions, sensitivePayloadsHidden, permissionGated
+
+────────────────────────────────────────────────────────────────
+13) TEST RESULTS
+────────────────────────────────────────────────────────────────
+Ops: phase-17f-platform-users-console.test.ts — PASS (9)
+API: platform-user-console.test.ts — PASS (2)
+
+Covers: page/components, summary cards, table columns/filters, drawer tabs, navigation More dropdown,
+read-only console routes, unified hooks, forbidden UI terms in components, safety contract.
+
+────────────────────────────────────────────────────────────────
+14) LIMITATIONS LEFT FOR P17-G (NOT STARTED)
+────────────────────────────────────────────────────────────────
+P17-G — Final Platform Users Custom Access Control Closure:
+  - End-to-end closure of custom access control edge cases
+  - Deeper effective-permission conflict resolution UX
+  - Cross-tenant/workspace boundary hardening in console
+  - Optional performance tuning for large directory (server-side filter on enriched fields)
+  - Full E2E tests against live database

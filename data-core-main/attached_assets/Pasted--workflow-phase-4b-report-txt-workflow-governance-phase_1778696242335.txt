@@ -1,0 +1,284 @@
+راجع:
+- workflow-phase-4b-report.txt
+- workflow-governance-phase-4-review.txt
+خصوصًا:
+- cooperative cancellation section
+- inter-step boundary model
+- terminal status model
+- EC-7 notes
+
+ثم نفّذ فقط:
+P4-C — Cooperative Cancellation
+
+ولا تنفّذ أي جزء من:
+- P4-D
+- P4-E
+- P4-F
+
+عنوان المهمة:
+WORKFLOW PHASE 4-C — Cooperative Cancellation & Execution Abort Safety
+
+المهمة الحالية:
+إضافة cancellation support آمنة
+للـ workflow runtime
+بدون:
+- interrupting running steps
+- distributed cancellation
+- rollback systems
+- queues
+- schedulers
+
+الهدف:
+تمكين:
+- admin/user cancellation
+- safe execution abortion
+- operational recovery
+- stuck execution cleanup
+
+بطريقة:
+cooperative single-process cancellation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — SCHEMA CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف إلى:
+workflow_executions
+
+الحقل:
+cancel_requested BOOLEAN NOT NULL DEFAULT FALSE
+
+ثم:
+status values:
+أضف:
+cancelled
+
+المطلوب:
+- backward compatible
+- existing rows سليمة
+- no destructive migration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CANCELLATION LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+النموذج المطلوب:
+
+A)
+POST /cancel
+→ sets cancel_requested = true
+
+B)
+executor inter-step boundary
+→ يقرأ cancel_requested
+
+C)
+إذا true:
+- status → cancelled
+- completed_at = now()
+- safe structured warning log
+- stop execution safely
+
+D)
+current running step ALWAYS finishes first
+
+المطلوب:
+- no partial step interruption
+- no Promise cancellation tricks
+- no abrupt aborts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ADD ADMIN CANCEL ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+POST /api/workflows/executions/:id/cancel
+
+المطلوب:
+- requireAuth
+- workflow.manage permission
+- workspace isolation
+
+Validation:
+- 404 if execution not found
+- reject terminal statuses
+- reject already cancel_requested=true
+
+Success response:
+{
+  executionId,
+  workflowId,
+  previousStatus,
+  cancelRequested: true,
+  requestedAt
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — INTER-STEP CANCELLATION CHECK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+executor.ts
+
+في نفس:
+inter-step boundary
+
+بعد TTL check مباشرة:
+
+- re-fetch execution.cancel_requested
+- إذا true:
+    UPDATE status='cancelled'
+    completed_at=now()
+    logger.warn(...)
+    return safely
+
+المطلوب:
+- no next step starts
+- current step already completed
+- no side-effect rollback attempts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TERMINAL STATUS SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث:
+TERMINAL_STATUSES
+
+بحيث:
+cancelled
+يعتبر terminal فعليًا.
+
+المطلوب:
+- all diagnostics APIs تفهمه
+- timeout endpoint يرفضه
+- future retries تتعامل معه terminal
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — DIAGNOSTICS INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+- GET executions lists تعرض cancelled
+- execution detail يظهر:
+    cancelRequested
+    cancelled state
+- failed/stuck views لا تنكسر
+- workflow timelines تبقى سليمة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured warn logs تحتوي:
+- executionId
+- workflowId
+- workspaceId
+- cancelledBy
+- currentStepIndex
+- completedSteps
+- timeoutAt
+- action: 'execution_cancelled'
+
+فرق واضح بين:
+- timed_out
+- cancelled
+- failed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+A)
+لا تستخدم:
+AbortController
+Promise cancellation
+worker termination
+
+B)
+لا توقف step أثناء التنفيذ.
+
+C)
+لا تحاول rollback side effects.
+
+D)
+لا تضف background cancellation sweeper.
+
+E)
+Cancellation فقط:
+BETWEEN steps.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+cancel_requested=true stops execution before next step
+
+T2:
+running step يكمل قبل cancellation enforcement
+
+T3:
+terminal executions لا يمكن cancel لها
+
+T4:
+duplicate cancellation requests rejected
+
+T5:
+cancelled appears in diagnostics/status APIs
+
+T6:
+timeout endpoint rejects cancelled executions
+
+T7:
+cancel_requested persisted correctly
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- rollback engine
+- retries
+- workflow recovery
+- distributed cancellation
+- schedulers
+- queues
+- DAG execution
+- parallel execution
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why cancellation is cooperative
+- why running steps are not interrupted
+- difference between:
+  failed
+  timed_out
+  cancelled
+- why no rollback exists
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-4c-report.txt
+
+ويحتوي:
+- schema changes
+- cancellation lifecycle
+- inter-step cancellation behavior
+- diagnostics integration
+- logs behavior
+- tests results
+- edge cases المكتشفة
+- remaining race conditions
+- readiness assessment قبل P4-D

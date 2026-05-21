@@ -1,0 +1,115 @@
+================================================================================
+WORKFLOW PHASE 25-C — Inventory Workspace UI & Operations Center
+Generated: 2026-05-20
+Status: COMPLETE
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P25-C delivers the Inventory Workspace module in ops-platform: dashboard, warehouse
+and item master pages, receipt/transfer/issue/reservation/adjustment/count UIs,
+Operations Center, inventory reports export UI, extended list/detail/monitoring
+APIs, notification wiring for five inventory events, and smoke tests. Built on
+P25-A foundation and P25-B movement engine. No barcode, MRP, GL posting, or
+destructive migration. P26-A NOT started.
+
+WORKSPACE UI STATUS
+-------------------
+inventory workspace runtime:     GO
+- App.tsx routes for /inventory/* (12 paths)
+- ModuleGovernanceService via moduleKey="inventory" + inventory.view
+- Sidebar icon Warehouse registered
+- Dashboard + quick navigation cards
+
+WAREHOUSE OPERATIONS STATUS
+---------------------------
+warehouse operations:            GO (core flows)
+- List/create warehouses UI
+- Detail with locations (quarantine/damaged via locationType)
+- GET /inventory/warehouses/:id
+
+STOCK OPERATIONS STATUS
+-----------------------
+stock operations:                PARTIAL
+- Items list/detail, receipts list/post, transfers list/workflow actions
+- Issues list/reverse, reservations list/release/expire
+- Adjustments list/post, counts list/post-variances
+- GAP: no receipt line editor, no create wizards for transfer/issue from UI
+
+OPERATIONS CENTER STATUS
+------------------------
+operations center:               GO
+- /inventory/ops page
+- opsOverview + alerts (negative, low stock, drafts, approvals, reservations, counts)
+- GET /inventory/metrics/low-stock
+
+REPORTING STATUS
+----------------
+reporting:                       GO
+- /inventory/reports tied to inventory.* report definitions + export_jobs
+- GET /inventory/movements, GET /inventory/stock-balances for ledger/balance views
+
+SECURITY STATUS
+---------------
+inventory governance:            GO (foundation)
+- Workspace isolation on all routes
+- Permission gates per operation
+- inventory.export on report export jobs
+- Document confidential attach API unchanged (P25-A)
+
+NOTIFICATIONS STATUS
+--------------------
+events + notifications:          GO
+- inventory-events.ts helper + service emits
+- notifications-bus listeners for 5 event types
+- INVENTORY_RESERVATION_EXPIRED, INVENTORY_COUNT_COMPLETED added to EVENT_TYPES
+
+API EXTENSIONS (P25-C)
+----------------------
+NEW: inventory-query-service.ts, inventory-events.ts
+ROUTES ADDED:
+  GET warehouses/:id, items/:id
+  GET transfers, issues, reservations, adjustments, count-sessions (+ detail where noted)
+  GET movements, stock-balances, policies
+  POST receipts/:id/void, issues/:id/void
+  POST transfers/:id/submit|approve
+  POST reservations/expire
+  GET metrics/low-stock
+MONITORING: opsAlerts embedded in ops/overview
+
+SMOKE TEST RESULTS
+------------------
+p25a-inventory.smoke.test.ts:         7 passed
+p25b-inventory-movement.smoke.test.ts: 10 passed
+p25c-inventory-ui.smoke.test.ts:       3 passed
+Total inventory smoke:                20 passed
+
+READINESS DECISION MATRIX
+-------------------------
+inventory workspace runtime:     GO
+warehouse operations:            GO
+stock operations:                PARTIAL
+inventory governance:            GO
+ERP inventory readiness:         PARTIAL
+
+REMAINING BLOCKERS
+------------------
+- Module defaultEnabled=false — workspaces must enable inventory module
+- Stock operation wizards and receipt line UI incomplete
+- No automated reservation expiry job (manual POST /reservations/expire)
+- Transfer reversal UI not exposed (engine supports void at movement level)
+- Finance GL posting still not in scope
+
+RECOMMENDED NEXT PHASE
+----------------------
+P26-A — Sales, Quotations & Customer Management Architecture Foundation
+
+CONFIRMATION
+------------
+- No barcode/mobile scanning
+- No manufacturing/MRP
+- No accounting posting
+- No destructive migration
+- P26-A NOT started
+
+================================================================================

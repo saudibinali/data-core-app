@@ -1,0 +1,273 @@
+راجع:
+- workflow-phase-9a-report.txt
+- workflow-phase-9b-report.txt
+- workflow-phase-8e-report.txt
+- workflow-phase-8f-report.txt
+خصوصًا:
+- TenantIsolationContext
+- workload partitions
+- scheduler fairness semantics
+- governance signals
+- comparative intelligence
+- observability structure
+
+ثم نفّذ فقط:
+P9-C — Tenant Governance APIs & Operational Visibility Foundations
+
+ولا تنفّذ:
+- realtime streaming infra
+- distributed dashboards
+- multi-region governance
+- cross-workspace federation
+- tenant orchestration
+- autoscaling systems
+
+عنوان المهمة:
+WORKFLOW PHASE 9-C — Tenant Governance APIs & Operational Visibility Foundations
+
+المهمة الحالية:
+تحويل:
+internal tenant governance intelligence
+
+إلى:
+formally exposed tenant-governance operational interfaces
+
+الهدف:
+تمكين:
+- tenant operational visibility
+- workspace governance introspection
+- partition-aware operational APIs
+- scheduler fairness observability
+- governance audit readiness
+
+بطريقة:
+deterministic governance visibility layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE SURFACES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- governance dashboards
+- comparative APIs
+- advisory APIs
+- workload partition engine
+- tenant isolation enforcement
+- observability events
+
+حدّد:
+- أين tenant visibility ناقصة
+- أين workload state غير مرئي
+- أين fairness semantics غير exposed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN TENANT GOVERNANCE VIEW MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TenantGovernanceView
+
+ليحتوي:
+- workspaceId
+- partitionPressureScore
+- schedulerFairnessStatus
+- operationalPriority
+- hotspotSummary
+- advisorySummary
+- isolationHealth
+- containmentStatus
+
+مع:
+stable deterministic serialization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /governance/tenant-overview
+GET /governance/workload-partition
+GET /governance/fairness-status
+GET /governance/isolation-health
+
+بحيث:
+- tenant-scoped بالكامل
+- deterministic responses
+- stable pagination semantics
+- audit-safe serialization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FAIRNESS OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- scheduler fairness readiness
+- starvation risk visibility
+- noisy-tenant indicators
+- partition pressure summaries
+
+لكن:
+بدون scheduler mutation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ISOLATION HEALTH VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+IsolationHealthStatus
+
+يحتوي:
+- healthy
+- warning
+- elevated
+- critical
+
+اعتمد على:
+- tenant boundary violations
+- orphan access attempts
+- analytics scope failures
+- observability scope violations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — AUDIT-READY GOVERNANCE SERIALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+تأكد:
+كل responses:
+- deterministic ordering
+- stable timestamps
+- workspace-safe payloads
+- no cross-tenant leakage
+- audit-ready structures
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+tenant governance visibility
+
+داخل:
+- governance dashboards
+- operational consoles
+- advisory panels
+- comparative intelligence views
+
+لكن:
+بدون orchestration actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+tenant_governance_view_generated
+
+B)
+tenant_fairness_visibility_accessed
+
+C)
+tenant_isolation_health_evaluated
+
+D)
+tenant_partition_overview_requested
+
+كلها تحتوي:
+- workspaceId
+- requestScopeId
+- partitionPressureScore
+- isolationHealth
+- fairnessStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Governance visibility layer MUST:
+- remain READ-ONLY
+- never mutate scheduler state
+- never expose cross-tenant metrics
+- never expose hidden governance internals
+- fail closed on scope ambiguity
+
+أي:
+safe operational visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+tenant overview isolated correctly
+
+T2:
+partition pressure visibility deterministic
+
+T3:
+fairness status serialization stable
+
+T4:
+isolation health classification deterministic
+
+T5:
+cross-tenant visibility blocked
+
+T6:
+audit serialization stable ordering
+
+T7:
+hotspot summaries tenant-safe
+
+T8:
+advisory summaries isolated correctly
+
+T9:
+scope ambiguity fails closed
+
+T10:
+governance APIs remain read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- realtime governance streams
+- distributed dashboards
+- orchestration controls
+- scheduler mutation APIs
+- autoscaling triggers
+- cross-workspace federation
+
+خلك:
+minimal deterministic governance visibility layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9c-report.txt
+
+ويحتوي:
+- tenant governance API architecture
+- governance visibility semantics
+- fairness observability model
+- isolation health model
+- audit serialization guarantees
+- governance integration points
+- observability additions
+- tests results
+- remaining tenant governance gaps
+- readiness assessment قبل orchestration governance phase

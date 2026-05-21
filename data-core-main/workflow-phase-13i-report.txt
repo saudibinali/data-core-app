@@ -1,0 +1,377 @@
+================================================================================
+WORKFLOW PHASE 13-I — AUTOMATED LIFECYCLE EVALUATION ENGINE
+================================================================================
+
+Date:        2026-05-16
+Phase:       P13-I
+Status:      COMPLETE
+Commit:      243e665a60b7b1bb20b301afc4aaee386eb950f3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Build a pure read-only deterministic evaluation engine that aggregates all P13
+intelligence layers into a unified Lifecycle Evaluation Profile. Produces
+signals, severity, recommended actions, and review eligibility flags — advisory
+only, no enforcement, no mutations, no automatic actions of any kind.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INTELLIGENCE STACK REVIEWED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- TenantHealthProfile          (P13-G) — healthStatus, riskLevel, signals, recommendedAction
+- SubscriptionRenewalProfile   (P13-F) — urgency, signals, daysUntilBillingEnd, daysUntilGraceEnd
+- TenantUsageProfile           (P13-E) — metrics[], warningCount, exceededCount, capacityRiskLevel
+- EntitlementProfile           (P13-D) — enabledModules, disabledModules, customEntitlementsCount
+- WorkspaceLifecycleState      (P13-B) — active | suspended | locked | archived | pending_activation
+- TenantRiskSignalSummary      (P13-A) — flat booleans for all existing risk signals
+- Tenant Admin Console         (P13-H) — 7-tab tabbed console (now 8 tabs with Evaluation)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SAFETY CONTRACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LIFECYCLE_EVALUATION_SAFETY_CONTRACT — all true:
+
+  superAdminOnly              true  — never exposed to tenants
+  readOnly                    true  — no writes, no mutations
+  recommendationsOnly         true  — advisory only, never auto-executed
+  noPaymentProcessing         true
+  noInvoiceGeneration         true
+  noChargeCollection          true
+  noAutoWorkspaceSuspension   true
+  noAutoWorkspaceLocking      true
+  noEntitlementEnforcement    true
+  noEmailOrLegalNotices       true
+  noDestructiveTenantActions  true
+  noStateMutation             true
+  failsClosedOnMissingData    true
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVALUATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EvaluationSignalCode (17):
+  subscription_metadata_missing
+  trial_ending_requires_review
+  renewal_due_requires_review
+  grace_period_active_requires_monitoring
+  grace_period_expired_requires_review
+  subscription_expired_requires_review
+  workspace_suspended_requires_review
+  workspace_locked_requires_review
+  usage_approaching_requires_review
+  usage_exceeded_requires_review
+  entitlement_overrides_require_review
+  custom_plan_requires_review
+  health_high_risk_requires_review
+  health_critical_requires_review
+  governance_warning_requires_review
+  operational_data_missing_requires_review
+  manual_review_required
+
+EvaluationSeverity (7):
+  none | info | low | medium | high | critical | unknown
+
+EvaluationRecommendedAction (10):
+  none | monitor | review_subscription | review_usage | review_entitlements
+  review_lifecycle | review_governance | prepare_customer_contact
+  prepare_restriction_review | manual_review_required
+
+ReviewEligibility:
+  renewalReviewEligible
+  graceReviewEligible
+  suspensionReviewEligible
+  usageReviewEligible
+  entitlementReviewEligible
+  lifecycleReviewEligible
+  governanceReviewEligible
+  manualReviewRequired
+
+Escalation rules (manual_review_required triggers when):
+  - workspace_locked_requires_review is present
+  - health_critical_requires_review is present
+  - grace_period_expired_requires_review is present
+  - subscription_expired + usage_exceeded both present
+
+Severity mapping:
+  critical  → manual_review_required | workspace_locked | health_critical
+  high      → grace_expired | subscription_expired | workspace_suspended | usage_exceeded | health_high_risk
+  medium    → renewal_due | grace_active | usage_approaching | governance_warning | operational_data_missing
+  low       → trial_ending | entitlement_overrides | custom_plan
+  info      → subscription_metadata_missing
+  none      → no signals
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. artifacts/api-server/src/lib/tenant-lifecycle-evaluation.ts
+   Pure backend derivation library. No DB, no HTTP, no side effects.
+
+   Exports:
+   - LIFECYCLE_EVALUATION_SAFETY_CONTRACT
+   - ALL_EVALUATION_SIGNAL_CODES            (17)
+   - ALL_EVALUATION_RECOMMENDED_ACTIONS     (10)
+   - EVALUATION_SEVERITY_ORDER
+   - deriveLifecycleEvaluationSignals(input)
+   - deriveEvaluationSeverity(signals)
+   - deriveEvaluationRecommendedAction(signals, severity)
+   - deriveReviewEligibility(signals, severity)
+   - buildEvaluationWarnings(signals, severity)
+   - buildEvaluationSummary(signals, severity, action)
+   - deriveTenantLifecycleEvaluationProfile(input, now?)
+
+   TenantLifecycleEvaluationInput:
+   - tenantId, workspaceId
+   - lifecycle    { workspaceStatus, lifecycleState }
+   - subscription { subscriptionStatus, planCode, renewalDueSoon, renewalDueNow,
+                    trialEndingSoon, gracePeriodActive, graceEndingSoon,
+                    graceExpired, subscriptionExpired, hasMissingMetadata }
+   - usage        { capacityRiskLevel, warningCount, exceededCount, unknownCount }
+   - entitlements { customEntitlementsCount, planCode }
+   - health       { healthRiskLevel, healthStatus, healthRecommendedAction, healthWarningCount }
+   - governance?  { hasWarnings }
+
+   TenantLifecycleEvaluationProfile:
+   - tenantId, workspaceId
+   - signals[], severity, recommendedAction
+   - reviewEligibility (8 boolean flags)
+   - warnings[], summary, evaluatedAt, safetyNotice
+
+2. artifacts/ops-platform/src/lib/lifecycle-evaluation-config.ts
+   Frontend configuration for Evaluation Engine panel.
+
+   Exports:
+   - LIFECYCLE_EVALUATION_SAFETY_CONTRACT
+   - ALL_EVALUATION_SIGNAL_CODES (17) + EvaluationSignalCode type
+   - LIFECYCLE_EVALUATION_SIGNAL_CONFIG   — per-signal: label, description, badgeClass, severity
+   - EvaluationSeverity type
+   - LIFECYCLE_EVALUATION_SEVERITY_CONFIG — per-severity: label, icon, badgeClass
+   - EvaluationRecommendedAction type
+   - LIFECYCLE_EVALUATION_ACTION_CONFIG   — per-action: label, description, badgeClass
+   - REVIEW_ELIGIBILITY_CONFIG            — 8 entries with key, label, description
+   - LIFECYCLE_EVALUATION_API_PATHS.get(tenantId)
+   - LIFECYCLE_EVALUATION_EMPTY_STATE
+   - EVALUATION_FORBIDDEN_WORDING
+
+3. artifacts/api-server/src/lib/__tests__/tenant-lifecycle-evaluation.test.ts
+   18 backend unit tests (pure derivation — no DB, no HTTP).
+
+4. artifacts/ops-platform/src/lib/__tests__/lifecycle-evaluation-config.test.ts
+   14 frontend config unit tests.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5. artifacts/api-server/src/lib/tenant-registry.ts
+   TenantRiskSignalSummary — 9 new P13-I fields added:
+   - lifecycleEvaluationSeverity          string
+   - lifecycleEvaluationRecommendedAction string
+   - manualReviewRequired                 boolean
+   - suspensionReviewEligible             boolean
+   - renewalReviewEligible                boolean
+   - usageReviewEligible                  boolean
+   - entitlementReviewEligible            boolean
+   - lifecycleReviewEligible              boolean
+   - governanceReviewEligible             boolean
+
+   deriveRiskSignalSummary() updated to populate all 9 fields inline
+   (no import of evaluation lib — derived from existing boolean signals
+    to keep registry summary lightweight and avoid circular deps).
+
+6. artifacts/api-server/src/routes/tenants.ts
+   File header updated to list P13-I route.
+   New route added:
+   GET /platform/tenants/:tenantId/lifecycle-evaluation
+   - requireAuth + requireSuperAdmin
+   - Validate tenant exists (404 if not found)
+   - Load: workspace, subscription, entitlement overrides
+   - Derive: entitlementProfile, rawUsage, usageProfile, renewalProfile,
+             subscriptionStatus, lifecycleState, healthProfile
+   - Build TenantLifecycleEvaluationInput from all derived layers
+   - Call deriveTenantLifecycleEvaluationProfile()
+   - Structured log: tenant_lifecycle_evaluation_read
+     Fields: actorId, tenantId, workspaceId, severity, recommendedAction,
+             manualReviewRequired, signalCount
+   - Return: { evaluationProfile, componentSummaries, warnings, safetyNotice }
+   - No mutation, no status update, no suspension, no lock, no billing, no emails
+
+7. artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+   Imports added: LIFECYCLE_EVALUATION_API_PATHS, EvaluationSignalCode,
+                  EvaluationSeverity, EvaluationRecommendedAction
+   Added:
+   - LIFECYCLE_EVALUATION_READ_HOOK_NAMES constant
+   - EvaluationReviewEligibility interface
+   - TenantLifecycleEvaluationProfileData interface
+   - TenantLifecycleEvaluationData interface
+   - useTenantLifecycleEvaluation(tenantId: string | null) hook
+     queryKey:  ["platform", "tenants", tenantId, "lifecycle-evaluation"]
+     staleTime: 30_000ms
+     GET only — no mutation
+
+8. artifacts/ops-platform/src/lib/tenant-admin-console-config.ts
+   Console expanded from 7 to 8 tabs.
+   Added:
+   - "evaluation" to ConsoleTab union type
+   - "evaluation" to CONSOLE_TABS array
+   - CONSOLE_TAB_CONFIG.evaluation:
+     { label: "Evaluation", readOnly: true, icon: "ClipboardList",
+       testId: "console-tab-evaluation" }
+
+9. artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+   Imports added:
+   - useTenantLifecycleEvaluation, TenantLifecycleEvaluationProfileData
+   - LIFECYCLE_EVALUATION_SIGNAL_CONFIG, LIFECYCLE_EVALUATION_SEVERITY_CONFIG,
+     LIFECYCLE_EVALUATION_ACTION_CONFIG, REVIEW_ELIGIBILITY_CONFIG,
+     LIFECYCLE_EVALUATION_SAFETY_CONTRACT, LIFECYCLE_EVALUATION_EMPTY_STATE,
+     EVALUATION_FORBIDDEN_WORDING
+   - ClipboardList (lucide icon)
+   TAB_ICON map updated: evaluation → ClipboardList
+   TenantEvaluationPanel component added:
+   - Header: severity badge, recommended action badge, manual review required flag
+   - Review Eligibility Grid: 8 cells, color-coded (amber = eligible, rose = manual required)
+   - Active Signals: badges with labels/descriptions (title tooltip)
+   - Recommended Action: advisory description text (info box)
+   - Warnings: amber alert list
+   - No signals: "within normal parameters" message
+   - Safety Notice: read-only advisory disclaimer (ShieldCheck icon)
+   - No action buttons, no execute, no suspend, no lock, no billing
+   TenantAdminConsole updated: evaluation tab renders TenantEvaluationPanel
+
+10. artifacts/ops-platform/src/lib/__tests__/tenant-admin-console-config.test.ts
+    T2 updated: expected tabs 7 → 8, "evaluation" added to required list
+    T22 added:  evaluation tab config has readOnly:true, correct label and testId
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/platform/tenants/:tenantId/lifecycle-evaluation
+
+Request:
+  Auth: Bearer <jwt>   (super_admin role required)
+  Params: tenantId (positive integer)
+
+Response 200:
+  {
+    evaluationProfile: {
+      tenantId, workspaceId,
+      signals:           EvaluationSignalCode[],
+      severity:          EvaluationSeverity,
+      recommendedAction: EvaluationRecommendedAction,
+      reviewEligibility: {
+        renewalReviewEligible, graceReviewEligible, suspensionReviewEligible,
+        usageReviewEligible, entitlementReviewEligible, lifecycleReviewEligible,
+        governanceReviewEligible, manualReviewRequired
+      },
+      warnings:     string[],
+      summary:      string,
+      evaluatedAt:  ISO8601,
+      safetyNotice: string
+    },
+    componentSummaries: {
+      lifecycle:    { workspaceStatus, lifecycleState },
+      subscription: { status, planCode },
+      usage:        { capacityRiskLevel, warningCount, exceededCount },
+      health:       { status, riskLevel },
+      entitlements: { customCount, planCode }
+    },
+    warnings:    string[],
+    safetyNotice: string
+  }
+
+Response 400: Invalid tenantId
+Response 401: Unauthorized
+Response 403: Forbidden (non-super-admin)
+Response 404: Tenant not found
+
+Structured log (req.log.info):
+  action:               "tenant_lifecycle_evaluation_read"
+  actorId, tenantId, workspaceId
+  severity, recommendedAction
+  manualReviewRequired, signalCount
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Backend — tenant-lifecycle-evaluation.test.ts (T1–T18):
+  T1  — safety contract all true
+  T2  — ALL_EVALUATION_SIGNAL_CODES: 17 entries, no duplicates
+  T3  — ALL_EVALUATION_RECOMMENDED_ACTIONS: 10 entries, no duplicates
+  T4  — healthy input → no signals, severity=none, action=none
+  T5  — suspended workspace → workspace_suspended_requires_review, severity=high
+  T6  — locked workspace → workspace_locked_requires_review + manual_review_required, severity=critical
+  T7  — grace_expired → grace_period_expired_requires_review + manual_review_required
+  T8  — subscription_expired (active workspace) → subscription_expired_requires_review, severity=high
+  T9  — exceededCount>0 → usage_exceeded_requires_review, severity=high
+  T10 — warningCount>0 → usage_approaching_requires_review, severity=medium
+  T11 — hasMissingMetadata=true → subscription_metadata_missing signal
+  T12 — trialEndingSoon=true → trial_ending_requires_review, severity=low/medium
+  T13 — planCode=custom → custom_plan_requires_review signal
+  T14 — customEntitlementsCount>0 → entitlement_overrides_require_review
+  T15 — healthRiskLevel=critical → health_critical_requires_review + manual_review_required, severity=critical
+  T16 — governance.hasWarnings=true → governance_warning_requires_review, action=review_governance
+  T17 — deriveTenantLifecycleEvaluationProfile returns complete profile shape + safe safetyNotice
+  T18 — reviewEligibility mapped correctly for complex multi-signal input
+
+Frontend — lifecycle-evaluation-config.test.ts (T1–T14):
+  T1  — safety contract all true
+  T2  — ALL_EVALUATION_SIGNAL_CODES: 17 entries, no duplicates
+  T3  — LIFECYCLE_EVALUATION_SIGNAL_CONFIG covers all 17 signal codes
+  T4  — LIFECYCLE_EVALUATION_SEVERITY_CONFIG covers all 7 severities
+  T5  — LIFECYCLE_EVALUATION_ACTION_CONFIG covers all 10 actions
+  T6  — REVIEW_ELIGIBILITY_CONFIG has 8 entries, includes manualReviewRequired
+  T7  — LIFECYCLE_EVALUATION_API_PATHS.get("42") = "/api/platform/tenants/42/lifecycle-evaluation"
+  T8  — all signal configs have non-empty label, description, badgeClass
+  T9  — all severity configs have non-empty label, icon, badgeClass
+  T10 — all action configs have non-empty label, description
+  T11 — no forbidden wording in signal/action labels and descriptions
+  T12 — manual_review_required signal config has severity=critical
+  T13 — EVALUATION_FORBIDDEN_WORDING is non-empty array of strings
+  T14 — review eligibility config keys are unique and non-empty
+
+Console config — tenant-admin-console-config.test.ts:
+  T2  (updated) — CONSOLE_TABS includes all 8 required tabs (was 7)
+  T22 (new)     — evaluation tab: readOnly=true, label="Evaluation", testId="console-tab-evaluation"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Backend  (pnpm --filter @workspace/api-server run test):
+  Test Files:  50 passed (50)
+  Tests:       2960 passed (2960)
+
+Frontend (pnpm --filter @workspace/ops-platform run test):
+  Test Files:  18 passed (18)
+  Tests:       955 passed (955)
+
+Typecheck:
+  Backend:   PASS — 0 new errors
+  Frontend:  PASS — 0 new P13-I errors
+             (7 pre-existing errors in governance-audit.tsx,
+              governance-violations.tsx, workflow-detail.tsx, workflows.tsx
+              remain untouched as documented)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ARCHITECTURE NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Pure derivation: all evaluation functions are pure (no DB, no HTTP).
+- Route composes all P13 intelligence layers → single aggregation point,
+  mirrors the pattern of the health endpoint (P13-G).
+- TenantRiskSignalSummary evaluation fields use inline derivation (no import
+  of the full evaluation lib) to keep registry list view lightweight.
+- No OpenAPI codegen required — hook uses getJson() directly, matching
+  the pattern of useTenantHealth and useTenantRenewalIntelligence.
+- Frontend panel has zero action buttons — strictly display only.
+- Console expands cleanly from 7 to 8 tabs — no existing tab changed.
+- P13-H TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT remains intact.
+
+================================================================================
+END OF REPORT — P13-I COMPLETE
+================================================================================

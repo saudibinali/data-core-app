@@ -1,0 +1,226 @@
+راجع جميع التقارير السابقة الخاصة بـ:
+- workflows
+- observability
+- diagnostics
+- event architecture
+- leave domain
+
+ثم نفّذ فقط:
+WORKFLOW GOVERNANCE ARCHITECTURE REVIEW
+
+بدون أي implementation فعلي حتى الآن.
+
+عنوان المهمة:
+WORKFLOW GOVERNANCE & RUNTIME SAFETY — Architecture Review
+
+المهمة الحالية:
+تحليل وتصميم طبقة Governance + Runtime Safety
+للـ No-Code Workflow Platform الحالية.
+
+الهدف:
+منع:
+- configuration chaos
+- broken workflow deployments
+- recursive automation loops
+- invalid workflow publishing
+- runtime instability
+- unsafe customer configurations
+
+مع الحفاظ على:
+- flexibility
+- no-code UX
+- runtime customization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — راجع الـ Workflow System الحالية بالكامل
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workflow engine
+- workflow definitions
+- execution model
+- trigger model
+- event integration
+- step execution
+- approval routing
+- workflow persistence
+- diagnostics APIs
+- observability reports
+- workflow execution tables
+- workflow UI assumptions إن وجدت
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — حلّل المخاطر الحالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ابحث عن:
+- recursive event loops
+- workflow self-triggering
+- circular dependencies
+- infinite notification loops
+- runaway automations
+- invalid trigger chains
+- duplicate execution risks
+- unsafe publish behavior
+- editing active workflows
+- missing rollback strategy
+- missing draft/publish lifecycle
+- invalid step references
+- orphaned workflow versions
+- stale workflow references
+- race conditions في dynamic configs
+- tenant-level abuse scenarios
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — حلّل Runtime Safety الحالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّد:
+ما الموجود حاليًا:
+- recursion guards
+- depth limits
+- execution limits
+- timeout protections
+- step retries
+- idempotency
+- concurrency protections
+- workflow cancellation
+- dead execution detection
+
+وما المفقود.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — صمّم Workflow Governance Model
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+- workflow draft lifecycle
+- publish lifecycle
+- activation model
+- rollback model
+- versioning model
+- immutable published versions
+- dependency validation
+- runtime validation
+- schema validation
+- trigger validation
+- permission model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — صمّم Runtime Safety Layer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل وصمّم:
+- recursion detection
+- workflow depth limits
+- execution TTL
+- stuck workflow detection
+- execution cancellation
+- duplicate suppression
+- safe retry behavior
+- workflow throttling
+- tenant safety limits
+- event storm protection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — حلّل Event Safety
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بما أن:
+events → workflows → events
+
+حلّل:
+- loop prevention
+- event chain tracing
+- causation tracking
+- event fanout limits
+- cyclic execution detection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — صمّم Validation & Simulation Layer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف يمكن:
+- validate workflow قبل publish
+- detect impossible branches
+- detect missing approvers
+- detect recursive chains
+- simulate execution
+- dry-run workflows
+- preview routing behavior
+
+بدون تنفيذ فعلي الآن.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — حلّل Multi-Tenant Governance
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بما أن النظام Enterprise multi-tenant:
+حلّل:
+- workspace isolation
+- tenant execution quotas
+- tenant-level throttling
+- noisy tenant protection
+- workflow abuse prevention
+- cross-workspace safety
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — لا تنفذ implementation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- queues
+- Redis
+- workflow version tables
+- retry systems
+- schedulers
+- execution daemons
+- UI changes
+
+فقط تحليل وتصميم.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — لا تغيّر architecture الحالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تعدّل:
+- EventBus
+- workflow runtime
+- diagnostics APIs
+- leave domain
+- bridge architecture
+
+إلا إذا وجدت bug خطير جدًا — وثّقه فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم التنفيذ المستقبلي إلى phases واضحة:
+- governance foundations
+- runtime safety
+- validation engine
+- simulation tooling
+- advanced orchestration controls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-governance-architecture-review.txt
+
+ويحتوي:
+- التحليل الكامل
+- current workflow risks
+- runtime safety gaps
+- governance model
+- runtime safety model
+- validation/simulation design
+- event safety strategy
+- tenant protection strategy
+- implementation phases
+- catastrophic failure scenarios إذا لم تُطبق governance
+- recommendation النهائية قبل implementation

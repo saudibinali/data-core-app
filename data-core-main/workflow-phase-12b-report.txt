@@ -1,0 +1,636 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 12-B
+Audit Integrity UI & Forensic Timeline Review Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date           : 2026-05-16
+Phase          : P12-B (frontend-only forensic audit review UI)
+Prior phase    : P12-A (governance console shell — all 7 pages, 182/182 tests)
+Final Status   : P12-B COMPLETE
+Backend tests  : 2399 / 2399 (42 files — unchanged)
+Frontend tests : 250 / 250 (4 files — 68 new assertions across 10 groups)
+Typecheck      : Pre-existing isActive errors in workflows.tsx — unchanged; zero new errors
+New files      : 2 (forensic timeline component, P12-B test file)
+Modified files : 4 (governance-console-config.ts, governance-console-hooks.ts,
+                    super-admin-governance-audit.tsx, test registry update)
+Backend changes: NONE
+DB migrations  : NONE
+Enforcement    : NONE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — AUDIT INTEGRITY UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-B converts the P12-A placeholder audit page into a full forensic review
+experience. The architecture remains entirely frontend-only, read-only, and
+super-admin-restricted. No backend routes were added or modified.
+
+Layer additions:
+
+  governance-console-config.ts  (extended — pure TS constants)
+    + INTEGRITY_STATUS_MAP          (5 statuses → tier + label + description)
+    + RETENTION_CLASSIFICATION_MAP  (4 classifications → label + helper)
+    + FORENSIC_EMPTY_STATE          (no-entity-selected + timeline-empty states)
+    + AUDIT_UI_SAFETY_CONTRACT      (9 boolean invariants)
+    + FORENSIC_ENTITY_TYPE_OPTIONS  (7 entity type options including all-types)
+    + AUDIT_*_FILTER_OPTIONS        (3 filter option arrays)
+    + FORENSIC_TIMELINE_HOOK_NAME   (named constant for test coverage)
+    + FORENSIC_TIMELINE_QUERY_KEY_NAME (named constant separate from main registry)
+    + GOVERNANCE_READ_HOOK_NAMES    (extended with useGovernanceForensicTimeline)
+
+  governance-console-hooks.ts  (extended — 1 new read-only hook)
+    + useGovernanceForensicTimeline(entityId?)
+      → GET /api/platform/compliance/forensics/:entityId
+      → enabled ONLY when entityId is a non-empty trimmed string
+
+  governance-forensic-timeline.tsx  (new shared component)
+    Renders a chronological audit event list with:
+    - Per-event integrity status badge (healthy/attention/critical tiers)
+    - Per-event retention classification badge (4 classes, color-coded)
+    - Hash preview, chain ID, operator ID, timestamps, event type
+    - Loading skeleton, empty state, error state
+    - No mutation controls anywhere in the component
+
+  super-admin-governance-audit.tsx  (full rewrite from P12-A placeholder)
+    4 sections:
+    1. Summary stat cards (4 metrics from audit integrity summary)
+    2. Overall integrity status card with legend
+    3. Audit chain browser (filterable, collapsible rows)
+    4. Forensic entity investigation (search → timeline)
+
+Dependency graph (P12-B additions):
+
+  governance-console-config.ts  (pure TS — no deps)
+         ↓
+  governance-console-hooks.ts   (+ useGovernanceForensicTimeline)
+         ↓
+  governance-forensic-timeline.tsx  (component — depends on config constants)
+         ↓
+  super-admin-governance-audit.tsx  (page — depends on hooks + timeline + config)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — FORENSIC TIMELINE COMPONENT DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/governance-forensic-timeline.tsx
+
+2.1  Props interface
+
+  interface GovernanceForensicTimelineProps {
+    events:       ForensicEvent[];      // Sorted chronologically by caller
+    isLoading?:   boolean;
+    isError?:     boolean;
+    errorMessage?: string;
+    data-testid?: string;
+  }
+
+  interface ForensicEvent {
+    id?, eventType?, entityType?, entityId?, operatorId?,
+    occurredAt?, recordedAt?,
+    integrityStatus?, retentionClassification?,
+    hashPreview?, evidenceRef?, chainId?, parentChainId?
+  }
+
+2.2  Per-event display (ForensicEventCard)
+
+  Every event card renders:
+
+  Row 1 (header):
+    [eventType mono badge]  [IntegrityStatusBadge]  [RetentionBadge]  #NNN
+
+  Row 2 (integrity warning — only for non-healthy):
+    ⚠ {INTEGRITY_STATUS_MAP[status].description}
+
+  Row 3 (entity):
+    🏷 entityType  entityId (mono)  👤 operatorId (mono)
+
+  Row 4 (timestamps):
+    🕐 Occurred: {fmtDate(occurredAt)}
+       Recorded: {fmtDate(recordedAt)}  (if present)
+
+  Row 5 (chain / hash):
+    🔗 Chain: chainId (mono, truncated)
+    # Hash: hashPreview (mono)
+
+  Row 6 (evidence ref):
+    Evidence: evidenceRef (mono)
+
+  Left border color by integrity tier:
+    healthy    → emerald-400
+    attention  → amber-400
+    critical   → red-400
+
+2.3  States
+
+  LOADING:   4 skeleton rows mimicking event card structure
+  EMPTY:     ShieldAlert icon + "No forensic events found" + explanation
+  ERROR:     Red-bordered card with AlertTriangle icon + error message
+  DATA:      Chronological event list + event count footer
+
+2.4  Safety guarantees
+
+  - No buttons for repair, acknowledge, escalate, or delete
+  - No export or download triggers
+  - No AI summary cards
+  - Compromised and orphaned events are never filtered out or hidden
+  - Non-healthy status description is always shown inline on each affected card
+  - Component is purely presentational (no internal query calls)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — ENTITY-SCOPED FORENSIC REVIEW BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The "Forensic Entity Investigation" card is the P12-B centrepiece.
+
+3.1  Interaction flow
+
+  1.  Operator types an entity ID (workspace ID, user ID, ticket ID, etc.)
+      into the entity ID input field (font-mono, data-testid: forensic-entity-id-input).
+
+  2.  Optional: operator selects an entity type from the dropdown
+      (decorative hint only in P12-B — does not filter the API call, which
+       uses entity ID alone since the forensics endpoint is :entityId-based).
+
+  3.  Operator clicks "Review Timeline" or presses Enter.
+      Button is disabled while entity ID is empty.
+
+  4.  activeEntityId is set to the trimmed entityId. This enables
+      useGovernanceForensicTimeline(activeEntityId), which fires
+      GET /api/platform/compliance/forensics/{entityId}.
+
+  5.  GovernanceForensicTimeline renders with the returned events
+      (mapped from the raw API response to the ForensicEvent interface).
+
+  6.  The "Clear" button resets both activeEntityId and entityIdInput,
+      returning to the "no entity selected" empty state.
+
+3.2  No-entity-selected state
+
+  When activeEntityId is undefined:
+    - GovernanceForensicTimeline is not mounted
+    - No API call fires
+    - A dashed-border card shows the FORENSIC_EMPTY_STATE.noEntitySelected
+      title and description
+    - data-testid: forensic-no-entity
+
+3.3  Query disabled behavior
+
+  useGovernanceForensicTimeline is guarded by:
+    enabled: typeof entityId === "string" && entityId.trim().length > 0
+
+  Empty string, whitespace-only string, and undefined all produce `enabled: false`.
+  TanStack Query will not fire the queryFn. No network request is made.
+  No error state is shown for a disabled query.
+
+3.4  Active entity badge
+
+  When activeEntityId is set, a badge displays the entity ID being reviewed:
+    [🔍 {activeEntityId}] — N events found (or "Loading…" / "Error…")
+
+3.5  Hash mapping from raw API
+
+  The forensics endpoint returns `hash` (full SHA-256 hex string).
+  The page maps this to `hashPreview` as `hash.slice(0, 16) + "…"` before
+  passing to the timeline component. The full hash is never displayed in the
+  UI — only the truncated preview (sufficient for visual identification,
+  insufficient for misuse as a collision target).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — AUDIT CHAIN BROWSER IMPROVEMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The P12-A "Recent Audit Chain Entries" card has been replaced with a full
+audit chain browser supporting client-side filtering.
+
+4.1  Filter controls
+
+  Three Select dropdowns in a filter bar:
+
+  "Integrity Status" filter (AUDIT_INTEGRITY_STATUS_FILTER_OPTIONS):
+    All Statuses | Verified | Warning | Compromised | Orphaned | Incomplete
+
+  "Retention Classification" filter (AUDIT_RETENTION_FILTER_OPTIONS):
+    All Classifications | Operational | Governance | Compliance Sensitive | Forensic Critical
+
+  "Entity Type" filter (AUDIT_ENTITY_TYPE_FILTER_OPTIONS):
+    All Types | Workspace | User | Ticket | Department | Workflow | Policy
+
+  Active filter count badge:
+    When any filter is active, "Clear (N)" button appears with the active count.
+    data-testid: clear-filters
+
+4.2  Filter implementation
+
+  Filtering is purely client-side using useMemo over the raw entries array.
+  The underlying useGovernanceAuditChains({ limit: 50 }) fetches up to 50
+  entries from the backend. No additional API calls are made on filter change.
+
+4.3  Entry row design (AuditChainRow)
+
+  Collapsed row (always visible):
+    entityType (24-char) | entityId (mono, truncated) | IntegrityBadge | RetentionBadge | occurredAt
+
+  Expanded row (click to expand — ChevronDown/ChevronUp toggle):
+    chainId | eventType | operatorId | recordedAt | hash preview
+    + Integrity description for non-healthy entries
+
+  Collapsible design keeps the list scannable while allowing drill-down
+  without opening a separate detail page.
+
+4.4  Column headers
+
+  A sticky-ish header row above the list shows:
+    Entity Type | Entity ID | Integrity | Retention | Occurred
+
+4.5  Entry count badge
+
+  The card header shows "N / Total" reflecting filtered vs raw count.
+  Skeleton "…" placeholder during loading.
+
+4.6  Empty state with filter awareness
+
+  - No active filters + no data → "No audit chain entries recorded yet."
+  - Active filters + no matches → "No entries match the current filters."
+    with "Clear filters" inline text link.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — INTEGRITY STATUS VISUAL LANGUAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Status → Tier mapping (INTEGRITY_STATUS_MAP):
+
+  Status        Tier        Icon          Badge colours          Description
+  ──────────────────────────────────────────────────────────────────────────────
+  verified      healthy     ShieldCheck   emerald bg/text        "Hash verification passed — entry is intact."
+  warning       attention   FileWarning   amber bg/text          "Minor integrity issue detected — review recommended."
+  compromised   critical    ShieldX       red bg/text            "Hash mismatch detected — tamper evidence present."
+  orphaned      critical    ShieldX       red bg/text            "Entry references a missing parent chain link."
+  incomplete    attention   FileWarning   amber bg/text          "Entry is missing required fields or linkage."
+
+Design principles:
+
+  - critical (red) is reserved for compromised and orphaned — states with
+    hard evidence of data integrity failure. These states are NEVER hidden,
+    filtered out, or soft-rendered.
+  - attention (amber) is used for warning and incomplete — states that
+    need review but do not have confirmed tamper evidence.
+  - healthy (emerald) is used for verified — the normal/expected state.
+  - No "grey out" or "dim" of critical entries. Critical severity is always
+    shown at full visual weight.
+  - No labels imply legal compliance conclusions ("compliant", "legal",
+    "regulatory", "verdict").
+  - Left border colors on timeline events mirror the badge color:
+    emerald for healthy, amber for attention, red for critical.
+
+5.1  Status legend on the integrity status card
+
+  The overall integrity status card shows a compact inline legend (hidden on
+  mobile, visible on lg+ screens) mapping each status to its tier label.
+  This helps operators understand the color coding without guessing.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — RETENTION CLASSIFICATION VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Retention classification → badge colours (RETENTION_CLASSIFICATION_MAP):
+
+  Classification         Label                  Badge colour      Helper text
+  ──────────────────────────────────────────────────────────────────────────────
+  operational            Operational            secondary (grey)  "Routine platform operation record."
+  governance             Governance             blue bg/text      "Governance oversight record."
+  compliance_sensitive   Compliance Sensitive   orange bg/text    "Sensitive to compliance evaluation — handle with care."
+  forensic_critical      Forensic Critical      violet bg/text    "Critical for investigation — highest retention priority."
+
+Display locations:
+  - IntegrityBadge + RetentionBadge both appear on every audit chain row
+  - RetentionBadge appears on every forensic timeline event card
+  - Helper text is surfaced as a `title` attribute on the badge (tooltip on hover)
+  - Filter dropdown shows full label names for easy selection
+
+Priority escalation from label colours:
+  grey < blue < orange < violet (forensic_critical = highest urgency)
+  This matches the intuitive priority ordering for investigative importance.
+
+Semantic clarification:
+  "forensic_critical" means the record is important for investigation purposes.
+  It does NOT mean the underlying action was illegal or non-compliant.
+  The helper text explicitly uses "investigation" language, not legal language.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — UI STATES (ALL 8 REQUIRED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every required state is implemented on the full Audit Integrity page:
+
+  1.  LOADING
+      - Stat cards: Skeleton h-7 w-12 (per card)
+      - Overall status card: Skeleton h-8 w-48
+      - Audit chain browser: 6× Skeleton h-10 w-full rows
+      - Forensic timeline: 4× skeleton rows mimicking event structure
+      data-testid: forensic-timeline-loading (on the timeline component)
+
+  2.  EMPTY (no data)
+      - Audit chain browser: LinkIcon + "No audit chain entries recorded yet."
+      - Forensic timeline: ShieldAlert + "No forensic events found for this entity"
+      data-testid: chains-empty, forensic-timeline-empty
+
+  3.  ERROR
+      - Audit integrity: GovernanceErrorState ("Could not load audit integrity data…")
+      - Audit chain browser: AlertTriangle inline message ("Could not load audit chain entries.")
+      - Forensic timeline: GovernanceForensicTimeline error state (red-bordered card)
+      data-testid: forensic-timeline-error
+
+  4.  UNAUTHORIZED
+      - SuperAdminRoute blocks before any page component mounts.
+      - Redirect to /sign-in. No partial governance UI is ever rendered.
+
+  5.  READ-ONLY NOTICE
+      - GovernanceReadOnlyNotice renders immediately below the page header.
+      - Always visible regardless of other states.
+      data-testid: governance-read-only-notice
+
+  6.  NO-ENTITY-SELECTED STATE
+      - Forensic investigation card shows a dashed-border empty state.
+      - "Enter an Entity ID to review its forensic timeline" guidance.
+      data-testid: forensic-no-entity
+
+  7.  TIMELINE EMPTY STATE
+      - When an entity ID is selected but returns 0 events.
+      - ShieldAlert + "No forensic events found for this entity" + explanation.
+      data-testid: forensic-timeline-empty
+
+  8.  TIMELINE ERROR STATE
+      - When the forensics API call fails for an active entity ID.
+      - Red-bordered card with entity-specific error message.
+      data-testid: forensic-timeline-error
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+AUDIT_UI_SAFETY_CONTRACT (9 boolean invariants — all true):
+
+  noAuditRecordCreation    true   No form exists for creating audit entries.
+  noChainRepair            true   No "repair", "fix", or "re-link" buttons exist.
+  noDeleteOrArchive        true   No delete or archive controls anywhere.
+  noLegalConclusions       true   No label says "compliant", "legal", "verdict".
+  noExportRendering        true   No PDF/XLSX/CSV download triggers.
+  noAiSummaries            true   No AI-generated explanation cards.
+  compromisedAlwaysVisible true   Compromised entries are never hidden/dimmed.
+  orphanedAlwaysVisible    true   Orphaned entries are never hidden/dimmed.
+  superAdminOnly           true   Enforced by SuperAdminRoute at router level.
+
+Inheritance from P12-A GOVERNANCE_CONSOLE_SAFETY_CONTRACT:
+  readOnly, noMutationControls, noAutoEnforcement, noExportRendering,
+  noExternalSubmission, noAiSummaries, superAdminOnly, allRoutesUnderSuperAdmin
+  — all still true, all unchanged.
+
+Read-only hook guarantee:
+  useGovernanceForensicTimeline uses useQuery only.
+  No useMutation is introduced anywhere in P12-B.
+  All queryFn calls use apiClient.get() only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1  Backend tests — unchanged
+
+  Command: pnpm --filter @workspace/api-server run test --run
+  Result:  2399 / 2399 (42 files) — EXIT:0
+  No regressions from P12-B.
+
+9.2  Frontend tests — P12-B additions
+
+  Command: pnpm --filter @workspace/ops-platform run test --run
+  Result:  250 / 250 (4 files) — EXIT:0
+
+  File breakdown:
+    governance-utils.test.ts         128 assertions (P11, unchanged)
+    governance-console-shell.test.ts  54 assertions (P12-A, 1 assertion updated)
+    governance-audit-integrity.test.ts 68 assertions (P12-B new)
+    (governance-trend-utils.test.ts    0 assertions, pre-existing)
+
+9.3  New test groups (T1–T10) — 68 assertions
+
+  T1  Forensic timeline hook name is read-only                      5 assertions
+  T2  Forensic timeline query config: disabled without entityId     7 assertions
+  T3  Integrity status mapping: all 5 statuses, correct tiers      10 assertions
+  T4  Retention classification labels: all 4 classifications        7 assertions
+  T5  Forensic timeline ordering spec                               4 assertions
+  T6  Audit page config is super-admin scoped                       6 assertions
+  T7  No mutation, export, or legal action labels in audit config   4 assertions
+  T8  Empty and error state config present                          8 assertions
+  T9  Query keys stable                                             7 assertions
+  T10 Config shapes well-formed                                    10 assertions
+  ─────────────────────────────────────────────────────────────────────────────
+  Total new assertions:                                            68
+
+9.4  P12-A test update
+
+  governance-console-shell.test.ts T6 had "exactly 15 read hook names".
+  Updated to `toBeGreaterThanOrEqual(15)` to accommodate the P12-B addition
+  of useGovernanceForensicTimeline (now 16 total). All 54 P12-A assertions
+  still pass.
+
+9.5  What the tests verify
+
+  T1: Hook name is in the registry, starts with useGovernance, has no
+      mutation verbs, is not named "Mutation".
+  T2: The enabled guard logic correctly rejects empty/whitespace/undefined
+      entityId, accepts valid strings; API URL encoding is correct.
+  T3: All 5 status keys present; verified=healthy, compromised/orphaned=critical,
+      warning/incomplete=attention; no "legal"/"compliant" in labels.
+  T4: All 4 retention keys present; forensic_critical and compliance_sensitive
+      labels are correct; no legal conclusions in helper text.
+  T5: Pure sort logic for occurredAt ascending, tiebreak by recordedAt;
+      missing dates sort to end; empty array is stable.
+  T6: audit-integrity route is super-admin scoped; both safety contracts
+      have superAdminOnly=true; AUDIT_UI_SAFETY_CONTRACT has 9 properties.
+  T7: No forbidden terms (repair/fix/delete/export/legal/verdict/ai/escalate)
+      appear in any label, description, helper, or filter option text.
+  T8: Both empty state configs have title and description; noAuditRecordCreation,
+      noChainRepair, compromisedAlwaysVisible, orphanedAlwaysVisible all true.
+  T9: forensicTimeline query key is separate from the main registry; forensic
+      URL encodes special characters; query key array has correct structure.
+  T10: Filter option arrays have correct lengths that match their backing maps;
+       filter options for integrity status cover exactly the INTEGRITY_STATUS_MAP keys.
+
+9.6  Typecheck status
+
+  pnpm --filter @workspace/ops-platform run typecheck
+  EXIT:2 — same 2 pre-existing isActive errors in workflow-detail.tsx and
+  workflows.tsx. Zero new errors introduced by P12-B.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — FILE MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New files (2):
+
+  artifacts/ops-platform/src/components/governance/governance-forensic-timeline.tsx
+    Shared read-only forensic event timeline component.
+    Props: events[], isLoading?, isError?, errorMessage?, data-testid?
+    Sub-components: IntegrityStatusBadge, RetentionBadge, ForensicEventCard
+    States: loading skeleton, empty, error, event list with count footer
+    No mutation controls, no export actions.
+
+  artifacts/ops-platform/src/lib/__tests__/governance-audit-integrity.test.ts
+    68 assertions across T1–T10.
+    Pure node-environment tests — no React/DOM imports.
+    Imports only from governance-console-config.ts.
+
+Modified files (4):
+
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added: INTEGRITY_STATUS_MAP, ALL_INTEGRITY_STATUS_KEYS
+    Added: RETENTION_CLASSIFICATION_MAP, ALL_RETENTION_CLASSIFICATION_KEYS
+    Added: FORENSIC_TIMELINE_HOOK_NAME, FORENSIC_TIMELINE_QUERY_KEY_NAME
+    Added: FORENSIC_ENTITY_TYPE_OPTIONS, FORENSIC_EMPTY_STATE
+    Added: AUDIT_UI_SAFETY_CONTRACT
+    Added: AUDIT_INTEGRITY_STATUS_FILTER_OPTIONS, AUDIT_RETENTION_FILTER_OPTIONS,
+           AUDIT_ENTITY_TYPE_FILTER_OPTIONS
+    Updated: GOVERNANCE_READ_HOOK_NAMES (added useGovernanceForensicTimeline → 16 total)
+
+  artifacts/ops-platform/src/lib/governance-console-hooks.ts
+    Added: useGovernanceForensicTimeline(entityId?) hook
+    → enabled guard: entityId.trim().length > 0
+    → queryKey: ["governance", "forensic-timeline", entityId]
+    → queryFn: GET /api/platform/compliance/forensics/:entityId
+    → staleTime: 60_000, retry: 1
+    → zero useMutation
+
+  artifacts/ops-platform/src/pages/super-admin-governance-audit.tsx
+    Full rewrite (P12-A placeholder → P12-B full forensic review page)
+    Sections: stat cards, integrity status + legend, audit chain browser
+              (filterable + collapsible), forensic entity investigation
+    Uses: useGovernanceForensicTimeline, GovernanceForensicTimeline component
+    Local sub-components: IntegrityBadge, RetentionBadge, AuditChainRow
+
+  artifacts/ops-platform/src/lib/__tests__/governance-console-shell.test.ts
+    T6 assertion updated: "exactly 15" → "at least 15" (now 16 after P12-B)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — REMAINING AUDIT UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What P12-B provides:
+  - Full forensic timeline component (all states)
+  - Entity-scoped forensic review with search input
+  - Audit chain browser with 3-axis client-side filters
+  - Integrity status visual language (5 statuses, 3 tiers, icons, badges)
+  - Retention classification visibility (4 classes, color-coded, helper text)
+  - All 8 UI states implemented
+  - 9-property safety contract in config
+
+What P12-B does NOT provide (deferred):
+
+─────────────────────────────────────────────────────────────────────────────
+A)  ENTITY ID AUTOCOMPLETE
+─────────────────────────────────────────────────────────────────────────────
+  The entity ID input is a plain text field. No autocomplete or entity picker
+  exists. The operator must know or copy/paste the entity ID from another view.
+  Future: a debounced search dropdown that queries workspace/user/ticket IDs
+  from the existing platform API endpoints.
+
+─────────────────────────────────────────────────────────────────────────────
+B)  SERVER-SIDE FILTERING
+─────────────────────────────────────────────────────────────────────────────
+  The audit chain browser filters are client-side only, over up to 50 entries
+  fetched in one call. For platforms with thousands of audit entries, server-side
+  filter parameters should be passed to useGovernanceAuditChains().
+  The hook already accepts entityType and workspaceId params — only the UI
+  controls are missing.
+
+─────────────────────────────────────────────────────────────────────────────
+C)  PAGINATION
+─────────────────────────────────────────────────────────────────────────────
+  No pagination controls exist. The chain browser shows max 50 entries.
+  Future: offset-based pagination or infinite scroll.
+
+─────────────────────────────────────────────────────────────────────────────
+D)  CHAIN LINK NAVIGATION
+─────────────────────────────────────────────────────────────────────────────
+  Each audit chain row shows chainId and (in expand view) parentChainId.
+  Clicking chainId or parentChainId does not navigate to the linked chain.
+  Future: clicking a chainId pre-populates the entity ID input and fires
+  a timeline search for that chain entity.
+
+─────────────────────────────────────────────────────────────────────────────
+E)  FORENSIC SNAPSHOT COMPARE (TOPOLOGY DIFF)
+─────────────────────────────────────────────────────────────────────────────
+  The POST /topology/diff endpoint is not exposed in P12-B.
+  Future: two forensic snapshot input areas (prev + next JSON) with a diff
+  result view — belongs in P12-E alongside the topology diff UI.
+
+─────────────────────────────────────────────────────────────────────────────
+F)  FULL HASH DISPLAY (COPY MODE)
+─────────────────────────────────────────────────────────────────────────────
+  Hash is shown as a 16-char preview (hash.slice(0,16) + "…"). The full
+  SHA-256 hex string is not shown. Future: a "copy full hash" button with
+  clipboard access (read-only — no write intent).
+
+─────────────────────────────────────────────────────────────────────────────
+G)  CROSS-ENTITY INTEGRITY COMPARISON
+─────────────────────────────────────────────────────────────────────────────
+  The audit chain browser shows entries across all entities. No side-by-side
+  comparison of two entities' timelines exists. Future: dual-pane layout.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — READINESS ASSESSMENT BEFORE POLICY VIOLATIONS UI (P12-C)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE PLATFORM IS READY FOR P12-C (Policy Violations UI) BECAUSE:
+
+  ✓ /super-admin/governance/violations route exists and is protected
+  ✓ SuperAdminGovernanceViolations page is mounted and rendering
+  ✓ useGovernanceViolations() hook is wired and tested
+  ✓ useGovernancePolicies() hook is wired (for the policy registry table)
+  ✓ GovernanceReadOnlyNotice, GovernanceSectionHeader, GovernanceErrorState
+    shared components are all available
+  ✓ GovernanceForensicTimeline component is available (can be reused if
+    a violation links to a forensic entity)
+  ✓ INTEGRITY_STATUS_MAP and RETENTION_CLASSIFICATION_MAP are available
+    in the config (violations may reference these classifications)
+  ✓ Navigation link is active (AlertTriangle icon, "Policy Violations")
+  ✓ Backend GET /platform/governance/violations route implemented (P11-B)
+  ✓ Backend GET /platform/governance/violations/:workspaceId (P11-B)
+  ✓ Backend GET /platform/governance/policies route implemented (P11-B)
+  ✓ All backend tests pass (2399/2399)
+
+What P12-C will need to add:
+  - VIOLATION_SEVERITY_MAP (policy violation severity → tier/badge)
+  - POLICY_EVALUATION_MAP (confirmed_violation, escalated, false_positive, etc.)
+  - Violation list with per-row detail expansion
+  - Workspace filter dropdown for per-workspace scoping
+  - Policy registry table (names, active status, violation counts)
+  - Link from violation row → forensic entity review (reuse entity ID input)
+  - All existing safety rules apply: no acknowledge, dismiss, or repair buttons
+
+No backend changes will be required for P12-C.
+No DB migrations will be required for P12-C.
+The entire P12-C scope is frontend-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOSURE STATEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12-B is COMPLETE.
+
+  - 2 new files (forensic timeline component, test file)
+  - 4 modified files (config, hooks, audit page, P12-A test update)
+  - 0 backend changes
+  - 0 DB migrations
+  - 250/250 frontend tests passing (4 files, 68 new assertions)
+  - 2399/2399 backend tests passing
+  - Full forensic entity review with entityId search
+  - Audit chain browser with 3 client-side filters
+  - 5 integrity status tiers with color-coded visual language
+  - 4 retention classifications with helper text
+  - All 8 UI states implemented on the audit page
+  - 9-property AUDIT_UI_SAFETY_CONTRACT declared and tested
+  - No mutation controls, no repair, no export, no legal conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 12-B REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

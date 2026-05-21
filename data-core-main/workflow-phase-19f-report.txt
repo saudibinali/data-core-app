@@ -1,0 +1,94 @@
+================================================================================
+WORKFLOW PHASE 19F — REPORT CENTER UI & ENTERPRISE DOCUMENT EXPERIENCE
+================================================================================
+Date: 2026-05-19
+Phase: P19-F
+Status: COMPLETE
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Delivered a tabbed Report Center at /hr/reports integrating generated reports,
+export jobs, report creation, scheduled reports, workspace branding, and entity
+documents. All downloads use signed token + authenticated stream APIs. Notification
+clicks for export events navigate to Report Center. Legacy HR exports unchanged.
+
+--------------------------------------------------------------------------------
+UI ADDED
+--------------------------------------------------------------------------------
+- pages/report-center.tsx (7 tabs)
+- hooks/use-report-center.ts
+- lib/report-center-config.ts
+- components/reports/report-status-badge.tsx
+- components/documents/entity-documents-panel.tsx
+- HR dashboard quick link + sidebar module "report-center"
+- notifications.tsx → export_completed / export_failed → /hr/reports
+
+--------------------------------------------------------------------------------
+APIS CONSUMED
+--------------------------------------------------------------------------------
+GET  /api/reports/definitions
+GET  /api/reports/generated
+GET  /api/reports/export-jobs          (added for UI list)
+GET  /api/reports/export-jobs/:id
+POST /api/reports/export-jobs
+GET  /api/reports/generated/:id/download + stream?token=
+GET  /api/reports/schedules
+POST /api/reports/schedules
+PATCH /api/reports/schedules/:id
+GET/PUT /api/reports/branding
+GET  /api/attachments?entityType=&entityId=
+GET  /api/attachments/:id/download + stream?token=
+POST /api/attachments/:id/archive
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+| Area                    | Verdict   | Notes                                      |
+|-------------------------|-----------|--------------------------------------------|
+| Report center           | GO        | Full tabbed UI, search/filters, badges     |
+| Report creation         | GO        | 3 HR definitions, pdf/xlsx/csv, parameters   |
+| Scheduled reports UI    | GO        | List, create, enable/disable, cron text    |
+| Branding UI             | GO        | Logo URL, color, footer, display name      |
+| Document experience     | PARTIAL   | Entity lookup by type/id; no full portal   |
+| Enterprise UX readiness | PARTIAL   | No report delete; reports.view nav gap     |
+
+--------------------------------------------------------------------------------
+SECURITY STATUS
+--------------------------------------------------------------------------------
+GO — Token stream downloads only; attachment direct URLs rejected in client;
+workspace-scoped APIs; permission gates on manage actions.
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+File: artifacts/ops-platform/src/lib/__tests__/report-center-page.test.ts
+Run: pnpm --filter @workspace/ops-platform test report-center-page
+
+Static wiring tests (8 cases): route, module seed, permissions, create export,
+token downloads, schedules/branding, notifications, forbidden terms.
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+None for phase scope.
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P20-A — Attendance Integration Architecture & Workforce Event Platform
+
+--------------------------------------------------------------------------------
+CONFIRMED OUT OF SCOPE (NOT STARTED)
+--------------------------------------------------------------------------------
+- BI dashboards
+- OCR/AI
+- Payroll full rollout
+- Document migration
+- Redis redesign
+- External DMS
+- Destructive changes
+
+================================================================================
+END PHASE 19F REPORT
+================================================================================

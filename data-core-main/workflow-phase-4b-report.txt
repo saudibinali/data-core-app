@@ -1,0 +1,467 @@
+WORKFLOW GOVERNANCE — PHASE 4-B: LAZY TTL & STUCK EXECUTION PROTECTION
+Implementation Report
+Date:   2026-05-13
+Status: COMPLETE — 58/58 tests passed (40 new P4-B), typecheck clean, server running.
+Scope:  schema, ttl.ts, executor.ts, engine.ts, routes/workflows.ts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 4-B adds execution timeout protection to the workflow runtime.
+
+Every new execution gets a deadline: timeout_at = now() + 24h.
+The executor checks this deadline at every inter-step boundary.
+If the deadline has passed, the execution transitions to status='timed_out'.
+
+No schedulers. No cron jobs. No setTimeout per execution.
+No step interruption. No distributed timers.
+
+Two new diagnostic endpoints:
+  GET  /api/workflows/executions/stuck        — list overdue executions
+  POST /api/workflows/executions/:id/timeout  — admin force-timeout (super_admin only)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — SCHEMA CHANGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: lib/db/src/schema/workflows.ts
+Table: workflow_executions
+
+New column:
+  timeout_at TIMESTAMP WITH TIME ZONE NULL
+
+  Default: NULL (no value; enforced at application layer only).
+  Pre-existing rows: remain NULL — treated as "no deadline" by the executor.
+  New rows: set to now() + DEFAULT_EXECUTION_TTL_HOURS at INSERT time.
+
+New index:
+  idx_wf_exec_timeout ON (status, timeout_at)
+
+  Composite index enabling the "stuck" query:
+    WHERE status IN ('running', 'waiting_approval') AND timeout_at < now()
+  Sub-second at scale. Drizzle-kit push applied it immediately.
+
+Status values (text column, no enum):
+  Existing: pending, running, waiting_approval, completed, failed, error
+  New (P4-B): timed_out
+
+  Why not a PG enum?
+    • The status column has been text since creation — changing to enum requires
+      a full table rewrite.
+    • The application layer (isTerminalStatus()) enforces valid values.
+    • Future statuses (cancelled, suspended) can be added without migrations.
+
+Migration:
+  pnpm --filter @workspace/db run push
+  Result: [✓] Changes applied — zero data loss, zero downtime.
+
+Backward compatibility:
+  All existing rows have timeout_at = NULL.
+  isExecutionTimedOut(null) returns false — no timeout enforced for legacy rows.
+  All list/detail queries include timeoutAt in responses (nullable field).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — NEW FILE: ttl.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/ttl.ts
+
+Pure utility module — no DB, no Express, no external deps.
+All exports are pure functions: deterministic, fully testable.
+
+Exports:
+
+  TERMINAL_STATUSES: readonly string[]
+    ['completed', 'failed', 'error', 'timed_out', 'cancelled']
+    Single source of truth for terminal status classification.
+
+  isTerminalStatus(status: string): boolean
+    Returns true if status is in TERMINAL_STATUSES.
+    Used by POST /executions/:id/timeout to reject invalid requests.
+
+  isExecutionTimedOut(timeoutAt: Date | null | undefined, now?: Date): boolean
+    Core TTL guard — checks if the execution deadline has passed.
+    Returns false for null/undefined timeoutAt (legacy rows — safe).
+    Accepts injectable 'now' for deterministic unit testing.
+    Called at every inter-step boundary in executor.ts.
+
+  computeOverdueMs(timeoutAt: Date | null | undefined, now?: Date): number
+    Returns how many milliseconds past the deadline an execution is.
+    Returns 0 for null timeoutAt and for non-overdue executions.
+    Used in structured logs and stuck endpoint response.
+
+  computeTimeoutAt(ttlHours: number, from?: Date): Date
+    Derives the absolute deadline from a reference time.
+    Used by engine.ts: computeTimeoutAt(DEFAULT_EXECUTION_TTL_HOURS).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — TIMEOUT LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Full flow from event trigger to timed_out:
+
+  1. Event fires → engine.handleEvent() matches workflow definition.
+
+  2. engine.ts:
+       const timeoutAt = computeTimeoutAt(24)  // now + 24h
+       INSERT INTO workflow_executions (status='pending', timeout_at=timeoutAt)
+       void executeWorkflow(executionId, steps, ctx, timeoutAt)
+
+  3. executor.ts — for-loop over steps:
+       For each step:
+         a. INSERT step log (status='running')
+         b. Execute step handler
+         c. UPDATE step log (status='completed')
+         d. UPDATE execution (currentStepIndex = i)
+         e. P4-A: ctx.stepOutputs[step.index] = result.output
+         f. P4-A: ctx.resolvedData = buildResolvedData(stepOutputs)
+
+         ── P4-B: INTER-STEP BOUNDARY CHECK ──────────────────────
+         g. if (isExecutionTimedOut(timeoutAt)):
+              UPDATE workflow_executions SET status='timed_out', completed_at=now()
+              logger.warn({ executionId, overdueMs, completedStepIndex, ... })
+              return  ← stops execution cleanly
+
+  4. Normal completion (no timeout):
+       UPDATE workflow_executions SET status='completed'
+
+  5. Admin force-timeout (POST /executions/:id/timeout):
+       Checks isTerminalStatus(current) → 422 if already terminal
+       UPDATE workflow_executions SET status='timed_out', completed_at=now()
+       req.log.warn({ action: 'admin_force_timeout', adminId, overdueMs, ... })
+
+Key invariant: A step that has started ALWAYS completes before timeout is checked.
+The timeout fires at the BOUNDARY, not during the step.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — TIMEOUT ENFORCEMENT BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHY COOPERATIVE (NOT PREEMPTIVE):
+  Preemptive timeout (Promise.race + setTimeout) would cut a step mid-execution,
+  potentially orphaning:
+    - Notifications already sent
+    - Tasks already created in DB
+    - Status updates already applied
+  No compensation/rollback path exists. Partial side effects would persist silently.
+
+  The cooperative model guarantees:
+    • Every step either FULLY completes (output written) or is NEVER STARTED.
+    • No side effects from partial step execution.
+    • Clean state transition: completed steps → timed_out with all prior outputs intact.
+
+WHY TTL CHECKED BETWEEN STEPS ONLY:
+  The inter-step boundary (after P4-A output lines, before next for-loop iteration)
+  is the only point where:
+    a) The previous step is fully settled (DB logs written, outputs stored).
+    b) The next step has not been initiated.
+    c) The executor can safely return without cleanup.
+
+WHY NO SCHEDULER:
+  setTimeout per execution:
+    - Lost on process restart (no persistence).
+    - Requires timer ID tracking across distributed instances.
+    - Adds complexity with no immediate benefit for current use case.
+  The lazy model: timeout checked at each inter-step boundary.
+  Worst case: timeout fires one step late if a step runs longer than the TTL.
+  For linear workflows with short-lived steps (< 1s each), this is negligible.
+
+WHY timed_out ≠ failed:
+  failed    = a step returned { success: false } or threw an unhandled error.
+              The workflow ATTEMPTED the step and it DIDN'T WORK.
+              Indicates a bug, integration failure, or data problem.
+
+  timed_out = execution ran for too long regardless of step results.
+              All steps may have SUCCEEDED; the workflow is just SLOW.
+              Indicates a configuration problem, stuck approval, or scheduling issue.
+
+  cancelled = (future P4-C) explicit admin/user intent to stop the execution.
+              Active cancellation — different from passive deadline expiry.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — DIAGNOSTICS BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workflows/executions/stuck
+
+  Auth:    requireAuth + workflow.view permission (admin/manager/member with perm)
+  Purpose: Find all actively-stuck executions that have exceeded their timeout_at.
+
+  Filter logic:
+    WHERE status IN ('running', 'waiting_approval')
+      AND timeout_at IS NOT NULL
+      AND timeout_at < now()
+
+  Optional query params:
+    ?workflowId=<id>       — narrow to one workflow definition
+    ?overdueMinutes=<n>    — only include executions overdue by ≥ N minutes
+                             (adds: AND timeout_at <= now() - interval 'N minutes')
+
+  Response:
+    { data: [...], total: N, asOf: ISO8601 }
+
+  Per row:
+    id, workspaceId, workflowId, workflowName, workflowKey, module,
+    triggerEvent, status, currentStepIndex, totalSteps,
+    startedAt, timeoutAt, overdueMs (computed in SQL),
+    triggeredBy, triggeredByName, error
+
+  Ordering: timeout_at ASC (oldest deadline first — most urgent at top)
+
+  Note: Legacy rows (timeout_at = NULL) are excluded by the IS NOT NULL filter.
+  They cannot be "stuck" by the TTL definition and require manual assessment.
+
+  Note: timed_out executions do NOT appear here — they are terminal. The stuck
+  endpoint only shows executions that are STILL RUNNING past their deadline.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — ADMIN TIMEOUT BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+POST /api/workflows/executions/:id/timeout
+
+  Auth:    requireAuth + requireSuperAdmin
+  Purpose: Force-transition a stuck execution to status='timed_out'.
+           Useful for executions where the inter-step TTL check cannot fire:
+             - Execution stuck in waiting_approval (approval never provided).
+             - Execution where the current step itself hung (rare).
+             - Legacy executions (no timeout_at) that have been stuck for days.
+
+  Validation:
+    - 404 if execution not found.
+    - 422 if execution is already terminal (completed, failed, error, timed_out, cancelled).
+      Returns: { error, code: 'EXECUTION_ALREADY_TERMINAL', currentStatus, executionId }
+    - Super admin can act across ALL workspaces (no workspace scope check).
+
+  On success:
+    UPDATE workflow_executions SET status='timed_out', completed_at=now()
+    Returns: {
+      executionId, workflowId, workspaceId,
+      previousStatus, status: 'timed_out',
+      completedAt, timeoutAt, overdueMs
+    }
+
+  Audit:
+    Structured req.log.warn() entry containing:
+      executionId, workflowId, workspaceId,
+      adminId (req.userId), previousStatus,
+      timeoutAt, overdueMs, forcedAt, action: 'admin_force_timeout'
+
+  Idempotency note:
+    Calling this on an already-timed-out execution returns 422 with
+    EXECUTION_ALREADY_TERMINAL — not idempotent by design (the admin
+    should only call this when the execution is genuinely stuck, not
+    as a polling/retry mechanism).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All execution list/detail endpoints now include timeoutAt:
+  GET /api/workflows/executions          → timeoutAt per row
+  GET /api/workflows/executions/failed   → timeoutAt per row
+  GET /api/workflows/executions/:id      → timeoutAt in execution object
+  GET /api/workflows/:id/executions      → (existing recentExecutions — unchanged)
+  GET /api/workflow-executions           → (legacy endpoint — unchanged)
+
+Structured log: "Workflow execution started"
+  Added fields: timeoutAt, ttlHours: 24
+
+Structured log: "[governance] Workflow execution timed out — TTL exceeded"
+  executionId, workspaceId, timeoutAt, overdueMs,
+  completedStepIndex, nextStepIndex, totalSteps
+
+Structured log: "[governance] Execution force-timed-out by super_admin"
+  executionId, workflowId, workspaceId, adminId, previousStatus,
+  timeoutAt, overdueMs, forcedAt, action: 'admin_force_timeout'
+
+GET /api/workflows/executions/stuck:
+  Returns real-time list of overdue executions with overdueMs computed in SQL.
+  Serves as the primary operational dashboard for stuck execution detection.
+
+Existing diagnostics unaffected:
+  GET /api/workflows/executions/failed    — unchanged
+  GET /api/workflows/executions/:id       — unchanged (step timeline still works)
+  Event timelines                         — unchanged (no timeline rows for timed_out)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — LOGS BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every structured log produced by P4-B is at WARN level (not ERROR).
+Reasoning:
+  - timed_out is a governance enforcement event, not an application error.
+  - It indicates a workflow ran too long — a configuration/operations issue,
+    not a code defect.
+  - WARN is appropriate for operational alerts that require admin attention
+    but don't indicate a system failure.
+
+The executor's TTL log is emitted AFTER the DB update succeeds.
+If the DB update fails (unlikely), the process-level error catch in engine.ts
+will log it as ERROR via the existing unhandled execution error path.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Command:  pnpm --filter @workspace/api-server run test
+Runner:   vitest v4.1.6
+Duration: 539ms
+
+  Test Files:  2 passed (2)
+  Tests:       58 passed (58)
+
+Breakdown — NEW P4-B tests (ttl.test.ts):
+
+  T1 — Past deadline returns true                              4 tests  ✓
+  T2 — Future deadline returns false (step completes first)    5 tests  ✓
+  T3 — Terminal executions rejected                           11 tests  ✓
+  T4 — computeOverdueMs: stuck execution overdue calculation   5 tests  ✓
+  T5 — Legacy rows (timeout_at = NULL) handled safely          5 tests  ✓
+  T6 — timed_out appears in status system                      4 tests  ✓
+  computeTimeoutAt — deadline derivation                       6 tests  ✓
+  ─────────────────────────────────────────────────────────────────────
+  Total P4-B                                                  40 tests  ✓
+
+  P4-A tests (context.test.ts):                              18 tests  ✓
+  ─────────────────────────────────────────────────────────────────────
+  Grand total                                                 58 tests  ✓ ALL PASS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — EDGE CASES DISCOVERED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EC-1: Single-step workflow never hits inter-step boundary (handled)
+  A workflow with exactly 1 step completes in one iteration.
+  The TTL check in the for-loop fires AFTER step 0 completes (i=0).
+  If step 0 took longer than 24h, the execution is marked timed_out instead
+  of completed, even though all steps ran. This is correct behavior:
+  the execution exceeded its budget regardless of step outcomes.
+
+EC-2: Zero-step workflow (no steps)
+  The for-loop does not execute. The TTL check is never called.
+  The execution transitions directly to completed after the loop.
+  Zero-step workflows cannot time out via the inter-step check.
+  They can still be force-timed-out by an admin via POST /timeout.
+  Risk: NONE — zero-step workflows complete instantly in practice.
+
+EC-3: Last step exceeded TTL (completed or timed_out?)
+  If step N is the LAST step and it completes AFTER the deadline:
+    - The TTL check fires at the inter-step boundary (i = N).
+    - status = 'timed_out', NOT 'completed'.
+    - The post-loop "completed" update is never reached (executor returned early).
+  This is correct: the execution exceeded its budget.
+  Trade-off: all N steps succeeded, but the execution is marked timed_out.
+  Documented in ttl.ts and test T6.
+
+EC-4: typecheck failure after schema change (resolved)
+  After adding timeout_at to lib/db/src/schema/workflows.ts, the api-server
+  typecheck failed because TypeScript types for @workspace/db were stale.
+  Fix: pnpm run typecheck:libs (rebuilds composite lib declarations).
+  Lesson: Always run typecheck:libs after editing lib/db/src/schema/*.ts.
+
+EC-5: overdueMinutes filter edge cases
+  overdueMinutes=0 → threshold = 0 → cutoff = now() → lte(timeout_at, now()).
+  This is equivalent to the base lt(timeout_at, now()) already applied.
+  The guard `if (!isNaN(thresholdMs) && thresholdMs > 0)` skips the redundant
+  filter for overdueMinutes=0, preventing double application.
+  overdueMinutes=NaN → parseInt returns NaN → guard skips it (safe).
+  overdueMinutes=-1 → parseInt returns -1 → thresholdMs = -60000 → guard skips.
+
+EC-6: Force-timeout on legacy execution (no timeout_at)
+  Legacy executions have timeout_at = NULL.
+  POST /timeout still works: it doesn't require timeout_at to be set.
+  overdueMs in the response = 0 (computeOverdueMs(null) = 0).
+  The audit log captures timeoutAt: null — visible for debugging.
+
+EC-7: Concurrent timeout race (force-timeout vs. executor)
+  If the executor is executing step N while an admin calls POST /timeout:
+  - The executor's step N runs to completion (step handlers don't check status).
+  - The executor then calls UPDATE SET status='timed_out' (via TTL check OR
+    the normal completion path UPDATE SET status='completed').
+  - The admin's POST /timeout already set status='timed_out'.
+  - The executor's final UPDATE (either timed_out or completed) will succeed
+    (no WHERE status='running' guard in P4-B — that's P4-D scope).
+  Risk: LOW — the admin force-timeout and executor TTL check both set the same
+  target status ('timed_out') so the race is benign in the timed_out case.
+  The 'completed' overwrite race exists but is unlikely (< 1 step duration window).
+  P4-D will add a WHERE status='running' guard to resolve this entirely.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — READINESS ASSESSMENT BEFORE P4-C
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P4-B is complete and the server is running with all changes active.
+
+P4-C (Cooperative Cancellation) readiness checklist:
+
+  ✓  P4-B typecheck: 0 errors
+  ✓  P4-B tests: 58/58 pass
+  ✓  timeout_at column exists in DB — P4-C can add cancel_requested column
+     alongside it using the same migration pattern.
+  ✓  TERMINAL_STATUSES in ttl.ts includes 'cancelled' (pre-registered for P4-C).
+  ✓  isTerminalStatus('cancelled') returns true — P4-C POST /cancel endpoint
+     can use this guard immediately without touching ttl.ts.
+  ✓  The inter-step boundary in executor.ts is the established check point —
+     P4-C cancel_requested check goes in the same location (after P4-B check).
+  ✓  POST /executions/:id/timeout pattern established — P4-C POST /cancel
+     follows the same route structure (auth, fetch, terminal check, update, log).
+  ✓  Server restarted and running with P4-B changes active.
+  ✓  E2E verified: timeoutAt appears in execution list responses.
+  ✓  E2E verified: GET /executions/stuck endpoint returns empty (correct —
+     no executions are currently overdue in the dev environment).
+
+P4-C will:
+  1. Add cancel_requested BOOLEAN NOT NULL DEFAULT FALSE to workflow_executions.
+  2. POST /executions/:id/cancel — sets cancel_requested = true (non-terminal OK).
+  3. executor.ts inter-step boundary: re-fetch cancel_requested, if true → timed_out.
+     (Or add a 'cancelled' status distinct from timed_out — design choice for P4-C.)
+  4. GET /executions/stuck — may optionally filter by cancel_requested.
+
+P4-D (Status Transition Safety) addresses EC-7 above:
+  Add WHERE status = 'running' (or 'waiting_approval') to terminal UPDATE
+  statements in executor.ts and the force-timeout route to prevent race conditions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX — FILES CHANGED SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED:
+    artifacts/api-server/src/lib/workflows/ttl.ts
+      — isExecutionTimedOut, isTerminalStatus, computeOverdueMs, computeTimeoutAt
+      — TERMINAL_STATUSES constant
+    artifacts/api-server/src/lib/workflows/__tests__/ttl.test.ts
+      — 40 unit tests across T1–T6 + computeTimeoutAt block
+
+  MODIFIED:
+    lib/db/src/schema/workflows.ts
+      + timeoutAt column (TIMESTAMP WITH TIME ZONE, nullable)
+      + idx_wf_exec_timeout index (status, timeout_at)
+
+    artifacts/api-server/src/lib/workflows/executor.ts
+      + import isExecutionTimedOut, computeOverdueMs from ./ttl
+      + timeoutAt: Date | null = null parameter on executeWorkflow
+      + P4-B inter-step boundary TTL check with DB update + logger.warn
+
+    artifacts/api-server/src/lib/workflows/engine.ts
+      + import computeTimeoutAt from ./ttl
+      + DEFAULT_EXECUTION_TTL_HOURS = 24 constant (documented)
+      + timeoutAt = computeTimeoutAt(DEFAULT_EXECUTION_TTL_HOURS) before INSERT
+      + timeoutAt field in INSERT .values()
+      + timeoutAt, ttlHours in "Workflow execution started" log
+      + timeoutAt passed to executeWorkflow()
+
+    artifacts/api-server/src/routes/workflows.ts
+      + import requireSuperAdmin from middlewares/requireAuth
+      + import isTerminalStatus, computeOverdueMs from lib/workflows/ttl
+      + import lt, isNotNull from drizzle-orm
+      + GET /workflows/executions/stuck (new, before /:id)
+      + POST /workflows/executions/:id/timeout (new, super_admin only)
+      + timeoutAt field added to GET /executions (failed) list response
+      + timeoutAt field added to GET /executions list response
+      + timeoutAt field added to GET /executions/:id detail response
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

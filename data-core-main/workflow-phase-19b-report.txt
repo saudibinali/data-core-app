@@ -1,0 +1,145 @@
+================================================================================
+WORKFLOW PHASE 19-B REPORT — Workspace SMTP & Notification Infrastructure
+================================================================================
+Date: 2026-05-19
+Phase: P19-B (Implementation)
+Prior: P19-A (Architecture only)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P19-B delivers the first production-oriented communication infrastructure layer:
+workspace-scoped SMTP, a DB-backed notification job queue, delivery tracking,
+communication audit logs, workspace-isolated in-app notifications, and two
+critical storage security fixes. Existing SSE and in-app notification behavior
+is preserved; email is enqueued asynchronously without Redis/BullMQ.
+
+Recommended next phase: P19-C — Enterprise Document Registry & Secure File
+Infrastructure.
+
+================================================================================
+TABLES ADDED
+================================================================================
+- workspace_smtp_configs
+- notification_templates
+- notification_jobs
+- notification_deliveries
+- communication_audit_logs
+
+ALTER notifications:
+- workspace_id (backfilled from users)
+- notification_job_id (optional FK to jobs)
+
+Migration: lib/db/drizzle/0002_notification_infrastructure.sql
+
+================================================================================
+APIS ADDED
+================================================================================
+GET    /hr/workspace/smtp-config
+PUT    /hr/workspace/smtp-config
+POST   /hr/workspace/smtp-config/test
+
+(Workspace admin only; secrets never returned; audit logged.)
+
+================================================================================
+SMTP STATUS
+================================================================================
+WorkspaceMailer + PlatformMailer implemented.
+Encrypted credentials at rest.
+Connection test endpoint wired.
+Workspace-first send with platform env fallback.
+
+Status: GO (config + APIs + mailer); PARTIAL (production SMTP ops / DKIM)
+
+================================================================================
+NOTIFICATION QUEUE STATUS
+================================================================================
+notification_jobs table + queue-processor (15s poll).
+States: pending, processing, sent, failed, dead_letter.
+Retries with exponential-style minute backoff.
+Idempotency per workspace + key.
+
+Status: GO (core queue); PARTIAL (scale / observability dashboards)
+
+================================================================================
+DELIVERY TRACKING STATUS
+================================================================================
+notification_deliveries for in_app + email.
+Tracks recipient, status, sent_at, provider_message_id, errors.
+
+Status: GO
+
+================================================================================
+WORKSPACE NOTIFICATIONS STATUS
+================================================================================
+workspace_id on all bus-driven notifications.
+routes/notifications.ts filtered by workspace + user.
+notifications-bus.ts → dispatchUserNotification (in-app + optional email job).
+
+Status: GO (bus + API); PARTIAL (legacy inline route inserts still unscoped)
+
+================================================================================
+SECURITY FIXES STATUS
+================================================================================
+A. Upload presign — requireAuth + workspace-scoped paths     FIXED
+B. Private object GET — workspace path check + ACL when set  FIXED
+
+Status: GO (critical blockers addressed); PARTIAL (malware scan, MIME policy)
+
+================================================================================
+SMOKE TEST RESULTS
+================================================================================
+Suite: notification-infrastructure.smoke.test.ts
+Requires: DATABASE_URL, RUN_P19B_SMOKE != 0
+
+Coverage:
+- workspace SMTP isolation
+- notification enqueue + deliveries
+- retry behavior (mocked mailer)
+- cross-workspace notification list isolation
+- upload auth (401 without session)
+- object path workspace enforcement
+
+Run locally: pnpm --filter api-server vitest run notification-infrastructure
+
+Executed 2026-05-19: 6/6 passed (notification-infrastructure.smoke.test.ts)
+Note: apply migration 0002_notification_infrastructure.sql before production use.
+
+================================================================================
+READINESS MATRIX
+================================================================================
+Capability                              | Status
+----------------------------------------|----------
+workspace SMTP                          | GO
+notification jobs (DB queue)            | GO
+delivery tracking                       | GO
+workspace notifications (bus + API)     | GO
+email readiness (enqueue + templates)   | PARTIAL
+communication infrastructure readiness  | PARTIAL
+
+PARTIAL email readiness: queue + templates + mailer exist; production SMTP
+credentials, bounce handling, and full template coverage for all domains remain.
+
+PARTIAL communication infrastructure: document registry, unified attachments,
+and advanced audit/export policies deferred to P19-C.
+
+================================================================================
+REMAINING BLOCKERS (OUT OF SCOPE P19-B)
+================================================================================
+- Enterprise document registry (P19-C)
+- PDF engine / report UI
+- Document migration
+- Redis/BullMQ redesign
+- Payroll email rollout
+- SMS/WhatsApp
+
+================================================================================
+CONFIRMATION
+================================================================================
+P19-C NOT STARTED.
+No PDF engine. No report UI. No document migration. No Redis redesign.
+No payroll email rollout. No SMS implementation.
+
+================================================================================
+END OF REPORT
+================================================================================

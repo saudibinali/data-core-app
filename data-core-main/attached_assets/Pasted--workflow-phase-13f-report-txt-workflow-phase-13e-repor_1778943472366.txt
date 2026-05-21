@@ -1,0 +1,478 @@
+راجع:
+- workflow-phase-13f-report.txt
+- workflow-phase-13e-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- subscription-renewal-intelligence.ts
+- tenant-usage-intelligence.ts
+- tenant-entitlements.ts
+- subscription-lifecycle.ts
+- workspace-lifecycle.ts
+- tenant-registry.ts
+- tenants.ts routes
+- super-admin-tenants.tsx
+- renewal-intelligence-config.ts
+- platform-usage-config.ts
+- platform-entitlements-config.ts
+- tenant-registry-hooks.ts
+- activity_logs audit/log pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-G — Tenant Health, Risk Signals & Operational Monitoring
+
+ولا تنفّذ:
+- payment provider integration
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic workspace locking
+- entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing portal
+- background suspension jobs
+- HR module implementation
+- destructive tenant actions
+
+عنوان المهمة:
+WORKFLOW PHASE 13-G — Tenant Health, Risk Signals & Operational Monitoring
+
+المهمة الحالية:
+تجميع إشارات الاشتراك، التجديد، الاستخدام، الصلاحيات، والحالة التشغيلية في طبقة Tenant Health موحدة.
+
+الهدف:
+تمكين السوبر أدمن من رؤية:
+- overall tenant health
+- risk level
+- renewal risk
+- usage/capacity risk
+- lifecycle risk
+- entitlement override risk
+- operational warnings
+- recommended internal action
+- health trend readiness
+
+بطريقة:
+read-only tenant health intelligence foundation
+بدون أي enforcement أو billing أو actions تلقائية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT INTELLIGENCE LAYERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع الطبقات الحالية:
+- TenantRiskSignalSummary من P13-A/F
+- WorkspaceLifecycleState من P13-B
+- SubscriptionStatus و SubscriptionRenewalProfile من P13-C/F
+- EntitlementProfile من P13-D
+- TenantUsageProfile من P13-E
+- Tenant Registry table
+- Tenant Detail panels
+
+حدّد:
+- كيف riskLevel يُحسب الآن
+- كيف renewalUrgency يدخل في risk
+- كيف capacityRiskLevel يدخل في risk
+- كيف workspace status يؤثر على risk
+- أين توجد gaps في operational health
+- كيف نجمعها بدون تكرار أو تناقض
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — TENANT HEALTH MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+tenant-health-intelligence.ts
+
+TenantHealthStatus:
+- healthy
+- attention
+- degraded
+- restricted
+- suspended
+- archived
+- unknown
+
+TenantHealthRiskLevel:
+- none
+- low
+- medium
+- high
+- critical
+- unknown
+
+TenantHealthSignalCode:
+- workspace_active
+- workspace_suspended
+- workspace_locked
+- workspace_archived
+- subscription_unknown
+- subscription_active
+- renewal_attention
+- renewal_high_risk
+- grace_expired
+- usage_normal
+- usage_approaching_limit
+- usage_exceeded_limit
+- usage_unknown
+- entitlement_overrides_present
+- custom_plan
+- operational_data_missing
+- governance_warning_present
+- lifecycle_manual_review_required
+
+RecommendedTenantHealthAction:
+- none
+- monitor
+- review_subscription
+- review_usage
+- review_entitlements
+- review_lifecycle
+- contact_customer
+- prepare_restriction_review
+- manual_review_required
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — HEALTH DERIVATION LIB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Exports:
+- deriveTenantHealthSignals(input)
+- deriveTenantHealthRiskLevel(signals, input)
+- deriveTenantHealthStatus(input, riskLevel)
+- deriveRecommendedTenantHealthAction(signals, riskLevel)
+- deriveTenantHealthProfile(input)
+- buildTenantHealthWarnings(profile)
+- buildTenantHealthSummary(profile)
+
+TenantHealthInput:
+- tenantProfile
+- lifecycleState
+- subscriptionStatus
+- renewalProfile
+- usageProfile
+- entitlementProfile
+- governanceRiskSummary optional
+
+TenantHealthProfile:
+- tenantId
+- workspaceId
+- healthStatus
+- riskLevel
+- signals[]
+- recommendedAction
+- warnings[]
+- summary
+- components:
+  - lifecycle
+  - subscription
+  - renewal
+  - usage
+  - entitlements
+  - governance
+- derivedAt
+
+Rules:
+- suspended workspace → healthStatus suspended, risk high
+- archived workspace → healthStatus archived, risk critical أو high حسب الموجود
+- grace_expired → critical
+- usage_exceeded_limit → high/critical حسب metric
+- renewal_high_risk → high
+- unknown critical data → unknown/attention
+- custom overrides → low/medium حسب العدد
+- no issues → healthy/none
+
+مهم:
+لا تخفض riskLevel إذا أي layer أعلى.
+risk only escalates.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+GET /platform/tenants/:tenantId/health
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- load tenant profile
+- load subscription
+- derive renewal profile
+- derive entitlement profile
+- derive usage profile
+- derive tenant health profile
+- return:
+  - healthProfile
+  - componentSummaries
+  - warnings
+  - safetyNotice
+
+مهم:
+- read-only
+- no mutation
+- no enforcement
+- no billing
+- no suspension
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث PlatformTenantProfile / TenantRiskSignalSummary لإضافة:
+- healthStatus
+- healthRiskLevel
+- healthRecommendedAction
+- healthWarningCount
+- operationalWarningCount
+
+في Tenant Registry table:
+اعرض:
+- health status
+- health risk
+- recommended action
+- warning count
+
+مع الحفاظ على:
+- deterministic ordering
+- no auto action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- TENANT_HEALTH_STATUS_CONFIG
+- TENANT_HEALTH_RISK_CONFIG
+- TENANT_HEALTH_SIGNAL_CONFIG
+- TENANT_HEALTH_ACTION_CONFIG
+- TENANT_HEALTH_SAFETY_CONTRACT
+
+Safety contract:
+- superAdminOnly
+- readOnly
+- noPaymentProcessing
+- noInvoiceGeneration
+- noChargeCollection
+- noAutoWorkspaceSuspension
+- noWorkspaceLocking
+- noEntitlementEnforcement
+- noEmailOrLegalNotices
+- recommendationsOnly
+- noDestructiveTenantActions
+- failsClosedOnMissingData
+
+كلها true.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND HOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantHealth(tenantId)
+
+GET hook فقط.
+
+مع:
+- loading/error/empty states
+- no mutation
+- staleTime مناسب
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Tenant Health & Operational Monitoring
+
+يعرض:
+- health status badge
+- risk level badge
+- recommended action badge
+- warning count
+- component health cards:
+  - Lifecycle
+  - Subscription
+  - Renewal
+  - Usage
+  - Entitlements
+  - Governance
+- signal badges
+- warnings panel
+- summary text
+- safety notice
+
+في Tenant Registry table:
+اعرض مختصر:
+- health status
+- health risk
+- recommended action
+- warning count
+
+مهم:
+- read-only
+- لا أزرار enforce
+- لا suspend/lock buttons داخل health panel
+- لا payment/billing wording
+- لا legal/email wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured log:
+- tenant_health_profile_read
+
+Fields:
+- actorId
+- tenantId
+- workspaceId
+- healthStatus
+- riskLevel
+- recommendedAction
+- warningCount
+- signalCount
+
+بدون بيانات حساسة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tenant Health MUST:
+- remain super-admin only
+- remain read-only
+- never process payments
+- never generate invoices
+- never charge customers
+- never auto-suspend workspace
+- never auto-lock workspace
+- never enforce entitlements
+- never send email/legal notices
+- never perform destructive tenant actions
+- recommendations only
+- fail closed on missing/invalid data
+
+أي:
+operational visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+tenant health config stable
+
+T2:
+health signal config stable
+
+T3:
+healthy tenant derivation
+
+T4:
+suspended workspace derivation
+
+T5:
+archived workspace derivation
+
+T6:
+grace expired critical derivation
+
+T7:
+usage exceeded derivation
+
+T8:
+renewal high risk derivation
+
+T9:
+entitlement overrides signal
+
+T10:
+missing operational data signal
+
+T11:
+risk escalation never decreases
+
+T12:
+recommended action derivation stable
+
+T13:
+health warnings stable
+
+T14:
+health API super-admin only
+
+T15:
+health API read-only no mutation
+
+T16:
+tenant registry reflects health summary
+
+T17:
+frontend health hook read-only
+
+T18:
+health panel renders major states
+
+T19:
+no payment/invoice/charge/suspend/lock/legal/email/enforcement wording exists
+
+T20:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- payment provider
+- invoice generation
+- charge collection
+- tax
+- automatic suspension
+- automatic workspace lock
+- entitlement enforcement
+- module access enforcement
+- email notifications
+- legal notices
+- background health jobs
+- customer billing portal
+- tenant self-service actions
+- HR module logic
+- destructive tenant actions
+
+خلك:
+read-only tenant health intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13g-report.txt
+
+ويحتوي:
+- tenant health model
+- health derivation library
+- backend API surface
+- tenant registry health summary updates
+- frontend tenant health UI
+- observability behavior
+- safety guarantees
+- tests results
+- remaining operational monitoring gaps
+- readiness assessment قبل Tenant Administration Console Consolidation

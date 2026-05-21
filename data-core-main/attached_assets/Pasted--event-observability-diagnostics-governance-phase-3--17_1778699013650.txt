@@ -1,0 +1,249 @@
+راجع جميع التقارير السابقة بالكامل:
+- event observability
+- diagnostics
+- governance
+- phase 3
+- phase 4 A/B/C/D/E
+
+ثم نفّذ فقط:
+PLATFORM HARDENING & GOVERNANCE EXPANSION REVIEW
+
+بدون implementation فعلي حاليًا.
+
+عنوان المهمة:
+WORKFLOW PLATFORM HARDENING — Governance Expansion & Production Readiness Review
+
+المهمة الحالية:
+تحليل ما ينقص المنصة قبل:
+- production-scale rollout
+- enterprise onboarding
+- customer workflow builder exposure
+- large tenant adoption
+
+الهدف:
+تحديد:
+- أخطر gaps المتبقية
+- governance weaknesses
+- operational risks
+- scaling boundaries
+- customer-chaos scenarios
+
+بعد اكتمال:
+runtime engine foundations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — راجع المحرك الحالي بالكامل
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workflow runtime
+- executor lifecycle
+- approvals
+- cancellation
+- TTL
+- guarded transitions
+- diagnostics APIs
+- observability
+- activity linkage
+- notification linkage
+- workflow persistence
+- event tracing
+
+ثم حدّد:
+ما أصبح production-grade
+وما يزال immature.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — حلّل أخطر المخاطر المتبقية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ابحث عن:
+- missing workflow versioning
+- missing immutable publish snapshots
+- workflow mutation risks
+- missing rollback strategy
+- missing workflow simulation
+- missing dry-run execution
+- missing dependency graph validation
+- missing schema evolution strategy
+- tenant abuse vectors
+- runaway tenant automations
+- event fanout explosion
+- notification amplification
+- missing quotas
+- missing archival strategy
+- large execution history scaling
+- JSONB growth risks
+- missing retention policies
+- approval impersonation risks
+- missing audit integrity guarantees
+- missing actor attribution boundaries
+- missing environment separation (draft/staging/prod)
+- unsafe customer experimentation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — WORKFLOW VERSIONING REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل وصمّم:
+- immutable workflow snapshots
+- publish versions
+- rollback
+- active version pointers
+- historical execution compatibility
+- execution-to-version linkage
+- schema evolution safety
+- migration compatibility
+
+المطلوب:
+Design only.
+لا تنفذ جداول جديدة الآن.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — VALIDATION ENGINE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف يجب أن تعمل:
+- pre-publish validation
+- dependency validation
+- circular dependency detection
+- impossible path detection
+- invalid assignee detection
+- unsafe notification fanout detection
+- quota validation
+- recursion chain analysis
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SIMULATION / DRY-RUN REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف العميل يجب أن:
+- يختبر workflow
+- يجرب conditions
+- يشوف routing preview
+- يفهم branching
+- يكتشف الأخطاء
+
+بدون:
+تشغيل فعلي على production data.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — TENANT GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- tenant quotas
+- per-tenant execution budgets
+- noisy tenant protection
+- fanout limits
+- notification quotas
+- execution history quotas
+- storage growth protection
+- SSE abuse protection
+- automation abuse scenarios
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — AUDIT & COMPLIANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- approval audit integrity
+- actor attribution guarantees
+- immutable audit requirements
+- tamper evidence
+- retention requirements
+- admin override auditability
+- cancellation auditability
+- timeout auditability
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — DATA LIFECYCLE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- execution archival
+- old event archival
+- notification retention
+- audit retention
+- JSONB payload growth
+- partitioning needs مستقبلًا
+- reporting impact
+- cold storage strategy
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — ENVIRONMENT GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+هل المنصة مستقبلًا تحتاج:
+- draft environment
+- staging workflows
+- production publish gates
+- approval-to-publish
+- test workspace execution
+- feature flags
+- tenant-safe experimentation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — OPERATIONAL GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- operational dashboards
+- tenant health scoring
+- workflow error rates
+- stuck execution monitoring
+- execution anomaly detection
+- automation storm detection
+- approval bottleneck visibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تدخل:
+- Kubernetes scaling
+- microservices
+- distributed orchestration mesh
+- Kafka redesign
+- Temporal migration
+- multi-region replication
+
+خلك:
+pragmatic enterprise architecture.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — IMPLEMENTATION ROADMAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم المستقبل إلى مراحل واضحة:
+- governance maturity
+- versioning
+- validation engine
+- simulation
+- operational tooling
+- scaling hardening
+- compliance hardening
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-platform-hardening-review.txt
+
+ويحتوي:
+- production readiness analysis
+- remaining catastrophic risks
+- governance maturity gaps
+- versioning architecture proposal
+- validation/simulation architecture
+- tenant governance strategy
+- audit/compliance strategy
+- data lifecycle strategy
+- operational governance strategy
+- phased roadmap
+- recommendation النهائية قبل enterprise rollout

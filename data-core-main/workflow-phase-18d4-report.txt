@@ -1,0 +1,157 @@
+================================================================================
+WORKFLOW PHASE 18D4 — CANONICAL LEAVE CONTROLLED PRODUCTION CUTOVER
+================================================================================
+Report file: workflow-phase-18d4-report.txt
+Date: 2026-05-19
+Status: COMPLETE
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-D4 implemented pilot-scoped leave cutover: legacy+canonical overlap protection,
+approval safety fixes, feature-flag wiring with LEAVE_CUTOVER_PILOT_WORKSPACE_ID,
+legacy freeze (410) on pilot only, migration/reconciliation scripts, UI cutover
+for pilot via /hr/leave-cutover/status, monitoring metrics endpoint, and
+production safety tests. No dual-write, no legacy removal, no global freeze.
+
+================================================================================
+FILES MODIFIED / CREATED
+================================================================================
+Backend:
+  artifacts/api-server/src/lib/leave-cutover-flags.ts       (pilot scoping)
+  artifacts/api-server/src/lib/leave-cutover-freeze.ts      (410 wiring)
+  artifacts/api-server/src/lib/leave-overlap.ts             (NEW)
+  artifacts/api-server/src/lib/leave-cutover-metrics.ts     (NEW)
+  artifacts/api-server/src/routes/leave.ts                  (overlap, approver, status)
+  artifacts/api-server/src/routes/hr.ts                       (freeze guards)
+
+Frontend:
+  artifacts/ops-platform/src/lib/leave-cutover-flags.ts     (useLeaveCutover)
+  artifacts/ops-platform/src/pages/hr-me-leave.tsx            (canonical submit pilot)
+  artifacts/ops-platform/src/pages/hr-attendance.tsx          (canonical approve pilot)
+
+Scripts:
+  scripts/migrate-leave-pilot.cjs                           (NEW)
+  scripts/reconcile-leave-pilot.cjs                         (NEW)
+
+Tests:
+  artifacts/api-server/src/lib/__tests__/leave-overlap.test.ts
+  artifacts/api-server/src/lib/__tests__/leave-cutover-flags.test.ts (updated)
+  artifacts/api-server/src/routes/__tests__/leave-pilot-production.test.ts (NEW)
+
+Documentation:
+  p18-d4-pilot-rollout-report.md
+  workflow-phase-18d4-report.txt
+
+================================================================================
+PILOT ROLLOUT STATUS
+================================================================================
+Pilot selection: LEAVE_CUTOVER_PILOT_WORKSPACE_ID (single workspace)
+Non-pilot workspaces: D2/D3 bridge mode unchanged
+UI/API effective flags: per-workspace via leaveCutoverStatusForWorkspace()
+
+================================================================================
+FREEZE STATUS
+================================================================================
+POST /hr/me/leave-requests              → 410 when pilot + LEGACY_LEAVE_FREEZE
+POST /hr/employees/:id/leaves           → 410 when pilot + freeze
+PATCH /hr/employees/:id/leaves/:lid     → 410 when pilot + freeze
+PATCH /hr/attendance/leaves/:id         → 410 when pilot + freeze
+GET legacy list endpoints               → unchanged (read)
+
+================================================================================
+CANONICAL SUBMIT STATUS
+================================================================================
+POST /hr/leave-requests:
+  - Overlap checks leave_requests + hr_employee_leaves (active statuses)
+  - Always creates approval step when requiresApproval
+  - Approver fallback when manager missing
+  - Transaction-safe balance reservation
+
+================================================================================
+CANONICAL APPROVAL STATUS
+================================================================================
+PATCH approve/reject:
+  - hr.manage users can approve (canActAsLeaveApprover)
+  - Repairs missing approval step for admin/hr.manage
+  - Pilot UI wires canonical approve when canonicalApprove flag on
+
+================================================================================
+MIGRATION EXECUTION RESULTS
+================================================================================
+Script provided: migrate-leave-pilot.cjs (dry-run + execute)
+Reconciliation: reconcile-leave-pilot.cjs
+Execution in CI/tests: integration tests simulate pilot; run migration against
+  production pilot WORKSPACE_ID during ops window (not auto-run in this phase).
+
+================================================================================
+RECONCILIATION RESULTS
+================================================================================
+Automated checks in reconcile-leave-pilot.cjs:
+  - duplicate request_number
+  - orphan pending_approval without steps
+  - cross-workspace migration prefix leakage
+  - legacy recent insert note
+
+================================================================================
+MONITORING STATUS
+================================================================================
+GET /hr/leave-cutover/metrics (hr.manage):
+  - canonical_submit_total / conflict
+  - canonical_approve_total / reject_total
+  - legacy_submit_blocked_410 / legacy_patch_blocked_410
+  - overlap_legacy_hit / overlap_canonical_hit
+
+================================================================================
+ROLLBACK READINESS
+================================================================================
+GO — unset env flags + redeploy; legacy tables/APIs intact; optional delete
+LRQ-MIG-% rows with approval only.
+
+Rollback SLA: < 15 minutes (documented in p18-d4-pilot-rollout-report.md)
+
+================================================================================
+SMOKE / SAFETY TEST RESULTS
+================================================================================
+leave-pilot-production.test.ts:  6/6 PASS
+leave-overlap.test.ts:           2/2 PASS
+leave-cutover-flags.test.ts:     4/4 PASS
+leave-cutover.safety.test.ts:    6/6 PASS
+
+================================================================================
+READINESS VERDICT (GO / PARTIAL / BLOCKED)
+================================================================================
+pilot canonical submit:       GO (with env + pilot id)
+pilot canonical approvals:    GO (with env + pilot id)
+pilot freeze:                 GO (with env + pilot id)
+pilot migration:              PARTIAL (scripts ready; ops must run on pilot WS)
+multi-workspace rollout:      BLOCKED (P18-E)
+full production cutover:      BLOCKED
+
+================================================================================
+REMAINING BLOCKERS
+================================================================================
+1. Ops must assign real LEAVE_CUTOVER_PILOT_WORKSPACE_ID in production
+2. Run migration + reconciliation on pilot before announcing to users
+3. Balance reconciliation may need manual HR review post-migration
+4. Other workspaces still on legacy submit until P18-E
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P18-E — Multi-Workspace Canonical Rollout & Legacy Decommission Planning
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No dual-write implemented
+[x] No legacy tables removed
+[x] No destructive migration (no legacy DELETE)
+[x] No global freeze (pilot-scoped only)
+[x] No payroll / attendance redesign
+[x] No hr.ts split/refactor
+[x] P18-E not started
+
+================================================================================
+END OF workflow-phase-18d4-report.txt
+================================================================================

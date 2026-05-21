@@ -1,0 +1,1083 @@
+WORKFLOW GOVERNANCE & RUNTIME SAFETY — Architecture Review
+===========================================================
+Date:     2026-05-13
+Scope:    Analysis only — no implementation changes.
+Reviewed: engine.ts, executor.ts, conditions.ts, types.ts, stepstypes.ts,
+          steps/{approval,assignment,condition,notification,status-update,task}.ts,
+          dispatcher.ts, bridge.ts, index.ts, schema/workflows.ts,
+          event-observability-phase-0-1-report.txt,
+          event-diagnostics-phase-2-report.txt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The No-Code Workflow Platform is technically functional for simple, non-recursive
+workflows.  However it has ELEVEN architectural gaps that represent real risk in
+a multi-tenant production environment:
+
+CATASTROPHIC (must fix before enabling customer-facing workflow configuration):
+  WG-01  Recursive event loop — no protection whatsoever
+  WG-02  Approval step never resumes — executions permanently stuck
+  WG-03  Condition step branching is a no-op — routing logic silently ignored
+  WG-04  Delay step is a no-op — executes instantly, misleads users
+
+HIGH (significant operational risk):
+  WG-05  No workflow definition versioning — live edits corrupt running executions
+  WG-06  No draft/publish lifecycle — every save immediately affects live traffic
+  WG-07  No execution TTL — stuck executions accumulate forever
+  WG-08  Notification fanout unbounded — role-targeted notifications flood at scale
+  WG-09  No per-tenant execution limits — one tenant can starve all others
+
+MEDIUM (design debt, safe to defer but must be tracked):
+  WG-10  No schema validation before publish — malformed steps cause runtime panics
+  WG-11  Approval step creates notifications but no approval record — unmatchable
+  WG-12  Assignment "round_robin" type declared but not implemented
+  WG-13  Approval timeout/escalation config present but never enforced
+  WG-14  triggerEventLogId has no FK constraint — orphaned references possible
+  WG-15  Step context is mutable and untyped — step N can pollute step N+1
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — CURRENT SYSTEM REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  Trigger Model
+──────────────────
+Engine registers a wildcard ("*") listener on eventDispatcher.
+On every dispatched event:
+  1. Queries workflow_definitions WHERE workspace_id=? AND trigger_event=? AND is_active=true
+  2. For "form.submitted": also matches via workflowEventHint (Tier 2)
+  3. Evaluates top-level ConditionGroup — skips if conditions not met
+  4. INSERT INTO workflow_executions (status="pending", trigger_event_log_id=logId)
+  5. Fire-and-forget: void executeWorkflow(id, steps, ctx).catch(...)
+
+Trigger is synchronous in matching but asynchronous in execution.
+No deduplication: same event hitting same trigger = N executions (N = matching defs).
+
+1.2  Execution Model
+────────────────────
+executeWorkflow() is a simple for-loop over steps[]:
+  for i in 0..steps.length:
+    INSERT step_log (status="running")
+    result = executeStep(step, ctx, executionId)
+    UPDATE step_log (status=result.success ? "completed" : "failed")
+    UPDATE executions (currentStepIndex=i)
+    if !result.success → UPDATE executions (status="failed") → return
+    if result.waitForApproval → UPDATE executions (status="waiting_approval") → return
+    ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+  UPDATE executions (status="completed")
+
+No parallelism, no retry, no resume, no cancellation, no timeout.
+Mutable ctx.resolvedData shared across all steps in a single execution.
+
+1.3  Step Types
+───────────────
+notification:   Inserts rows into notifications table; SSE not triggered
+                (workflow notifications bypass the bus/SSE pipeline entirely).
+approval:       Inserts notifications to approvers; returns waitForApproval=true.
+                NO approval record created in the approvals table.
+                NO resume mechanism exists.
+task:           Inserts into workflow_tasks; task completion does NOT resume execution.
+condition:      Evaluates conditions, returns nextSteps in output.
+                executeWorkflow IGNORES nextSteps — loop continues to i+1 regardless.
+status_update:  Updates ticket/approval/workflow_task status by field path in context.
+                This can trigger domain events (ticket.status_changed) → WG-01 risk.
+assignment:     Updates ticket assignee. "round_robin" declared in type, not implemented.
+delay:          Returns immediately. No actual delay.
+
+1.4  State Machine
+──────────────────
+Current execution statuses: pending → running → completed | failed | waiting_approval
+No transitions out of waiting_approval.
+No transitions for: timed_out, cancelled, suspended, retrying.
+
+1.5  Persistence Model
+──────────────────────
+workflow_definitions:   JSONB steps + conditions, single active version, no history.
+workflow_executions:    FK to definition (CASCADE DELETE — deleting definition loses history).
+                        triggerEventLogId: integer with no FK constraint.
+workflow_execution_steps: FK to execution (CASCADE DELETE).
+workflow_tasks:           FK to execution (CASCADE DELETE).
+
+No snapshot of the definition at execution time.
+Deleting a workflow definition cascades and deletes all execution history.
+
+1.6  Event Integration
+──────────────────────
+appEventBus.emit() → bridge → dispatcher → WorkflowEngine ("*" listener)
+Bridge is one-way (bus→dispatcher). This prevents DIRECT circular wiring.
+However, application-level loops are possible:
+  WorkflowEngine → step_executor → status_update → route code → appEventBus.emit() → bridge → WorkflowEngine
+The "no-loop guarantee" in bridge.ts comments applies to infrastructure wiring only,
+NOT to application-level event chains through business logic.
+
+1.7  Multi-Tenant Model
+───────────────────────
+WorkflowEngine queries by workspaceId on every event — correct isolation.
+Executions are workspace-scoped.
+But: no per-tenant limits, throttling, or circuit breakers.
+A tenant with a looping workflow consumes resources for all tenants.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — RISKS INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── WG-01: CATASTROPHIC — Recursive Event Loop ────────────────────────────────
+
+Scenario A (status_update):
+  1. Event "ticket.created" fires.
+  2. Workflow W1 runs step: status_update { entity: "ticket", newStatus: "in_review" }.
+  3. status_update calls db.update(ticketsTable...) — but IF the ticket route also
+     emits "ticket.status_changed" in response (it does), then:
+  4. "ticket.status_changed" fires.
+  5. Workflow W2 (trigger: "ticket.status_changed") runs → status_update again → loop.
+
+Scenario B (notification storm):
+  1. Event "ticket.created" → W1 → notification step to all managers.
+  2. Notification triggers "notification.created" if such an event exists.
+  3. If a workflow listens to "notification.created" → recursive fan.
+
+Scenario C (condition step self-trigger):
+  1. Workflow W1 triggered by "leave.requested".
+  2. Step: status_update "leave" → triggers "leave.status_changed" (hypothetical).
+  3. Workflow W2 on "leave.status_changed" → another status_update → loop.
+
+Current protection: NONE.
+No recursion counter. No execution depth tracking. No loop detection.
+No circuit breaker. No execution rate limit per workspace.
+
+Severity: Server crash or database exhaustion within minutes of a looping config.
+
+── WG-02: CATASTROPHIC — Approval Step Never Resumes ────────────────────────
+
+executeApprovalStep() returns { waitForApproval: true }.
+executeWorkflow() sees waitForApproval → sets status="waiting_approval" → returns.
+There is no mechanism to resume execution from waiting_approval.
+
+The approval routes (routes/approvals.ts) update approval records in the database
+but do NOT look up waiting workflow executions to resume them.
+
+Result:
+  - Every workflow with an approval step is permanently stuck after the approval step.
+  - Subsequent steps (notifications, assignments, status updates) NEVER run.
+  - workflow_executions.status = "waiting_approval" forever.
+  - No user feedback that automation stopped.
+
+This makes the approval step effectively decorative — it sends notifications
+but the workflow never continues.
+
+── WG-03: CATASTROPHIC — Condition Step Branching Ignored ───────────────────
+
+executeConditionStep() returns:
+  { success: true, output: { conditionResult: bool, nextSteps: [indices...] } }
+
+executeWorkflow() at the call site:
+  result = await executeStep(step, ctx, executionId)
+  ...
+  if (result.output) ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+  // NEXT ITERATION: i++ — next step in sequence regardless of nextSteps
+
+nextSteps is written to ctx.resolvedData but executeWorkflow NEVER reads it.
+The loop always proceeds to steps[i+1].
+
+Result:
+  - Condition branches are completely ignored.
+  - "If approved → do X, else → do Y" workflows always execute the next step, period.
+  - No error is thrown — the bug is silent.
+
+── WG-04: CATASTROPHIC — Delay Step Is a No-Op ──────────────────────────────
+
+case "delay":
+  return { success: true, output: { delayMinutes: step.config.delayMinutes } };
+
+The delay value is recorded in output but no waiting occurs.
+Execution continues immediately to the next step.
+
+Result:
+  - Users configure "wait 24 hours then send reminder" — reminder sends instantly.
+  - No error — the step succeeds.
+  - Completely misleading UX.
+
+── WG-05: HIGH — No Workflow Versioning ─────────────────────────────────────
+
+workflow_definitions.steps is a mutable JSONB column.
+When an admin edits steps, the change takes effect immediately.
+Existing running executions load step definitions from the context JSONB snapshot
+(saved at execution start), NOT from the live definition.
+
+Wait — actually, executor.ts receives `steps` as a parameter passed from engine.ts:
+  executeWorkflow(execution.id, steps, ctx)
+where steps = def.steps (loaded at trigger time).
+So steps ARE snapshot-ed at trigger time in memory.
+
+BUT:
+  - The execution record itself does NOT store the step definitions.
+  - If execution resumes (when approval resumes are eventually implemented), it
+    must re-read the definition, which may have changed.
+  - Approval step resumes (future): "resume execution from step i" requires knowing
+    what steps[i+1] is — but the definition may have changed between trigger and resume.
+
+Long-term risk: once approval resume is implemented, version drift between trigger
+time and resume time will cause silent execution of wrong steps.
+
+Immediate risk: admin edits a workflow while 3 executions are "waiting_approval".
+When resume is implemented, they will execute the new step configuration.
+
+── WG-06: HIGH — No Draft/Publish Lifecycle ─────────────────────────────────
+
+isActive boolean is the only lifecycle gate.
+Workflow goes directly from "being edited" to "active in production" with a single
+PATCH /workflows/:id.
+
+Missing states:
+  draft         — being configured, not yet live
+  validating    — schema check in progress
+  published     — live, immutable
+  deprecated    — disabled for new triggers but existing executions complete
+  archived      — no new triggers, history preserved
+
+Current risk:
+  - An admin saves an incomplete workflow (missing approver config) → it's live
+    immediately → first event triggers it → approval step has no approvers →
+    execution silently skips ("skipped: no_approvers") → no one knows.
+  - No validation gate before activation.
+
+── WG-07: HIGH — No Execution TTL ───────────────────────────────────────────
+
+workflow_executions in "waiting_approval" status have no expiry.
+ApprovalStep config has timeoutHours and onTimeout fields — these are TYPE
+DEFINITIONS ONLY. There is no scheduler, cron, or background job that enforces them.
+
+The timeout configuration is completely decorative.
+
+Stuck execution accumulation:
+  - 100 leave requests with approval steps → 100 waiting_approval executions.
+  - None ever close without a manual DB update.
+  - Over months: thousands of stuck executions bloat the DB and confuse admins.
+
+── WG-08: HIGH — Notification Fanout Unbounded ──────────────────────────────
+
+executeNotificationStep with recipientType="role":
+  SELECT id FROM users WHERE workspace_id=? AND role=? AND status='active'
+  → INSERT notifications for ALL matching users.
+
+If a workspace has 500 "member" users and a workflow sends "notify all members":
+  → 500 notification rows inserted per execution.
+  → If the trigger event is "ticket.created" and 20 tickets are created in a burst:
+    → 10,000 notification rows in seconds.
+  → No SSE push happens (workflow notifications bypass the bus).
+  → But database write pressure is real.
+
+No cap. No batch. No rate limit.
+
+── WG-09: HIGH — No Per-Tenant Execution Limits ─────────────────────────────
+
+One workspace can configure a workflow on "ticket.created".
+If that workspace creates 1,000 tickets in bulk import:
+  → 1,000 concurrent workflow executions start simultaneously.
+  → Each execution runs steps synchronously but concurrently across promises.
+  → DB connection pool exhausted.
+  → Other workspaces experience timeouts.
+
+No per-tenant execution quota. No throttle. No queue depth limit.
+
+── WG-10: MEDIUM — No Schema Validation Before Publish ──────────────────────
+
+workflow_definitions.steps: jsonb — any shape accepted.
+executeStep() does: step.type switch → config fields accessed directly.
+Invalid config (e.g., status_update with missing entityIdField):
+  → data[config.entityIdField] = data[undefined] = data["undefined"] = undefined
+  → typeof entityId !== "number" → { success: false, error: "No entity ID found at field 'undefined'" }
+  → Execution fails, but no admin warning during configuration.
+
+Worse: notification step with recipientType="department" (not implemented):
+  → recipientIds = [] → { skipped: true, reason: "no_recipients" }
+  → Step "succeeds" silently.
+
+── WG-11: MEDIUM — Approval Step Has No Resume Bridge ───────────────────────
+
+(Related to WG-02 but a distinct design gap.)
+
+When approval.created/approved/rejected events fire (routes/approvals.ts),
+they update the approvals table and emit approval events.
+But they do NOT:
+  - Look for workflow_executions with status="waiting_approval"
+  - Match executions to the approval
+  - Resume the workflow from the paused step
+
+There is no mapping table between: workflow_execution ↔ approval_record.
+ApprovalStep creates notifications but not an approvals row — so even if
+a resume mechanism existed, it couldn't find which execution to resume.
+
+── WG-12: MEDIUM — round_robin Assignment Not Implemented ───────────────────
+
+AssignmentStep type declares: assigneeType: "role" | "specific" | "round_robin"
+executeAssignmentStep handles: "specific" and "role".
+"round_robin" falls through to null → returns { skipped: "no_assignee_resolved" }.
+
+A workspace admin selecting "round_robin" gets silent skips.
+No error, no warning, no documentation.
+
+── WG-13: MEDIUM — Approval Timeout Config Is Decorative ────────────────────
+
+ApprovalStep.config:
+  timeoutHours?: number
+  onTimeout?: "auto_approve" | "auto_reject" | "escalate"
+
+These fields exist in the type definition and can be stored in the DB.
+executeApprovalStep IGNORES them — no timeout is ever set or enforced.
+
+The config is stored, retrieved, and silently ignored.
+Admins configuring "auto-reject after 48 hours" get no auto-rejection.
+
+── WG-14: MEDIUM — triggerEventLogId Has No FK Constraint ───────────────────
+
+workflow_executions.trigger_event_log_id: integer (no FK to workspace_event_logs)
+workspace_event_logs uses CASCADE DELETE from workspaces.
+
+Risk: if a workspace is deleted, workspace_event_logs rows are deleted,
+but workflow_executions.trigger_event_log_id references their IDs.
+The orphaned integer values never cause a DB error, but the diagnostics APIs
+(GET /workflows/executions/:id) will show null event names for deleted events.
+
+Mitigation design: add FK with ON DELETE SET NULL, or document this as acceptable.
+
+── WG-15: MEDIUM — Mutable Untyped Context Pollution ────────────────────────
+
+ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+
+Step outputs are merged into a flat Record<string, unknown> shared across steps.
+Risks:
+  - Step N outputs { status: "skipped" } → step N+2 reads ctx.resolvedData.status
+    and makes decisions based on a stale "skipped" value.
+  - Notification step outputs { notified: 3, recipientIds: [1,2,3] } — these become
+    available as condition fields in subsequent steps, unintentionally.
+  - No namespacing, no schema, no isolation between step outputs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — RUNTIME SAFETY ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What currently exists:
+  ✅ Workspace isolation — workspaceId filter on all DB queries
+  ✅ Error catch per step — step failure halts execution but doesn't crash server
+  ✅ Promise.allSettled in dispatcher — listener failure doesn't stop other listeners
+  ✅ Bridge error isolation — bridge failures don't propagate to bus emitters
+  ✅ Idempotency guard on appEventBus — duplicate events per idempotencyKey rejected
+  ✅ isActive gate — disabled workflows don't trigger
+  ✅ Top-level condition evaluation — irrelevant events skipped efficiently
+  ✅ void + catch on executeWorkflow — engine errors don't crash the event loop
+
+What is MISSING:
+  ❌ Recursion detection (no depth counter, no causation chain, no stack)
+  ❌ Execution rate limit per workspace (no throttle, no queue, no concurrency cap)
+  ❌ Execution TTL (no timeout, no stuck detection, no auto-cancel)
+  ❌ Workflow cancellation (no mechanism to stop a running execution)
+  ❌ Resume mechanism (no way to continue from waiting_approval)
+  ❌ Step retry (single attempt only — one failure = full execution failure)
+  ❌ Condition step routing (WG-03 — no actual branching)
+  ❌ Delay step (WG-04 — immediate completion)
+  ❌ Approval timeout enforcement (WG-13 — config present, no enforcement)
+  ❌ Notification fanout cap (WG-08 — unbounded recipient queries)
+  ❌ Dead execution detection (nothing flags executions stuck >N hours)
+  ❌ Event loop detection (WG-01 — no causation chain tracking)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — WORKFLOW GOVERNANCE MODEL DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  Lifecycle States
+─────────────────────
+Proposed state machine for workflow_definitions:
+
+  draft → validating → validated → active → deprecated → archived
+              ↓ (fail)                       ↑ (re-activate)
+          validation_failed
+
+  draft           Created or being edited. Never triggers executions.
+  validating      Publish requested; async validation running.
+  validation_failed Validation found errors (described in validation_errors JSONB).
+  validated       Passed all static checks. Ready to activate.
+  active          Live. Receives triggers. NEW: immutable steps snapshot taken.
+  deprecated      isActive=false equivalent. Existing executions finish; no new triggers.
+  archived        Historical record only. No executions. Steps/conditions preserved.
+
+Transition rules:
+  PATCH /workflows/:id → only modifies draft | validation_failed workflows.
+  POST /workflows/:id/publish → moves draft → validating → validated/failed.
+  POST /workflows/:id/activate → moves validated → active (with snapshot).
+  POST /workflows/:id/deprecate → moves active → deprecated (gracefully).
+  Active workflows are IMMUTABLE — edits require creating a new draft version.
+
+4.2  Versioning Model
+─────────────────────
+Two-table approach (no new tables required for MVP):
+
+Option A (preferred for MVP) — Snapshot column:
+  ADD COLUMN steps_snapshot JSONB  — frozen copy of steps at activation time
+  ADD COLUMN conditions_snapshot JSONB
+  ADD COLUMN version INTEGER NOT NULL DEFAULT 1
+  ADD COLUMN parent_version_id INTEGER REFERENCES workflow_definitions(id)
+
+  Execution always reads from steps_snapshot, NOT steps.
+  steps column is editable draft. steps_snapshot is immutable production copy.
+
+Option B (full version history) — Separate versions table:
+  workflow_definition_versions (id, definition_id, version, steps, conditions, published_at)
+  More complete but overkill for Phase 3.
+
+Recommendation: Option A for Phase 3, Option B if audit requirements demand it.
+
+4.3  Activation Model
+─────────────────────
+POST /workflows/:id/activate triggers:
+  1. Run all validation checks (Section 4.6).
+  2. Copy current steps → steps_snapshot (immutable).
+  3. Set status = "active", activated_at = now().
+  4. Old active version of same workflow → status = "deprecated" (if re-activating).
+
+Executions reference steps_snapshot, not steps.
+
+4.4  Rollback Model
+───────────────────
+Each workflow_definition keeps parent_version_id.
+Rollback = POST /workflows/:id/rollback → copy parent's steps_snapshot → re-validate → activate.
+Old executions tied to old version remain in history.
+New executions use rolled-back snapshot.
+
+4.5  Permission Model
+─────────────────────
+workflow.view          — can see definitions and executions (existing)
+workflow.manage        — can create/edit/delete draft workflows (existing)
+workflow.publish       — can publish and activate workflows (NEW — separate from manage)
+workflow.cancel        — can cancel running executions (NEW)
+workflow.admin         — full control including deprecation and rollback (NEW)
+
+Rationale: separating manage from publish prevents an admin with limited permissions
+from accidentally pushing a broken workflow to production.
+
+4.6  Dependency Validation (static checks at publish time)
+──────────────────────────────────────────────────────────
+Each step type must pass validation before publish:
+
+notification:
+  - recipientType "specific": recipientIds non-empty, all IDs exist in workspace
+  - recipientType "role": role string is a known role in the platform
+  - recipientType "manager": validate that users likely have managers configured
+  - title and message non-empty
+
+approval:
+  - approverType "specific": approverIds non-empty, all IDs exist in workspace
+  - approverType "role": role string is a known role
+  - title non-empty
+  - timeoutHours: if set, must be > 0
+
+task:
+  - title non-empty
+  - dueDays: if set, must be > 0
+  - assigneeType "specific": assigneeId exists in workspace
+
+status_update:
+  - entity is one of the known entity types
+  - entityIdField is a non-empty string
+  - newStatus is a valid status for that entity type
+
+assignment:
+  - entity is "ticket" (currently only supported)
+  - entityIdField non-empty
+  - assigneeType "round_robin" → BLOCK until implemented
+
+condition:
+  - onTrue and onFalse arrays contain valid step indices
+  - Validate no cycles in the condition routing graph
+
+delay:
+  - BLOCK until actual delay is implemented (or document as immediate no-op)
+
+Global checks:
+  - Steps array non-empty
+  - Step names unique within workflow
+  - triggerEvent exists in platform_event_registry
+  - Condition field paths reference known payload fields for the trigger event
+  - No step type references a resource that doesn't exist
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — RUNTIME SAFETY LAYER DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Recursion Detection (WG-01 fix)
+─────────────────────────────────────
+Strategy: causation chain tracking via execution context.
+
+Design:
+  1. Add triggerChain: string[] to ExecutionContext (serialized in executions.context JSONB).
+     Chain = list of event types that led to this execution.
+     e.g., ["ticket.created", "ticket.status_changed"]
+
+  2. Before starting a new workflow execution, check:
+     if (triggerChain.includes(payload.event)) → REJECT with status="loop_rejected"
+     if (triggerChain.length >= MAX_CHAIN_DEPTH) → REJECT with status="depth_exceeded"
+
+  3. MAX_CHAIN_DEPTH = 5 (configurable per workspace, max 10 absolute).
+
+  4. When a workflow step emits a new event, the new event's context includes the
+     parent chain. This requires step executors to propagate the chain.
+
+  5. Loop rejection is logged as a structured error and visible in diagnostics.
+
+Implementation impact:
+  - engine.ts: read existing execution chain from payload._executionChain (injected
+    by step executor when a step emits an event).
+  - executor.ts: pass current chain into step config so steps that emit events
+    can inject the chain into the emitted event metadata.
+  - Steps that emit events (status_update, assignment) must be "chain-aware".
+
+Alternative (simpler): global execution counter per workspace per minute.
+  - If workspace_executions.count_last_60s > TENANT_LIMIT → reject.
+  - Simpler but less precise (misses intentional high-frequency workflows).
+
+Recommendation: implement BOTH — chain tracking (accurate) + rate limit (safety net).
+
+5.2  Execution Rate Limit (WG-09 fix)
+──────────────────────────────────────
+Per-workspace execution budget:
+  - MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100 (configurable)
+  - Check: COUNT(workflow_executions WHERE workspace_id=? AND started_at > now()-60s)
+  - If over limit: reject trigger, log as "throttled", emit platform alert.
+
+Implementation: in engine.ts, before the INSERT loop:
+  const recentCount = SELECT count FROM workflow_executions
+    WHERE workspace_id=? AND started_at > now() - interval '60 seconds'
+  if (recentCount >= limit) → log "throttled" → return without creating execution
+
+5.3  Execution TTL / Stuck Detection (WG-07 fix)
+──────────────────────────────────────────────────
+Design:
+  - ADD COLUMN ttl_expires_at TIMESTAMP to workflow_executions.
+    Set at execution start: now() + (workflow_definition.maxExecutionHours * 1 hour).
+    Default maxExecutionHours = 72 (3 days).
+
+  - Background job (or on-demand sweep from a diagnostics cron endpoint):
+    SELECT * FROM workflow_executions
+    WHERE status IN ('pending', 'running', 'waiting_approval')
+      AND ttl_expires_at < now()
+    → SET status='timed_out', error='TTL exceeded', completedAt=now()
+
+  - GET /api/workflows/executions/failed query should include status='timed_out'.
+
+  - Phase 2 diagnostics already exposes stuck executions — add ttl_expires_at
+    to the detail API response.
+
+Note: without a scheduler, TTL detection must be triggered by:
+  - A platform admin cron endpoint (POST /admin/sweep-stale-executions, super_admin)
+  - Or lazily on every execution start (sweep stale executions for this workspace)
+
+5.4  Notification Fanout Cap (WG-08 fix)
+─────────────────────────────────────────
+In executeNotificationStep:
+  if (recipientIds.length > MAX_NOTIFICATION_RECIPIENTS) {
+    recipientIds = recipientIds.slice(0, MAX_NOTIFICATION_RECIPIENTS);
+    // Log warning: truncated to MAX
+  }
+
+MAX_NOTIFICATION_RECIPIENTS = 50 (configurable workspace-level, max 200 platform-level).
+
+For large audiences (all-members notifications), the correct pattern is:
+  - Use a dedicated notification broadcast system, not workflow steps.
+  - Document this limitation in workflow UI: "Max 50 direct recipients per step."
+  - "department" recipientType: query department members with LIMIT 50.
+
+5.5  Execution Cancellation
+────────────────────────────
+No mechanism currently exists.
+
+Design:
+  - POST /api/workflows/executions/:id/cancel → SET status='cancelled', completedAt=now()
+  - "Cancelled" executions: currently-running steps finish their current DB write,
+    but the next step check reads the status and aborts:
+
+    In executeWorkflow loop, after each step:
+      const [fresh] = await db.select({ status }).from(...).where(id=executionId)
+      if (fresh.status === 'cancelled') { logger.info(...); return; }
+
+  - Cancel is a best-effort cooperative stop — does not kill async operations mid-flight.
+  - Permission: workflow.cancel role required.
+
+5.6  Approval Resume Mechanism (WG-02 fix design)
+──────────────────────────────────────────────────
+This is the most complex gap. Requires:
+
+  Step 1: Execution-Approval Bridge Table (Phase 3):
+    workflow_approval_links (
+      id, execution_id, step_index, approval_record_id,
+      expected_outcome TEXT, -- "approved" | "rejected"
+      created_at
+    )
+
+  Step 2: executeApprovalStep creates:
+    a. An approvals table record (not just notifications).
+    b. A workflow_approval_links row linking the approval to the execution.
+
+  Step 3: Approval completion hook in approvals.ts route:
+    When approval is approved/rejected:
+    - Look up workflow_approval_links WHERE approval_record_id = ?
+    - For each matching execution: resume from step_index+1 with approval outcome.
+    - Resume = call executeWorkflow(executionId, steps[step_index+1..], updatedCtx)
+
+  Step 4: Resume context:
+    ctx.resolvedData must include: { approvalOutcome: "approved" | "rejected",
+    approvedBy: userId, approvedAt: timestamp }.
+
+  This is a non-trivial Phase 3 feature. Until implemented, approval steps
+  should be BLOCKED at publish time with a clear "Approval step requires
+  Phase 3 implementation" validation error.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — EVENT SAFETY DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  Loop Prevention Strategy
+──────────────────────────────
+The bridge.ts "no-loop guarantee" covers only the infrastructure layer:
+  appEventBus ↔ eventDispatcher wiring (no circular reference).
+
+Application-level loops (WG-01):
+  Route A → appEventBus.emit("ticket.status_changed")
+           → bridge → dispatcher → WorkflowEngine
+           → executeWorkflow → status_update step → ticketsTable.update()
+  IF ticketsTable.update() triggers another route emit:
+           → appEventBus.emit("ticket.status_changed") again → loop
+
+Root cause: DB mutations by workflow steps are "side-doors" that re-enter the
+event system without carrying the parent chain context.
+
+Three-layer protection design:
+  L1: Execution chain tracking (Section 5.1) — detect loops before they run.
+  L2: Rate limiting (Section 5.2) — cap damage if L1 is bypassed.
+  L3: Step whitelist — status_update and assignment steps may ONLY be triggered
+      by events in the platform_event_registry that are NOT emitted by
+      status_update/assignment themselves. (Static validation at publish time.)
+
+6.2  Event Chain Tracing
+─────────────────────────
+Current state:
+  workspace_event_logs.payload._requestId links event → HTTP request.
+  workspace_event_logs.payload._busEventId links event → bus event UUID.
+  workflow_executions.trigger_event_log_id links execution → triggering event.
+
+Missing:
+  workflow_execution → child events (events emitted by workflow steps).
+
+Design: add _parentExecutionId to events emitted by workflow steps:
+  When a step emits an event (e.g., status_update calls route code), inject:
+    metadata.parentExecutionId = executionId (as a string)
+  This field flows into workspace_event_logs.payload._parentExecutionId.
+
+Query: "what events did workflow execution 7 produce?"
+  SELECT * FROM workspace_event_logs WHERE payload->>'_parentExecutionId' = '7'
+
+6.3  Event Fanout Limits
+─────────────────────────
+Design:
+  - MAX_WORKFLOW_TRIGGERS_PER_EVENT = 5 (per workspace per event firing).
+    If workspace has 5+ workflows matching the same trigger event, block publishing
+    of the 6th and require admin acknowledgment.
+    Rationale: each triggered execution is a separate resource consumer.
+
+  - MAX_CONCURRENT_EXECUTIONS_PER_WORKSPACE = 50.
+    Enforced at trigger time (Section 5.2 rate limit extension).
+
+6.4  Cyclic Execution Detection (graph-level)
+──────────────────────────────────────────────
+At publish/validation time, build the workspace's event dependency graph:
+
+  eventGraph = Map<triggerEvent, Set<emittedEvents>>
+
+For each workflow definition:
+  For each step in steps:
+    If step.type === "status_update" → add emittedEvent(entity, newStatus) to graph.
+    If step.type === "notification" → note potential notification.* event.
+
+Run cycle detection (DFS) on the graph:
+  If cycle detected → validation_failed with specific loop path.
+
+This is conservative static analysis. False positives possible (a status_update
+in workspace A's workflow doesn't loop even if the trigger event appears in graph).
+But it prevents the most obvious admin configuration mistakes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — VALIDATION & SIMULATION LAYER DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  Static Validation (at publish time)
+─────────────────────────────────────────
+Endpoint: POST /api/workflows/:id/validate
+Returns:  { valid: bool, errors: ValidationError[], warnings: ValidationWarning[] }
+
+Validation rules (full list in Section 4.6).
+
+Additional checks:
+  - Recursive chain: if triggerEvent is also emitted by any step, flag as WARNING.
+    (Can be intentional but usually isn't.)
+  - Missing approvers: if approval step with approverType="specific" and
+    approverIds=[5,6] but user 5 is inactive → WARNING "Approver inactive".
+  - Step count: > 20 steps → WARNING "Large workflow may be slow to execute".
+  - Condition fanout: if condition.onTrue and condition.onFalse point to same index
+    → ERROR "Condition step always takes same branch".
+
+7.2  Dry-Run Simulation
+────────────────────────
+Endpoint: POST /api/workflows/:id/simulate
+Body:     { triggerPayload: Record<string, unknown> }
+
+Returns a simulation plan (NOT actual execution):
+  {
+    workflowId, workflowName,
+    conditionResult: bool,
+    steps: [{
+      index, type, name,
+      conditionMet: bool,  -- step-level condition result against provided payload
+      willExecute: bool,
+      recipientsResolved: number | null,   -- for notification steps
+      approversResolved: number | null,    -- for approval steps
+      entityFound: bool | null,            -- for status_update/assignment
+      estimatedDurationMs: number,         -- rough estimate
+      warnings: string[]
+    }],
+    estimatedTotalDurationMs: number,
+    warnings: string[],
+    errors: string[]
+  }
+
+Implementation strategy:
+  The simulation runs the RESOLVER logic (who are recipients? who are approvers?)
+  WITHOUT executing the actual mutations (no DB writes, no notifications sent).
+  It returns resolved IDs + resolution status for admin preview.
+
+  Each step type has a separate "resolve" function (sibling of the "execute" function)
+  that returns the plan without side effects.
+
+7.3  Routing Preview
+─────────────────────
+For workflows with condition steps, simulation should include:
+  - Full branch tree: { if conditionTrue → steps [2,3,4], if conditionFalse → steps [5] }
+  - Which branch would execute for the provided triggerPayload.
+  - Dead branch detection: if a branch can never be reached given known field constraints.
+
+7.4  Impossible Branch Detection
+──────────────────────────────────
+At validation time:
+  - If condition field is required by the trigger event schema → check operator makes sense.
+  - If field type is string but operator is "gt" (numeric) → ERROR.
+  - If condition value is hardcoded and field is constant in the trigger payload
+    (e.g., checking form.type === "leave" in a "leave.requested" trigger) →
+    WARNING "Condition always evaluates to true".
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — MULTI-TENANT GOVERNANCE DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1  Workspace Isolation (current state: ✅ correct)
+──────────────────────────────────────────────────────
+workspaceId filter on all queries. Cross-workspace data access not possible.
+Workflow definitions, executions, steps, tasks all workspace-scoped. Correct.
+
+8.2  Tenant Execution Quotas
+──────────────────────────────
+Proposed limits (all configurable at the platform level by super_admin):
+
+  MAX_ACTIVE_WORKFLOWS_PER_WORKSPACE   = 20 (default)
+    Prevents configuration sprawl. Admin UI should show count prominently.
+
+  MAX_WORKFLOW_STEPS_PER_WORKFLOW      = 20 (default)
+    Deep workflows are hard to debug and slow to execute.
+
+  MAX_EXECUTIONS_PER_MINUTE            = 100 (default, Section 5.2)
+    Rate limit on new execution creation.
+
+  MAX_CONCURRENT_EXECUTIONS            = 50 (default, Section 5.2 extension)
+    Count of non-terminal executions at any moment.
+
+  MAX_NOTIFICATION_RECIPIENTS_PER_STEP = 50 (default, Section 5.4)
+
+  MAX_CHAIN_DEPTH                      = 5 (Section 5.1)
+    Max event chain depth before loop rejection.
+
+  MAX_EXECUTION_TTL_HOURS              = 72 (default, Section 5.3)
+    Applies to waiting_approval and long-running executions.
+
+Storage:
+  platform_workspace_settings table OR workspace_definitions.governance_config JSONB.
+  super_admin can override per workspace via POST /admin/workspace-governance.
+
+8.3  Noisy Tenant Protection
+──────────────────────────────
+Problem: tenant A has a looping workflow and saturates DB connections.
+Mitigation layers:
+  L1: Rate limit (executions per minute) — see 8.2.
+  L2: Circuit breaker: if workspace has > 500 failed executions in 1 hour →
+      automatically set is_active=false on ALL workspace workflows + alert super_admin.
+      (Extreme protection — very high threshold to avoid false positives.)
+  L3: DB connection per-workspace limit: deferred (requires PgBouncer or similar).
+
+8.4  Abuse Prevention
+──────────────────────
+Risk: a workspace admin creates:
+  - 20 workflows on "ticket.created"
+  - Each sends 50 notifications to all managers
+  - = 1,000 DB rows per ticket created
+
+Prevention:
+  - MAX_ACTIVE_WORKFLOWS_PER_WORKSPACE limit (8.2).
+  - Notification cap (5.4).
+  - Execution rate limit (5.2).
+  - Validation warning: "This workflow will send X notifications per trigger event".
+
+8.5  Cross-Workspace Safety
+─────────────────────────────
+WorkflowEngine already scopes to workspaceId — no cross-workspace leakage.
+Step resolvers (notification, approval, assignment) all filter by workspaceId.
+No shared state between workspaces in the engine.
+Bridge architecture is single-process — no cross-process state concerns.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — CATASTROPHIC FAILURE SCENARIOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IF governance is NOT implemented before enabling customer-facing workflow config:
+
+SCENARIO A — Event Loop Crash (WG-01)
+  Probability:  HIGH — any admin configuring status_update on a status_changed trigger.
+  Timeline:     First event fires → infinite loop starts → DB write rate spikes in seconds.
+  Impact:       DB connection pool exhausted. All workspaces 503. Server OOM or restart.
+  Recovery:     Manual DB update to set is_active=false for the offending workflow.
+                If DB is unreachable (connection pool full), restart required.
+  Mitigation:   Rate limit (5.2) buys time; recursion guard (5.1) prevents loop.
+
+SCENARIO B — Approval Step Silent Failure (WG-02)
+  Probability:  CERTAIN — every workflow with an approval step is affected.
+  Timeline:     Gradual — stuck executions accumulate over weeks/months.
+  Impact:       Admins configure "approval required before action X" workflows.
+                Action X never happens. Users wait indefinitely. No error shown.
+                Trust in the platform erodes.
+  Recovery:     Cannot recover stuck executions without the resume mechanism.
+  Mitigation:   Block approval steps at publish time until WG-02 is implemented.
+
+SCENARIO C — Condition Routing Ignored (WG-03)
+  Probability:  CERTAIN — every workflow using condition steps is affected.
+  Timeline:     Immediate and silent.
+  Impact:       "If leave request > 30 days → require HR approval" → HR approval NEVER required.
+                "If ticket priority = urgent → notify director" → director always notified.
+                Business rules are ignored silently.
+  Recovery:     Fix executor.ts to read nextSteps and route accordingly.
+  Mitigation:   Block condition steps at publish time OR fix in Phase 3 foundations.
+
+SCENARIO D — Notification Storm (WG-08)
+  Probability:  MEDIUM — triggered by a single careless admin configuring role-wide notifications.
+  Timeline:     One bulk import of 100 tickets × 500 members = 50,000 notification rows in minutes.
+  Impact:       Notification table bloat. User inbox unusable. DB write pressure.
+  Recovery:     Manual cleanup, rate limit enforcement, soft restart.
+  Mitigation:   Notification cap at 50 recipients per step.
+
+SCENARIO E — Delay Misuse (WG-04)
+  Probability:  CERTAIN for any admin using delay steps.
+  Timeline:     Immediate user confusion.
+  Impact:       "Send follow-up after 7 days" → sends instantly. SLA violations.
+                Users lose trust in configured automations.
+  Recovery:     No data loss, but business process integrity compromised.
+  Mitigation:   Block delay steps at publish time with "not yet implemented" error.
+
+SCENARIO F — Database Cascade Delete (WG-05 + schema)
+  Probability:  LOW but non-zero — triggered by admin deleting a workflow.
+  Impact:       All execution history, steps, and tasks deleted in cascade.
+                Compliance/audit gap if executions were business records.
+  Recovery:     Only from DB backup.
+  Mitigation:   Soft delete workflow_definitions (add deleted_at).
+                Remove CASCADE on executions FK; use SET NULL.
+                Archive instead of hard delete.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each phase is designed to be independently deployable and safe to defer.
+Phases are ordered by severity of the risks they address.
+
+━━ PHASE 3 — GOVERNANCE FOUNDATIONS (fix catastrophic gaps) ━━━━━━━━━━━━━━━━━
+
+Priority: MUST complete before exposing workflow config to customers.
+Estimated complexity: medium-large.
+
+P3-A: Block unsafe step types at publish
+  - Validation endpoint: POST /api/workflows/:id/validate
+  - At publish: block approval, condition branching, delay, and round_robin steps
+    with clear error messages explaining the gap.
+  - This alone prevents Scenarios B, C, D, E.
+
+P3-B: Execution rate limit per workspace
+  - In engine.ts: count recent executions before INSERT.
+  - Configuration: workspace-level limit (default 100/min).
+  - Prevents Scenario A (partial mitigation).
+
+P3-C: Recursion depth guard
+  - In engine.ts: read payload._executionChain (injected by bridge from metadata).
+  - Reject if chain includes current event type OR chain length >= MAX_DEPTH.
+  - Prevents Scenario A (primary mitigation).
+
+P3-D: Notification recipient cap
+  - In executeNotificationStep: slice recipientIds to MAX (50).
+  - Prevents Scenario D.
+
+P3-E: Soft delete + archive lifecycle
+  - workflow_definitions: add deleted_at, archived_at columns.
+  - Remove CASCADE on executions FK → ON DELETE SET NULL.
+  - Prevents Scenario F.
+
+P3-F: Draft/Active lifecycle (minimal)
+  - Add status column to workflow_definitions: draft | active | deprecated | archived.
+  - Draft workflows don't trigger. Active workflows are only modifiable by creating
+    a new draft (preserve existing active definition).
+  - PATCH /workflows/:id only allowed on draft status.
+  - POST /workflows/:id/activate copies current to active snapshot.
+
+━━ PHASE 4 — RUNTIME SAFETY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Priority: HIGH — deploy after Phase 3.
+
+P4-A: Fix condition step branching (WG-03)
+  - executor.ts reads result.output.nextSteps → jumps to those indices.
+  - Implement proper DAG execution instead of linear for-loop.
+
+P4-B: Execution TTL + stuck detection
+  - Add ttl_expires_at to workflow_executions.
+  - Sweep endpoint: POST /admin/sweep-stale-executions (super_admin).
+  - Phase 2 diagnostics API includes timed_out status.
+
+P4-C: Execution cancellation
+  - POST /api/workflows/executions/:id/cancel
+  - Cooperative cancel: executor checks status before each step.
+
+P4-D: Step schema validation at publish
+  - Full validation per step type (Section 4.6).
+  - Validation errors returned as structured list, not just blocking.
+
+P4-E: Steps snapshot at activation
+  - ADD COLUMN steps_snapshot JSONB to workflow_definitions.
+  - Engine reads steps_snapshot at trigger time (not mutable steps column).
+  - Executions store their step snapshot reference.
+
+━━ PHASE 5 — APPROVAL RESUME + ADVANCED STEPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Priority: HIGH — enables approval-gated workflows (WG-02 fix).
+
+P5-A: workflow_approval_links table
+  - Maps execution_id + step_index → approval_record_id.
+
+P5-B: executeApprovalStep creates actual approval records + links.
+
+P5-C: Approval completion hook resumes workflow execution.
+
+P5-D: Actual delay step implementation
+  - Option 1 (simple): persisted scheduled_at column + sweep job.
+  - Option 2 (robust): external queue (deferred to Phase 6).
+  - For Phase 5: Option 1 — polling every minute via sweep endpoint.
+
+P5-E: round_robin assignment implementation.
+
+━━ PHASE 6 — VALIDATION ENGINE + SIMULATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Priority: MEDIUM — improves admin UX significantly.
+
+P6-A: POST /api/workflows/:id/simulate
+  - Dry-run with resolver-only execution (no DB mutations).
+
+P6-B: Graph-level cycle detection at publish time.
+
+P6-C: Impossible branch detection (static type analysis on condition fields).
+
+P6-D: Admin UI: workflow builder with live validation feedback.
+
+━━ PHASE 7 — ADVANCED ORCHESTRATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Priority: LOW — enterprise features for complex workflows.
+
+P7-A: Parallel step execution (run steps 2,3,4 concurrently then wait for all).
+P7-B: Sequential multi-approver support.
+P7-C: Workflow versioning history (Section 4.2 Option B).
+P7-D: Cross-workflow dependencies (workflow B can wait for workflow A to complete).
+P7-E: Tenant-level governance dashboard (super_admin: execution quotas, usage).
+P7-F: External webhook step (call external API as a workflow action).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — FINAL RECOMMENDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BEFORE CUSTOMER-FACING WORKFLOW CONFIGURATION:
+
+1. BLOCK unsafe step types in the validator (P3-A).
+   This is one file change in the validation endpoint — LOW effort, HIGH protection.
+   Block: approval steps, condition-branching steps, delay steps, round_robin.
+   This alone eliminates 4 of the 5 catastrophic scenarios.
+
+2. ADD recursion guard in engine.ts (P3-C).
+   Prevents the one remaining catastrophic scenario (event loops).
+   Requires: payload._executionChain propagation and a simple includes() check.
+
+3. ADD rate limit in engine.ts (P3-B).
+   Safety net if recursion guard is bypassed.
+   Requires: one COUNT query before execution creation.
+
+4. ADD notification recipient cap in executeNotificationStep (P3-D).
+   One-line slice. Prevents notification storms.
+
+5. IMPLEMENT soft delete (P3-E).
+   Prevents loss of execution history on workflow deletion.
+   Schema change + backfill of existing rows.
+
+AFTER THE ABOVE, IN ORDER:
+  → Phase 3 remaining (P3-F: draft/active lifecycle)
+  → Phase 4 (runtime safety: condition fix, TTL, cancellation)
+  → Phase 5 (approval resume — enables the approval step)
+  → Phase 6 (simulation/validation UX)
+  → Phase 7 (advanced orchestration)
+
+DO NOT IMPLEMENT until Phase 3 is complete:
+  → Any admin UI that allows customers to create workflows with approval, condition,
+    or delay steps (these steps are misleading in their current state).
+  → Any marketing or documentation that claims these step types work correctly.
+
+ARCHITECTURE PRESERVED:
+  This review recommends changes ONLY to:
+  engine.ts (rate limit, recursion guard)
+  executor.ts (condition branching fix)
+  steps/notification.ts (recipient cap)
+  steps/approval.ts (Phase 5)
+  New: validation endpoint (new file)
+  New: workflow_definitions columns (status, steps_snapshot)
+
+It does NOT recommend changes to:
+  EventBus architecture, bridge, dispatcher, leave domain, diagnostics APIs.
+  These are correct and stable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX — RISK MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ID     Severity   Probability  Impact                    Phase Fix
+───────────────────────────────────────────────────────────────────
+WG-01  CRITICAL   HIGH         Server crash, all tenants  P3-B + P3-C
+WG-02  CRITICAL   CERTAIN      Silent approval failure    P3-A (block) → P5-B
+WG-03  CRITICAL   CERTAIN      Business rules ignored     P3-A (block) → P4-A
+WG-04  CRITICAL   CERTAIN      Delay = instant, misleading P3-A (block) → P5-D
+WG-05  HIGH       MEDIUM       Version drift on resume    P3-F + P4-E
+WG-06  HIGH       HIGH         Live edits break in-flight P3-F
+WG-07  HIGH       CERTAIN      Stuck executions forever   P4-B
+WG-08  HIGH       MEDIUM       Notification storm DB hit  P3-D
+WG-09  HIGH       MEDIUM       Tenant isolation broken    P3-B
+WG-10  MEDIUM     HIGH         Silent runtime panics      P4-D
+WG-11  MEDIUM     CERTAIN      Approval has no record     P5-A + P5-B
+WG-12  MEDIUM     LOW          Silent skip on round_robin P5-E
+WG-13  MEDIUM     CERTAIN      Timeout config decorative  P5-D
+WG-14  MEDIUM     LOW          Orphaned FK references     P3-E
+WG-15  MEDIUM     MEDIUM       Context pollution          P4-A (redesign ctx)
+───────────────────────────────────────────────────────────────────

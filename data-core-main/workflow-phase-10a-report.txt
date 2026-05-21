@@ -1,0 +1,924 @@
+WORKFLOW PHASE 10-A REPORT
+Reliability Domains & Failure Containment Foundations
+=============================================================================
+Date:    2026-05-15
+Status:  COMPLETE
+Tests:   1764 passed (31 files) — 0 failures — net +53 assertions over P9-F baseline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P10-A converts the platform from a governance-aware operational platform into a
+reliability-aware enterprise runtime architecture. It adds a deterministic
+failure-containment intelligence layer on top of the existing governance stack
+(P9-A through P9-F) without adding any self-healing, autoscaling, or autonomous
+remediation.
+
+Before P10-A:
+  • No formal model of failure boundaries — blast radius is undefined.
+  • No classification of cross-subsystem propagation risk.
+  • No degradation severity ladder for the governance subsystems.
+  • No observability of containment boundary health.
+  • Advisory storms (multiple noisy signals) are not recognized as a category.
+  • No platform-wide reliability overview combining P9-B, P9-E, and P9-F signals.
+
+After P10-A:
+  • ReliabilityDomain — a workspace-scoped unit of failure containment with
+    6 monitored subsystems, 5-level degradation status, 4-level propagation
+    risk, 4-level containment level, recovery classification, and observability
+    health.
+  • evaluateFailureContainment() — deterministic engine composing P9-B/E/F
+    signals into a complete reliability assessment per workspace.
+  • buildPlatformReliabilityOverview() — platform-wide aggregate of all
+    workspace reliability domains.
+  • 5 containment boundaries per workspace with holding/stressed/at_risk/breached
+    status for each protection point.
+  • Advisory storm detection — identifies simultaneous multi-signal overloads.
+  • BlastRadius model with 0–100 normalized score and 3-tier scope classification.
+  • 4 structured observability events.
+  • 1 new super-admin GET route: GET /platform/governance/reliability/domains.
+  • All guarantees: read-only, no autonomous recovery, fail-closed, deterministic.
+
+Explicitly excluded:
+  Distributed failover, active-active replication, Kubernetes HA orchestration,
+  multi-region recovery, autoscaling infra, self-healing runtime, automated
+  restart, autonomous remediation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. FAILURE SURFACE ANALYSIS (pre-P10-A review)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Review of the existing governance stack for failure propagation gaps:
+
+A) WORKFLOW RUNTIME — Unbounded backlog
+   P9-B pressureScore accounts for delayedExecutionCount, but the platform has
+   no formal model for "what happens if a backlog grows past 50 delayed jobs?"
+   A saturated workspace backlog can starve the scheduler for other workspaces
+   because the scheduler queue is shared. Blast radius: platform-wide.
+   No containment boundary modeled before P10-A.
+
+B) SCHEDULER — Pressure without propagation classification
+   P9-B classifies containmentStatus as "contained/at_risk/pressured/saturated"
+   and derives a schedulerWeight. But there is no model for:
+     • When does scheduler pressure in workspace A affect workspace B?
+     • What is the propagation path from "saturated" to cross-workspace failure?
+   P10-A adds FailurePropagationRisk and the scheduler_limit boundary.
+
+C) ADVISORY SYSTEM — Advisory storms undetected
+   P9-B tracks noisyBehaviorCodes and advisoryPressureLevel independently.
+   A workspace can simultaneously have 3 noisy categories + critical advisory
+   pressure + 2 active conflicting policies. This compound state (advisory storm)
+   amplifies cross-subsystem degradation but was not classified as a unified
+   failure mode. P10-A adds detectAdvisoryStorm().
+
+D) POLICY ENGINE — Conflict is catastrophic but uncontained
+   P9-E prevents conflicts at creation time, and P9-F handles them defensively
+   at resolution time (fail-closed to floor). But there was no model for:
+     • What does a policy conflict mean for reliability?
+     • Does it breach a containment boundary?
+   P10-A models conflictDetected as a "breached" tenant_isolation boundary and
+   escalates policy_engine to containment_risk.
+
+E) ENFORCEMENT BRIDGE — Status not surfaced as reliability signal
+   P9-F enforcementStatus ("resolved", "stale", "conflict", "floor_applied",
+   "no_active_policy") was only visible in the enforcement snapshot.
+   P10-A integrates enforcementStatus as an input to the
+   enforcement_bridge subsystem classifier, making it a first-class
+   reliability signal.
+
+F) TENANT ISOLATION — Containment boundary not formally tracked
+   P9-A defines a per-request isolation context, but there was no persistent
+   model for "is this workspace's isolation boundary currently under stress?"
+   P10-A adds the tenant_isolation ContainmentBoundary with status derived
+   from containmentStatus + conflictDetected.
+
+G) OBSERVABILITY — Degrades silently under critical load
+   Under critical pressure, the observability layer itself becomes unreliable
+   (log backlogs, dropped events). P10-A models this as ObservabilityHealth
+   (full/partial/impaired/blind), degrading as overall domain severity increases.
+   This gives operators a signal that under "critical" conditions, the events
+   themselves may not be trustworthy.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. RELIABILITY DOMAIN ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A ReliabilityDomain is the fundamental unit of failure containment — one per
+workspace per evaluation cycle.
+
+interface ReliabilityDomain {
+  domainId:               string;          // "rd:<workspaceId>-<ms>-<seq>"
+  domainType:             DomainType;      // dominant (most-degraded) subsystem
+  workspaceId:            number;
+  affectedSubsystems:     DomainType[];    // all subsystems at "degraded" or worse
+  containmentLevel:       ContainmentLevel;  // overall boundary health
+  degradationStatus:      DegradationStatus; // worst across all 6 subsystems
+  recoveryClassification: RecoveryClassification;
+  observabilityHealth:    ObservabilityHealth;
+  propagationRisk:        FailurePropagationRisk;
+  evaluatedAt:            string;
+}
+
+DomainType — 6 monitored subsystems:
+
+  "scheduler"          — execution scheduling pressure
+                         Source: P9-B pressureScore.total, containmentStatus
+  "advisory"           — governance advisory signal health
+                         Source: P9-B noisyBehaviorCodes, advisoryPressureLevel
+  "policy_engine"      — fairness policy lifecycle health
+                         Source: P9-E activePolicyCount, conflictDetected
+  "enforcement_bridge" — P9-F weight resolution health
+                         Source: P9-F enforcementStatus
+  "workflow_runtime"   — execution backlog health
+                         Source: P9-B delayedExecutionCount, activeExecutionCount
+  "tenant_isolation"   — workspace containment boundary health
+                         Source: P9-B containmentStatus, P9-F conflictDetected
+
+Domain computation flow:
+
+  [P9-B partition]     [P9-E policies]     [P9-F bridge]
+        │                    │                   │
+        ├───────────────────────────────────────┤
+        │            FailureContainmentInput     │
+        └───────────────────┬────────────────────┘
+                            │
+                            ▼
+              evaluateFailureContainment()
+                            │
+         ┌──────────────────┼──────────────────────┐
+         │                  │                       │
+  ┌──────▼──────┐  ┌────────▼───────┐  ┌──────────▼─────────┐
+  │  6 subsystem│  │  BlastRadius   │  │  5 Containment     │
+  │  classifiers│  │  computation   │  │  Boundaries        │
+  └──────┬──────┘  └────────┬───────┘  └──────────┬─────────┘
+         │                  │                       │
+         └──────────────────┼───────────────────────┘
+                            │
+                     ┌──────▼──────────────────┐
+                     │ FailureContainmentResult │
+                     │  domain                 │
+                     │  blastRadius            │
+                     │  containmentBoundaries  │
+                     │  subsystemDegradation   │
+                     │  advisoryStormDetected  │
+                     └─────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. DEGRADATION CLASSIFICATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DegradationStatus — 5 severity levels (0 = nominal, 4 = critical):
+
+  0  "healthy"           — nominal; all containment boundaries holding
+  1  "degraded"          — mild signal; continue monitoring
+  2  "severely_degraded" — elevated risk; operator review recommended
+  3  "containment_risk"  — boundary under active stress; intervention recommended
+  4  "critical"          — immediate operator action required
+
+Per-subsystem classification rules:
+
+─── scheduler ───────────────────────────────────────────────────────────────
+
+  pressureScore >= 80 OR containmentStatus = "saturated"  → critical
+  pressureScore >= 60 OR containmentStatus = "pressured"  → containment_risk
+  pressureScore >= 40 OR containmentStatus = "at_risk"    → severely_degraded
+  pressureScore > 0                                        → degraded
+  else                                                     → healthy
+
+  Constants: CRITICAL=80, RISK=60, SEVERE=40
+
+─── advisory ────────────────────────────────────────────────────────────────
+
+  advisoryPressure="critical" AND noisyCodes >= 3   → critical
+  advisoryPressure="high" OR noisyCodes >= 2        → severely_degraded
+  advisoryPressure="medium" OR noisyCodes >= 1      → degraded
+  advisoryPressure="low"                            → degraded
+  else                                              → healthy
+
+  Constants: NOISY_CRITICAL=3, NOISY_SEVERE=2
+
+─── policy_engine ───────────────────────────────────────────────────────────
+
+  conflictDetected = true               → containment_risk
+  activePolicyCount > 1                 → severely_degraded  (P9-E breach — defensive)
+  activePolicyCount = 1                 → degraded           (governance in effect)
+  else                                  → healthy
+
+─── enforcement_bridge ──────────────────────────────────────────────────────
+
+  enforcementStatus = "conflict"        → containment_risk
+  enforcementStatus = "floor_applied"   → severely_degraded
+  enforcementStatus = "stale"           → degraded
+  enforcementStatus = "resolved"        → degraded           (policy in effect)
+  enforcementStatus = "no_active_policy"→ healthy
+
+─── workflow_runtime ────────────────────────────────────────────────────────
+
+  backlogDepth >= 50 AND activeCount > 20   → critical
+  backlogDepth >= 50                        → containment_risk
+  backlogDepth >= 20                        → severely_degraded
+  backlogDepth > 0                          → degraded
+  else                                      → healthy
+
+  Constants: BACKLOG_CRITICAL=50, BACKLOG_SEVERE=20
+
+─── tenant_isolation ────────────────────────────────────────────────────────
+
+  conflictDetected = true               → containment_risk
+  containmentStatus = "saturated"       → critical
+  containmentStatus = "pressured"       → severely_degraded
+  containmentStatus = "at_risk"         → degraded
+  else                                  → healthy
+
+Overall domain degradationStatus = worstDegradation(all 6 subsystem statuses).
+Tiebreaker for dominantSubsystem (affectedSubsystems): DOMAIN_TYPE_ORDER priority
+  [tenant_isolation, scheduler, workflow_runtime, advisory, enforcement_bridge, policy_engine]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FAILURE PROPAGATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FailurePropagationRisk — 4 levels, derived deterministically from degradationStatus:
+
+  "isolated"   (healthy)           — contained to one subsystem; no spread risk
+  "bounded"    (degraded)          — could reach adjacent subsystems in workspace
+  "spreading"  (severely_degraded) — cross-subsystem degradation already visible
+  "cascading"  (containment_risk   — platform-wide propagation possible
+               or critical)
+
+This mapping is intentionally strict:
+  • "isolated" requires a fully healthy domain — any signal degrades to "bounded".
+  • "cascading" covers both containment_risk and critical — at containment_risk
+    the propagation path is already active; at critical it is confirmed.
+
+Propagation semantics:
+
+  isolated  → failure is scoped to a single subsystem and has not been observed
+              to cause downstream effects in other subsystems.
+
+  bounded   → failure is visible in one subsystem (mild signal) and could reach
+              adjacent subsystems (e.g., high backlogDepth in workflow_runtime
+              could increase scheduler pressure). Operator should monitor.
+
+  spreading → degradation is active in 2+ subsystems simultaneously (e.g.,
+              scheduler pressure + advisory storm). The failure is crossing
+              subsystem boundaries. Operator review recommended.
+
+  cascading → cross-workspace impact is possible. Either containment boundaries
+              are under active stress (containment_risk) or the workspace is
+              in critical state. Immediate operator attention required.
+
+Cross-workspace propagation paths (identified but not yet instrumented):
+
+  saturated workspace backlog
+    → scheduler shared queue overflow
+    → delayed dispatch for other workspaces
+    → increased pressureScore for unrelated workspaces
+
+  policy conflict (two active policies for same workspace)
+    → P9-F fail-closed to weight floor (0.25)
+    → workspace scheduler share drops to minimum
+    → other workspaces may see increased available share (uneven load)
+
+  advisory storm in one workspace
+    → high governance advisory signal volume
+    → platform advisory health degrades for that workspace
+    → cascades into policy_engine if operator creates multiple policies in response
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. CONTAINMENT BOUNDARY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Five ContainmentBoundary instances per workspace domain. Each represents a
+specific isolation mechanism with four possible status values:
+
+  "holding"  — boundary is intact; no stress detected
+  "stressed" — boundary is under mild load; monitor
+  "at_risk"  — boundary is under active stress; operator attention
+  "breached" — boundary has failed; containment lost for this mechanism
+
+─── 1. tenant_isolation (protects: tenant_isolation subsystem) ──────────────
+
+  Status derivation:
+    conflictDetected OR containmentStatus="saturated" → breached
+    containmentStatus="pressured"                     → at_risk
+    containmentStatus="at_risk"                       → stressed
+    else                                              → holding
+
+  What it means:
+    This boundary represents the workspace-level isolation contract established
+    by P9-A. "breached" means the workspace has escaped its containment envelope
+    and is affecting (or being affected by) other workspaces.
+
+─── 2. scheduler_limit (protects: scheduler subsystem) ──────────────────────
+
+  Status derivation:
+    effectiveWeight <= 0.25 AND pressureScore >= 80   → at_risk
+    effectiveWeight < advisoryWeight                  → stressed
+    else                                              → holding
+
+  What it means:
+    This boundary represents the P9-F weight enforcement. If the scheduler is
+    at minimum weight (0.25 = floor) AND under maximum pressure, the weight
+    limit is already at its minimum defensive value — no further reduction is
+    possible. "stressed" means a policy has already reduced the effective weight
+    below the advisory level, indicating active weight management in progress.
+
+─── 3. advisory_gate (protects: advisory subsystem) ─────────────────────────
+
+  Status derivation:
+    noisyCodes.length >= 3   → at_risk
+    noisyCodes.length >= 2   → stressed
+    else                     → holding
+
+  What it means:
+    This boundary represents the advisory signal filter. When multiple noisy
+    behavior categories are active simultaneously, the advisory system is
+    operating above its normal signal-to-noise capacity. "at_risk" means
+    the advisory layer may generate inaccurate governance recommendations
+    because the signal volume is too high to distinguish true patterns.
+
+─── 4. policy_gate (protects: policy_engine subsystem) ──────────────────────
+
+  Status derivation:
+    conflictDetected                    → breached
+    enforcementStatus="conflict"        → at_risk
+    activePolicyCount > 0               → stressed
+    else                                → holding
+
+  What it means:
+    This boundary represents the P9-E single-policy-per-workspace invariant.
+    "breached" means P9-E conflict prevention failed and two conflicting policies
+    are active (the P9-F bridge handles this defensively). "stressed" means
+    one active policy is in effect — the workspace is under governance adjustment
+    and the policy gate is performing active weight management.
+
+─── 5. runtime_gate (protects: workflow_runtime subsystem) ──────────────────
+
+  Status derivation:
+    backlogDepth >= 50   → at_risk
+    backlogDepth >= 20   → stressed
+    else                 → holding
+
+  What it means:
+    This boundary represents the workflow execution queue health. A large backlog
+    means the runtime scheduler is unable to dispatch executions as fast as they
+    are being created. "at_risk" means the backlog is large enough to cause
+    queue-induced delays for users in this workspace.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. BLAST RADIUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BlastRadius — estimated scope of failure impact if unchecked:
+
+interface BlastRadius {
+  workspaceId:             number;
+  estimatedImpactScope:    "workspace_only" | "tenant_group" | "platform_wide";
+  affectedSubsystemCount:  number;
+  blastRadiusScore:        number;   // 0–100 normalized
+  dominantSubsystem:       DomainType;
+}
+
+Score formula (clamped to [0, 100]):
+  pressureScore × 0.40
+  + noisyBehaviorCodes.length × 10
+  + backlogDepth:  >50 → +20, >10 → +10, >0 → +5
+  + conflictDetected → +20
+
+Scope classification:
+  score >= 60 OR overall=critical OR overall=containment_risk → "platform_wide"
+  score >= 30                                                 → "tenant_group"
+  else                                                        → "workspace_only"
+
+Dominant subsystem selection (most to least influential for blast radius):
+  1. tenant_isolation  (saturated/pressured containment)
+  2. scheduler         (high pressureScore)
+  3. workflow_runtime  (high backlogDepth)
+  4. advisory          (multiple noisy behavior codes)
+  5. enforcement_bridge (conflict detected)
+  6. policy_engine     (fallback)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. ADVISORY STORM DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+An advisory storm is a simultaneous overload of governance advisory signals
+that amplifies cross-subsystem degradation and increases the probability of
+operator misjudgment (creating conflicting policies under time pressure).
+
+detectAdvisoryStorm(noisyCodes, advisoryPressureLevel, activePolicyCount):
+
+Storm conditions (any one triggers storm=true):
+
+  A) noisyCodes.length >= 3
+     Three or more concurrent noisy behavior categories — the advisory system
+     is receiving compound signal overload. Different categories can cancel
+     each other out (false positive) or reinforce (real pattern), making
+     automated governance difficult.
+
+  B) advisoryPressureLevel is "high" OR "critical" AND noisyCodes.length >= 2
+     High governance pressure combined with at least two noisy behavior
+     categories. The advisory system is under compound stress.
+
+  C) activePolicyCount >= 2
+     Two or more active policies for the same workspace. This should not occur
+     (P9-E prevents it), but if it does, the policy_engine is in a storm state —
+     multiple simultaneous governance decisions create an advisory overload.
+
+Storm impact:
+  advisoryStormDetected is exposed in FailureContainmentResult and counted in
+  PlatformReliabilityOverview.advisoryStormCount.
+  An advisory storm independently causes the advisory subsystem to reach
+  "severely_degraded" or worse, which in turn raises the workspace's overall
+  degradationStatus and propagationRisk.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. DERIVED STATE LADDER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All domain-level state is derived deterministically from degradationStatus:
+
+DegradationStatus → PropagationRisk:
+  healthy           → isolated
+  degraded          → bounded
+  severely_degraded → spreading
+  containment_risk  → cascading
+  critical          → cascading
+
+DegradationStatus → ContainmentLevel (+ conflictDetected override):
+  conflictDetected = true   → breached  (overrides all status values)
+  healthy                   → contained
+  degraded                  → contained
+  severely_degraded         → partial
+  containment_risk          → at_risk
+  critical                  → at_risk
+
+DegradationStatus → RecoveryClassification:
+  healthy           → no_action_needed
+  degraded          → monitor_closely
+  severely_degraded → monitor_closely
+  containment_risk  → operator_attention
+  critical          → immediate_intervention
+
+DegradationStatus → ObservabilityHealth:
+  healthy           → full
+  degraded          → full
+  severely_degraded → partial
+  containment_risk  → impaired
+  critical          → blind
+
+Note: ObservabilityHealth degrades under high pressure because under critical
+conditions, the platform's logging subsystem may itself be under resource
+contention. "blind" signals that the operator should not rely on the observability
+layer for incident analysis — manual inspection is required.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. PLATFORM RELIABILITY OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+interface PlatformReliabilityOverview {
+  totalDomains:             number;          // total workspace count
+  healthyCount:             number;
+  degradedCount:            number;
+  severelyDegradedCount:    number;
+  containmentRiskCount:     number;
+  criticalCount:            number;
+  overallPropagationRisk:   FailurePropagationRisk; // worst across all domains
+  worstContainmentLevel:    ContainmentLevel;        // worst across all domains
+  advisoryStormCount:       number;           // workspaces with active storm
+  cascadingRiskWorkspaces:  number[];         // workspaceIds at cascading risk
+  reliabilityDomains:       ReliabilityDomain[];
+  blastRadii:               BlastRadius[];
+  requestScopeId:           string;
+  evaluatedAt:              string;
+}
+
+Invariant:
+  healthyCount + degradedCount + severelyDegradedCount +
+  containmentRiskCount + criticalCount = totalDomains (always)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. ENGINE: reliability-domains.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New file (~440 lines). Pure, deterministic, advisory-only (no autonomous action).
+No DB, no async, no mutations, no cross-tenant data leakage.
+
+EXPORTED TYPES (13)
+
+  DomainType                  — 6 subsystem identifiers
+  DegradationStatus           — 5-level severity (healthy → critical)
+  FailurePropagationRisk      — 4-level propagation (isolated → cascading)
+  ContainmentLevel            — 4-level containment (contained → breached)
+  RecoveryClassification      — 4-level operator action recommendation
+  ObservabilityHealth         — 4-level observability quality
+  BlastRadiusScope            — 3-tier impact scope
+  ReliabilityDomain           — core workspace domain value object (9 fields)
+  BlastRadius                 — blast radius model (5 fields)
+  ContainmentBoundary         — single containment boundary (5 fields)
+  SubsystemDegradationRecord  — per-subsystem degradation with signal list
+  FailureContainmentInput     — engine input (17 fields: P9-B + P9-E + P9-F)
+  FailureContainmentResult    — per-workspace engine output (5 fields)
+  PlatformReliabilityOverview — platform aggregate (14 fields)
+
+EXPORTED FUNCTIONS (17)
+
+  makeReliabilityDomainId(workspaceId)     → "rd:<id>-<ms>-<seq>"
+  resetDomainSeq()                         — sequence reset (tests only)
+
+  worstDegradation(a, b)                   → DegradationStatus
+  worstPropagationRisk(a, b)               → FailurePropagationRisk
+  worstContainmentLevel(a, b)              → ContainmentLevel
+
+  classifySchedulerDegradation(pressureScore, containmentStatus)
+    → SubsystemDegradationRecord
+
+  classifyAdvisoryDegradation(noisyCodes, advisoryPressureLevel)
+    → SubsystemDegradationRecord
+
+  classifyPolicyEngineDegradation(activePolicyCount, conflictDetected)
+    → SubsystemDegradationRecord
+
+  classifyEnforcementBridgeDegradation(enforcementStatus)
+    → SubsystemDegradationRecord
+
+  classifyWorkflowRuntimeDegradation(backlogDepth, activeExecutionCount)
+    → SubsystemDegradationRecord
+
+  classifyTenantIsolationDegradation(containmentStatus, conflictDetected)
+    → SubsystemDegradationRecord
+
+  detectAdvisoryStorm(noisyCodes, advisoryPressureLevel, activePolicyCount)
+    → boolean
+
+  degradationToPropagationRisk(status)       → FailurePropagationRisk
+  degradationToContainmentLevel(status, conflictDetected) → ContainmentLevel
+  degradationToRecoveryClassification(status) → RecoveryClassification
+
+  computeBlastRadius(input, degradationStatus, affectedCount) → BlastRadius
+
+  evaluateContainmentBoundaries(input)       → ContainmentBoundary[]
+
+  evaluateFailureContainment(input)          → FailureContainmentResult
+  buildPlatformReliabilityOverview(results, scopeId?, time?) → PlatformReliabilityOverview
+
+  emitReliabilityDomainEvaluatedEvent(payload)        → void
+  emitFailureContainmentAssessedEvent(payload)        → void
+  emitFailurePropagationRiskDetectedEvent(payload)    → void
+  emitRuntimeDegradationClassifiedEvent(payload)      → void
+
+EXPORTED CONSTANTS (5)
+
+  RELIABILITY_PRESSURE_SEVERE_THRESHOLD    = 40
+  RELIABILITY_PRESSURE_RISK_THRESHOLD      = 60
+  RELIABILITY_PRESSURE_CRITICAL_THRESHOLD  = 80
+  RELIABILITY_BACKLOG_SEVERE_THRESHOLD     = 20
+  RELIABILITY_BACKLOG_CRITICAL_THRESHOLD   = 50
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. NEW API ROUTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /platform/governance/reliability/domains
+  Auth:    requireAuth + requireSuperAdmin
+  Status:  200 OK
+  Returns: { reliability: PlatformReliabilityOverview }
+
+Processing steps:
+  1. fetchPlatformPartitions() + active policy GROUP BY query + active policy rows
+     (parallel Promise.all — 3 DB queries)
+  2. For each partition:
+     a. resolveEffectiveSchedulerWeight() → bridge (P9-F)
+     b. Build FailureContainmentInput from partition + bridge + policy count
+     c. evaluateFailureContainment() → FailureContainmentResult (P10-A)
+  3. buildPlatformReliabilityOverview() → PlatformReliabilityOverview
+  4. Return { reliability: overview }
+
+DB queries executed:
+  1. SELECT id, name FROM workspaces WHERE status IN ('active', 'suspended')
+  2. SELECT workspace_id, COUNT(*) FILTER active_executions, delayed_executions
+     FROM workflow_executions GROUP BY workspace_id     (P9-B)
+  3. SELECT workspace_id, COUNT(*) FROM scheduler_fairness_policies
+     WHERE policy_status = 'active' GROUP BY workspace_id  (P9-E count)
+  4. SELECT * FROM scheduler_fairness_policies
+     WHERE policy_status = 'active'  (P9-E rows for P9-F bridge)
+
+All four queries are read-only. No writes occur in this route.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4 structured log events emitted via logger.info():
+
+All 4 events carry 6 common fields:
+  domainId, degradationStatus, propagationRisk, containmentLevel,
+  affectedSubsystems[], action
+
+A) reliability_domain_evaluated
+   Emitted by: evaluateFailureContainment() — always (every workspace evaluation)
+   action: "domain_evaluated"
+   Signals: a workspace reliability domain was computed and classified.
+
+B) failure_containment_assessed
+   Emitted by: evaluateFailureContainment() — always (every workspace evaluation)
+   action: "containment_assessed"
+   Signals: containment boundaries were evaluated for this workspace.
+
+C) failure_propagation_risk_detected
+   Emitted by: evaluateFailureContainment() — only when propagationRisk is
+               "spreading" or "cascading" (non-trivial risk only)
+   action: "propagation_risk_detected"
+   Signals: cross-subsystem failure propagation risk is above bounded level.
+   Note:  This event is intentionally filtered — "isolated" and "bounded" risks
+          do not emit this event to reduce log noise during normal operation.
+
+D) runtime_degradation_classified
+   Emitted by: evaluateFailureContainment() — always (every workspace evaluation)
+   action: "degradation_classified"
+   Signals: runtime degradation status was classified from live signals.
+
+Event design rationale:
+  • Events A, B, D fire for every workspace evaluation (full observability).
+  • Event C fires only for elevated risk (actionable signal filtering).
+  • All events carry affectedSubsystems[] — searchable field for subsystem-
+    specific alerting pipelines (e.g., alert if "scheduler" appears in
+    affectedSubsystems AND propagationRisk="cascading").
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The P10-A reliability layer is designed for integration with all existing
+governance surfaces:
+
+A) GET /platform/governance/reliability/domains (new P10-A route)
+   Returns the full PlatformReliabilityOverview:
+     • Per-workspace reliability domains with 6-subsystem degradation
+     • Platform-wide degradation distribution
+     • cascadingRiskWorkspaces list
+     • advisoryStormCount
+     • Worst propagation risk and containment level
+
+B) Super-admin reliability dashboard (future UI)
+   PlatformReliabilityOverview is designed for direct UI consumption:
+     • Platform health bar: X healthy, Y degraded, Z critical (with color coding)
+     • Workspace reliability table:
+         name | overallDegradation | propagationRisk | containmentLevel | recovery
+     • Blast radius map: blastRadiusScore per workspace (could drive a heat map)
+     • Advisory storm banner: if advisoryStormCount > 0
+     • Cascading risk alert: if cascadingRiskWorkspaces.length > 0
+     • Containment boundary detail per workspace (5 boundaries, holding/stressed/at_risk/breached)
+
+C) P9-D governance control plane enrichment (future)
+   GET /platform/governance/overview could include a reliability section:
+     reliabilitySummary: {
+       healthyDomains: N,
+       criticalDomains: N,
+       overallPropagationRisk: "cascading",
+       advisoryStormCount: N
+     }
+   This gives the P9-D control plane a reliability signal without requiring
+   the full P10-A overview.
+
+D) P9-E policy decision support (future)
+   When an operator reviews a fairness policy for a workspace, the reliability
+   domain for that workspace should be shown alongside:
+     "Workspace X is currently in containment_risk state (policy_engine + scheduler).
+      Creating an additional policy will escalate advisory storm risk."
+   This requires joining the policy listing with the current reliability domain
+   at read time (not persisted — computed on demand).
+
+E) P9-F enforcement enrichment (future)
+   GET /platform/governance/enforcement could include per-workspace
+   reliabilityDomainSnapshot (domainId, degradationStatus, propagationRisk)
+   alongside each bridge — showing whether the enforcement action corresponds
+   to a workspace that is already degraded.
+
+F) Alerting integration (future pipeline)
+   The structured events from §12 can feed:
+     • Alerting rules: if propagationRisk="cascading" → PagerDuty/Slack alert
+     • Dashboard SLI: percentage of workspaces with degradationStatus="healthy"
+     • Trend analysis: degradation history over time (requires persistence)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/reliability-domains.test.ts
+
+T1  reliability domains deterministic (6 assertions)
+    healthy input → degradationStatus=healthy; same input → same output; domain.workspaceId
+    matches input; domain.evaluatedAt is valid ISO; domainId starts with "rd:";
+    healthy domain has empty affectedSubsystems.
+
+T2  blast radius classification stable (5 assertions)
+    healthy input → blastRadiusScore < 30, scope=workspace_only; critical pressure →
+    blastRadiusScore ≥ 32, scope=platform_wide; conflict → blast radius increases by 20;
+    blastRadius.workspaceId matches input; blastRadiusScore always in [0, 100].
+
+T3  cascading failure risk detected correctly (5 assertions)
+    critical pressure → propagationRisk=cascading; conflict → propagationRisk=cascading;
+    healthy → propagationRisk=isolated; at_risk → spreading or worse; cascading workspace
+    appears in cascadingRiskWorkspaces.
+
+T4  degradation classification deterministic (6 assertions)
+    pressureScore=0, contained → scheduler=healthy; pressureScore=CRITICAL → scheduler=critical;
+    conflictDetected → tenant_isolation=containment_risk; saturated → tenant_isolation=critical;
+    backlog≥CRITICAL + active>20 → runtime=critical; worstDegradation returns more severe.
+
+T5  containment boundaries stable (5 assertions)
+    healthy → all 5 boundaries holding; conflictDetected → tenant_isolation=breached;
+    backlog≥CRITICAL → runtime_gate=at_risk; 3+ noisy codes → advisory_gate=at_risk;
+    each boundary has unique boundaryId containing workspaceId.
+
+T6  tenant-safe observability guaranteed (5 assertions)
+    domain for workspace 7 has workspaceId=7; two evaluations produce independent domains;
+    critical → observabilityHealth=blind; healthy → observabilityHealth=full;
+    PlatformReliabilityOverview.totalDomains equals input count.
+
+T7  advisory storms influence degradation correctly (5 assertions)
+    3 noisy codes → advisoryStormDetected=true; high pressure + 2 codes → storm=true;
+    activePolicyCount>=2 → storm=true; 1 code + low pressure + 1 policy → false;
+    advisory storm raises degradation above healthy.
+
+T8  serialization ordering stable (5 assertions)
+    ReliabilityDomain fully JSON-serializable; FailureContainmentResult serializable;
+    PlatformReliabilityOverview serializable; round-trip preserves domain fields;
+    healthyCount + degradedCount + ... = totalDomains.
+
+T9  no runtime mutation occurs (5 assertions)
+    evaluateFailureContainment has no async behavior; buildPlatformReliabilityOverview
+    does not mutate input; evaluateFailureContainment does not mutate input;
+    PlatformReliabilityOverview has no function properties;
+    evaluateContainmentBoundaries does not mutate input.
+
+T10 reliability layer remains read-only (6 assertions)
+    all 4 emit functions do not throw; degradationToRecoveryClassification covers all
+    5 statuses deterministically; engine produces no side effects that modify
+    scheduler state (idempotent call check).
+
+Total assertions: 53 new (T1–T10)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. REMAINING RESILIENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) NO CROSS-WORKSPACE PROPAGATION INSTRUMENTATION
+   P10-A computes blast radius per workspace independently. There is no model
+   for "workspace A's saturation is currently increasing workspace B's pressureScore."
+   This cross-workspace causality chain requires:
+     1. Correlation of pressureScore increases across workspaces with backlog
+        growth in a noisy workspace.
+     2. A shared-resource contention model (scheduler queue capacity).
+   Currently: each workspace is evaluated in isolation. Cross-workspace
+   propagation is classified at the platform level via overallPropagationRisk
+   (worst across all) but not causally linked.
+
+B) NO RELIABILITY HISTORY
+   All domain evaluations are point-in-time. There is no historical record of:
+     • When did workspace X enter "severely_degraded" state?
+     • How long did the advisory storm last?
+     • Was the "critical" event resolved after operator intervention?
+   A reliability_domain_events table would enable incident timeline reconstruction.
+
+C) NO RECOVERY TRACKING
+   RecoveryClassification recommends operator action but there is no model for:
+     • Was the recommended action taken?
+     • Did the domain status improve after operator intervention?
+     • MTTR (Mean Time To Recovery) per workspace.
+
+D) NO SUBSYSTEM-LEVEL BLAST RADIUS
+   BlastRadius is computed at the workspace level. A subsystem-specific blast
+   radius would allow more precise containment recommendations:
+     • "Scheduler subsystem blast radius: 60 (platform_wide)"
+     • "Advisory subsystem blast radius: 20 (workspace_only)"
+   Currently: a single blastRadiusScore aggregates all subsystem signals.
+
+E) NO CONTAINMENT BOUNDARY HISTORY
+   ContainmentBoundary status is computed live. There is no record of:
+     • How long was the tenant_isolation boundary "stressed" before breaching?
+     • Which boundary breaches precede critical-state incidents?
+   This boundary transition history would enable predictive reliability modeling.
+
+F) NO RELIABILITY SLO DEFINITIONS
+   Reliability domains are classified but there are no formal SLO targets:
+     • "Platform SLO: >= 90% of workspaces must be healthy or degraded"
+     • "SLO breach: criticalCount > 0 for more than 15 minutes"
+   Without SLO definitions, the overview provides no actionable threshold.
+
+G) NO AUTOMATED ALERT ROUTING
+   The failure_propagation_risk_detected event is emitted when risk >= spreading,
+   but there is no routing to an alerting system. An operator must actively poll
+   GET /platform/governance/reliability/domains to discover critical states.
+   A future alerting pipeline would subscribe to the structured events and
+   route to PagerDuty / Slack based on event fields.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. READINESS ASSESSMENT (pre-recovery orchestration)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is in place before any recovery orchestration research:
+
+P9-A  Tenant isolation engine + 6 violation codes
+      ✓ Per-request isolation boundary; per-tenant risk assessment.
+
+P9-B  Workload partition engine + 5-component pressure scoring
+      ✓ Advisory schedulerWeight [0.25–1.00]; starvation floor guarantee;
+        4-category noisy tenant detection.
+
+P9-C  Tenant governance view composition
+      ✓ Workspace-scoped governance API surface; isolation/fairness status.
+
+P9-D  Platform workload control plane
+      ✓ Cross-workspace fairness health; noisy-tenant roster;
+        containment/advisory distribution; 4 super-admin read endpoints.
+
+P9-E  Fairness orchestration policy infrastructure
+      ✓ Human-gated lifecycle (pending → active → rolled_back/expired);
+        starvation floor at validation; conflict prevention; audit trail.
+
+P9-F  Adaptive scheduling research foundations
+      ✓ 4-layer effective weight resolution; enforcement bridge;
+        research shadow mode; advisory/operator/shadow mode classification.
+
+P10-A Reliability domains & failure containment foundations (this phase)
+      ✓ 6-subsystem degradation classification per workspace (deterministic)
+      ✓ 5-level DegradationStatus (healthy → critical)
+      ✓ 4-level FailurePropagationRisk (isolated → cascading)
+      ✓ 4-level ContainmentLevel (contained → breached)
+      ✓ 5 containment boundaries per workspace (holding/stressed/at_risk/breached)
+      ✓ BlastRadius model (0–100 score + 3-tier impact scope)
+      ✓ Advisory storm detection (compound multi-signal overload)
+      ✓ ObservabilityHealth degrades with domain severity
+      ✓ RecoveryClassification (no_action_needed → immediate_intervention)
+      ✓ PlatformReliabilityOverview with cascadingRiskWorkspaces
+      ✓ GET /platform/governance/reliability/domains live endpoint
+      ✓ 4 structured observability events (filtered for noise)
+      ✓ Full composability with P9-B partitions + P9-E policies + P9-F bridges
+      ✓ READ-ONLY: no autonomous recovery, no mutation, no restart
+
+Readiness checklist for recovery orchestration (what is true today):
+
+  [✓] Failure containment model per workspace (P10-A)
+  [✓] Blast radius classification (P10-A)
+  [✓] Propagation risk classification (P10-A)
+  [✓] Containment boundary health per workspace (P10-A)
+  [✓] Advisory storm detection (P10-A)
+  [✓] Recovery classification (no_action_needed → immediate_intervention)
+  [✓] Effective scheduler weight enforcement (P9-F)
+  [✓] Human-gated policy lifecycle for governance decisions (P9-E)
+  [✓] Platform-wide reliability overview with cascading risk list (P10-A)
+  [✓] 4 structured observability events with actionable fields (P10-A)
+
+Remaining pre-conditions before recovery orchestration:
+
+  [✗] Reliability domain history / persistence (§15-B)
+  [✗] Cross-workspace propagation causality model (§15-A)
+  [✗] Reliability SLO definitions (§15-F)
+  [✗] Recovery tracking (MTTR, action-outcome correlation) (§15-C)
+  [✗] Automated alert routing for escalation (§15-G)
+  [✗] Minimum observation period with baseline reliability data
+      before any automated recovery recommendations
+
+Suggested development sequence for recovery orchestration research:
+  1. Persist ReliabilityDomain snapshots to DB (reliability_domain_snapshots table).
+  2. Define platform SLOs: acceptable thresholds for criticalCount, advisoryStormCount.
+  3. Build an alerting pipeline from the structured events (§12).
+  4. Instrument cross-workspace propagation (correlate pressureScore changes).
+  5. Design a read-only recovery recommendation engine that SUGGESTS operator
+     actions (e.g., "Consider rolling back policy X for workspace Y") without
+     taking any action — using the existing P9-E rollback flow for execution.
+  6. Only after ≥30 days of recommendation-review-action-outcome cycles:
+     consider automated recovery with strict human confirmation gates.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED   artifacts/api-server/src/lib/workflows/reliability-domains.ts
+            (~440 lines) — pure P10-A engine
+            14 exported types, 21 exported functions, 5 exported constants
+  CREATED   artifacts/api-server/src/lib/workflows/__tests__/
+              reliability-domains.test.ts
+            (~310 lines) — T1–T10, 53 assertions
+  MODIFIED  artifacts/api-server/src/routes/platform.ts
+            + import evaluateFailureContainment, buildPlatformReliabilityOverview,
+              makeReliabilityDomainId, FailureContainmentInput from reliability-domains
+            + GET /platform/governance/reliability/domains route
+  CREATED   workflow-phase-10a-report.txt (this file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUMULATIVE TEST COUNTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Phase 9-A baseline:  1447 tests (25 files)
+  Phase 9-B additions:   +51 tests → 1498 tests (26 files)
+  Phase 9-C additions:   +49 tests → 1547 tests (27 files)
+  Phase 9-D additions:   +54 tests → 1601 tests (28 files)
+  Phase 9-E additions:   +58 tests → 1659 tests (29 files)
+  Phase 9-F additions:   +52 tests → 1711 tests (30 files)
+  Phase 10-A additions:  +53 tests → 1764 tests (31 files)
+  Total:               1764 tests, 31 files, 0 failures

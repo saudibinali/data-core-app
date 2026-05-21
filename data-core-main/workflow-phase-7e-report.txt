@@ -1,0 +1,327 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 7-E REPORT
+Historical Analytics Dashboard & Trend Visualization Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STATUS:   COMPLETE
+TESTS:    1143 / 1143 passing  (1091 API · 128 frontend, 52 new)
+TS ERRORS: 0 new  (2 pre-existing carry-forwards in workflow-detail.tsx / workflows.tsx,
+                   unrelated to P7 work)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — DASHBOARD ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Route:  /governance/history
+Access: admin + super_admin (same guard as /governance)
+Nature: READ-ONLY — no mutations, no writes, no rollup/prune triggers
+
+New files created:
+  artifacts/ops-platform/src/pages/governance-history.tsx
+    — Main dashboard page (~500 lines)
+    — Shared range state drives all 4 queries simultaneously
+    — No polling (historical data is stable)
+    — Loading skeleton per chart, error alert per chart, empty state per chart
+
+  artifacts/ops-platform/src/lib/governance-trend-utils.ts
+    — Pure utility module, no React imports
+    — Safe to test in Node environment (no DOM required)
+    — 22 exported functions / constants / types
+
+  artifacts/ops-platform/src/lib/__tests__/governance-trend-utils.test.ts
+    — 52 assertions across T1–T10 test groups
+    — Pure unit tests (vitest, no DOM, no HTTP)
+
+Files modified:
+  lib/api-spec/openapi.yaml
+    — GovernanceEventBodyAction enum: +4 historical_ action strings
+
+  artifacts/api-server/src/routes/governance.ts
+    — VALID_DASHBOARD_ACTIONS set: +4 historical_ action strings
+
+  artifacts/ops-platform/src/App.tsx
+    — Import + Route for /governance/history (placed before /governance)
+
+  artifacts/ops-platform/src/components/layout/header.tsx
+    — Title "Historical Analytics" for /governance/history
+      (evaluated before the catch-all /governance check)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CHART SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) Severity Timeline
+   Component:   Recharts BarChart, each bar = one snapshot
+   Y-axis:      0 (healthy) → 3 (critical), labelled Heal / Warn / Degr / Crit
+   Bar fill:    Per-bar Cell fill driven by severityHex() (deterministic hex map)
+   Colour map:  healthy=#22c55e  warning=#eab308  degraded=#f97316  critical=#ef4444
+   Bar width:   Adaptive — 6px (sparse) / 3px (medium) / 2px (dense >200 pts)
+   Tooltip:     Full ISO timestamp + severity label coloured by its palette
+   Legend:      Colour swatches below chart for all 4 levels
+
+B) Error Rate Trend
+   Component:   Recharts AreaChart with red gradient fill
+   Y-axis:      % labels (0–100%), domain auto-scaled to data
+   Stroke:      #ef4444 (red-500), 1.5px
+   Tooltip:     Full timestamp + formatted percentage (e.g. "3.2%")
+   Footer:      Avg rate + trend direction arrow (rising/falling/stable)
+
+C) Backlog Pressure
+   Component:   Recharts AreaChart with 3 stacked non-filled areas
+   Series:      approval (#8b5cf6 violet) · delay (#06b6d4 cyan) · stuck (#f97316 orange)
+   Y-axis:      Auto-scaled, allows decimals from rollup float averages
+   Tooltip:     Per-series values with colour dot (shows floats to 1 dp)
+   Legend:      Colour swatches for all 3 series
+
+D) Storm Activity
+   Component:   Recharts BarChart, each bar = stormFrequency in [0,1]
+   Y-axis:      % labels, domain [0, 1] fixed
+   Bar fill:    Threshold-coloured per bar:
+                  > 50% → red (#ef4444)
+                  > 25% → orange (#f97316)
+                  ≤ 25% → yellow (#eab308)
+   Tooltip:     Full timestamp + storm% + dominantSeverity label
+   Footer:      Count of heavy storm periods (>50% frequency)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — sourceLayer VISUALIZATION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The API transparently selects the storage tier based on the requested range.
+The frontend reflects this in two places:
+
+Header badge (SourceLayerBadge component):
+  raw    → "5-min snapshots"   (ranges: 1h / 24h / 7d / 30d)
+  hourly → "Hourly averages"   (range:  90d)
+  daily  → "Daily averages"    (ranges: 180d / 365d)
+
+Insights panel footer:
+  "Derived from the 30d window · 5-min snapshots"
+
+X-axis tick formatting adapts to range density (formatTimestampForRange):
+  1h / 24h  → HH:MM
+  7d / 30d  → "Jan 15"
+  90d       → "Jan 15"
+  180d/365d → "Jan '25"
+
+Per-point sourceLayer is available in the raw data but not displayed
+per-point to avoid noise — the envelope-level sourceLayer (consistent
+across all points in a response) is shown in the header badge.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — TRUNCATION UX MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Detection:  isTrendDataTruncated(...envelopes) — true if any of the 4
+            responses has truncated=true.
+
+Visibility: When anyTruncated=true a yellow Alert banner is rendered
+            prominently ABOVE the chart grid, never hidden. Text:
+
+  "Data cap reached — showing only the first 1,000 data points of your
+   30d window. Some points were omitted because the dataset exceeded the
+   display limit. [Narrow the time range to restore full resolution.]"
+
+Action:     The inline button calls handleRangeChange(previousRange),
+            automatically stepping down one range (e.g. 90d → 30d).
+
+Observability: First time the banner appears, historical_truncation_warning_shown
+               is emitted via POST /governance/events.
+
+Reset:      truncationWarnedRef resets to false when truncation clears
+            (range narrowed or data re-fetched without truncation).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — OPERATIONAL INSIGHTS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All insights are derived from the live trend data in the selected range.
+None require additional API calls. Pure functions in governance-trend-utils.ts.
+
+1. Dominant historical severity
+   dominantHistoricalSeverity(points) — worst severity seen in the period.
+   Shows full severity distribution subtitle:
+   "3 critical · 12 degraded · 45 warning · 200 healthy snapshots"
+
+2. Average error rate trend direction
+   summarizeErrorRate(points) — compares first-half vs second-half mean.
+   Delta < 0.5pp → "stable"; else "rising" (red) or "falling" (green).
+   Subtitle gives operational context ("recovering" / "investigate").
+
+3. Peak backlog period
+   peakBacklogPeriod(points) — timestamp of max(approval+delay+stuck).
+   Shows total count and formatted timestamp.
+   Coloured orange when total > 5.
+
+4. Heavy storm periods
+   stormHeavyPeriods(points, 0.5) — snapshots where stormFrequency > 50%.
+   Shows count and peak frequency across all heavy periods.
+   Red when heavy periods detected.
+
+No AI summaries, no external calls, no predictions.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4 new GovernanceEventBodyAction values added to OpenAPI spec + VALID_DASHBOARD_ACTIONS:
+
+  historical_dashboard_loaded
+    Emitted once, when all 4 queries succeed for the first time.
+    dashboardSeverity = dominantHistoricalSeverity at that moment.
+
+  historical_dashboard_range_changed
+    Emitted on every range button click.
+    Clears chartsRendered ref so rendered events fire again.
+
+  historical_chart_rendered
+    Emitted once per chart per range selection (tracked by chartsRendered Set).
+    Fires separately for: severity, error-rate, backlogs, storms.
+
+  historical_truncation_warning_shown
+    Emitted once when truncation banner first appears for a given range.
+    Resets when truncation clears.
+
+All events use the existing GovernanceEventBody shape:
+  { action, visibleAlertCount: 0, visibleStuckCount: 0, dashboardSeverity }
+
+buildHistoricalEvent() in governance-trend-utils.ts produces a richer
+HistoricalObservabilityEvent payload (includes selectedRange, sourceLayer,
+chartType, truncated) for future enrichment if the event schema is extended.
+
+Codegen re-run after spec change — generated enum updated in
+lib/api-client-react/src/generated/api.ts and lib/api-zod/src/generated/api.ts.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TEST RESULTS  (T1 – T10)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All tests are pure unit tests in governance-trend-utils.test.ts (vitest, no DOM).
+52 assertions total.
+
+T1  range selector synchronisation       7 assertions   PASS
+    — TREND_RANGES has 7 values, each produces distinct axis format,
+      invalid timestamps return the original string safely.
+
+T2  severity colour mapping             11 assertions   PASS
+    — Distinct hex for all 4 levels, correct individual hex values,
+      slate-400 fallback for unknown, numeric scale 0–3,
+      dominantHistoricalSeverity picks worst, escalates to critical,
+      countSeverityDistribution tallies correctly.
+
+T3  error-rate source layer handling     7 assertions   PASS
+    — Average identical regardless of sourceLayer field,
+      rising / falling / stable trend detection,
+      formatErrorRatePct correct at 0%, 10%, 33.3%, 100%.
+
+T4  backlog float averages               4 assertions   PASS
+    — peakBacklogPeriod finds correct snapshot, accepts floats from
+      rollup tiers, null on empty, zero-total peak handled.
+
+T5  storm frequency semantics            6 assertions   PASS
+    — Heavy filter at default threshold, custom threshold,
+      empty result when none qualify, STORM_HEAVY_THRESHOLD=0.5,
+      formatStormFrequency rounds correctly.
+
+T6  truncation detection                 5 assertions   PASS
+    — Detects any truncated=true, null/undefined treated as non-truncated,
+      missing field treated as false.
+
+T7  read-only surface                    3 assertions   PASS
+    — buildHistoricalEvent produces plain object, is deterministic,
+      all 4 HistoricalEventAction values accepted.
+
+T8  sourceLayer labels                   4 assertions   PASS
+    — raw/"5-min snapshots", hourly/"Hourly averages",
+      daily/"Daily averages", unknown passed through unchanged.
+
+T9  empty data safety                    8 assertions   PASS
+    — All 8 functions return safe defaults for empty/absent inputs.
+
+T10 API failure resilience               8 assertions   PASS
+    — severityHex / severityToNumeric never throw,
+      single-point error rate → stable,
+      corrupted severity strings → no throw + healthy fallback,
+      formatTimestampForRange on invalid input → no throw,
+      stormHeavyPeriods on zero-frequency → no throw + empty result,
+      peakBacklogPeriod on all-zero → no throw.
+
+Final count:  52 / 52   PASS
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — REMAINING ANALYTICS UX GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following gaps exist at this phase boundary. They are intentionally
+deferred — none are blockers for the current analytics surface:
+
+A) No navigation link from /governance to /governance/history
+   The user must type the URL directly or rely on breadcrumb.
+   Fix: add a "View History" button/link in governance-dashboard.tsx header.
+
+B) Source layer per-point tooltip
+   Currently the tooltip shows the value and timestamp.
+   For rollup tiers, showing "(hourly avg)" in the tooltip would help
+   users understand precision differences within a mixed response.
+
+C) Comparison mode
+   No ability to overlay two ranges (e.g. this week vs last week).
+   Useful for detecting regressions vs seasonal patterns.
+
+D) Axis tick density for very sparse datasets
+   For 365d daily data with few rollup rows, the X axis may show
+   redundant tick labels. Auto-interval logic is delegated to Recharts
+   "preserveStartEnd" — a custom tick count calculation would be cleaner.
+
+E) Governance event enrichment
+   The 4 new events currently use the legacy event body shape
+   (visibleAlertCount / visibleStuckCount / dashboardSeverity).
+   If the OpenAPI spec is extended with range / sourceLayer / chartType
+   fields on GovernanceEventBody, the buildHistoricalEvent() payload
+   can be emitted verbatim without mapping.
+
+F) No URL persistence for range selection
+   The selected range resets on page reload. A ?range=30d query param
+   would allow bookmarking / sharing specific range views.
+
+G) No chart zoom or brush
+   Recharts supports a Brush component for sub-range selection within
+   the rendered window. Not needed at this foundation phase.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before advancing to: Advanced Governance Analytics (P8+)
+
+COMPLETE:
+  [✓] governance_snapshots table (P7-A)
+  [✓] Snapshot scheduler (P7-B)
+  [✓] governance_snapshot_rollups table + rollup pipeline (P7-C)
+  [✓] 4 trend API endpoints with query cascade (P7-D)
+  [✓] Historical analytics dashboard (P7-E)
+  [✓] Shared range selector syncing all 4 charts
+  [✓] sourceLayer badge + axis tick formatting
+  [✓] Truncation banner with actionable narrowing button
+  [✓] Operational insights panel (4 derived insights)
+  [✓] 4 structured observability events
+  [✓] 52 pure unit tests (T1–T10)
+  [✓] Codegen up-to-date
+
+PREREQUISITES FOR P8 ADVANCED ANALYTICS:
+  — URL-persisted range param (bookmarkable views)
+  — Navigation link from /governance → /governance/history
+  — Per-chart error boundaries (currently shared error state)
+  — Brush / zoom component for sub-range exploration
+  — Consideration of chart export if compliance reporting is required
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

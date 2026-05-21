@@ -1,0 +1,98 @@
+P24-C — Procurement Workspace UI & Operations Center
+Date: 2026-05-20
+
+Executive summary
+-----------------
+P24-C converts the Procurement canonical foundation (P24-B) into a usable workspace runtime module by adding:
+- Workspace-scoped Procurement APIs (vendors, PR, RFQ, PO, policies, ops metrics)
+- Workspace UI pages under /procurement (Vendors / PR / RFQ / PO / Policies / Reports / Ops Center)
+- Procurement lifecycle events + notification wiring
+- Procurement monitoring/ops overview endpoint
+
+All work follows the constraints:
+- No inventory rollout
+- No AP invoice engine
+- No payment execution
+- No supplier portal
+- No accounting posting
+- No destructive migrations
+- No external procurement integrations
+
+Files changed / created (high-signal)
+-----------------------------------
+Backend (api-server)
+- artifacts/api-server/src/routes/procurement.ts (NEW)
+- artifacts/api-server/src/routes/index.ts (UPDATED) — mounted procurement router
+- artifacts/api-server/src/lib/procurement/purchase-order-service.ts (UPDATED) — emits procurement.po.approved
+- artifacts/api-server/src/lib/events/listeners/notifications-bus.ts (UPDATED) — procurement event notifications
+- artifacts/api-server/src/lib/procurement/__tests__/p24c-procurement-events.smoke.test.ts (NEW)
+
+Shared (core-events)
+- lib/core-events/src/events.ts (UPDATED) — procurement event payloads
+- lib/core-events/src/constants.ts (UPDATED) — procurement EVENT_TYPES + EventTypeMap + union
+
+Workspace UI (ops-platform)
+- artifacts/ops-platform/src/App.tsx (UPDATED) — /procurement routes wired
+- artifacts/ops-platform/src/pages/procurement-dashboard.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-vendors.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-vendor-detail.tsx (NEW) — upload + registry + expiry attach
+- artifacts/ops-platform/src/pages/procurement-prs.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-rfqs.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-pos.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-policies.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-reports.tsx (NEW)
+- artifacts/ops-platform/src/pages/procurement-ops.tsx (NEW)
+- artifacts/ops-platform/src/lib/__tests__/p24c-procurement-ui.smoke.test.ts (NEW)
+- artifacts/ops-platform/src/lib/__tests__/commercial-console-integration.test.ts (UPDATED) — fixed stale assertion
+
+Documentation
+- p24-c-procurement-workspace-ui.md (NEW)
+
+Status matrix (GO / PARTIAL / BLOCKED)
+--------------------------------------
+Procurement workspace runtime: GO
+- /procurement module landing + sub-pages wired.
+
+Vendor operations: PARTIAL
+- Vendor list/details, lifecycle, preferred, risk, vendor document upload + expiry attach present.
+- Gaps: richer onboarding wizard, contact management UI, richer doc timelines.
+
+Procurement workflow runtime (PR/RFQ/PO): PARTIAL
+- PR list + draft create foundation, submit endpoint emits event.
+- RFQ list + draft create, send emits event.
+- PO list + draft create foundation, readiness visibility, approved event emit.
+- Gaps: full line item editor, RFQ comparison UI, PO revision UI, embedded approvals drill-through.
+
+Operations center: GO
+- Ops overview endpoint + UI for readiness + vendor docs expiry + pending approvals snapshot.
+
+Reporting: GO
+- Procurement report definitions already registered (P24-B).
+- Procurement reports UI provides quick export job creation and links to Report Center.
+
+Security: GO
+- Confidential document access enforced server-side via DocumentAccessService (P24-B).
+- Export authorization enforced for procurement.* via procurement.export permission.
+- Workspace isolation enforced in all procurement routes.
+
+Smoke test results
+------------------
+- api-server test suite: PASS
+- ops-platform test suite: PASS
+- added P24-C procurement event and UI wiring smoke tests: PASS
+
+Remaining blockers / risks
+--------------------------
+- UI depth is foundation-level for PR/RFQ/PO creation/editing (single-item drafts in UI). The backend supports richer data; UI can be expanded iteratively.
+- Notification recipients are workspace admin/super_admin as a safe default; future refinement can target procurement-specific approvers via permission matrices.
+
+Recommended next phase
+----------------------
+P24-D — Inventory & Warehouse Canonical Architecture Foundation
+
+Closure confirmation
+--------------------
+- No destructive migrations performed.
+- No inventory/AP/payment/supplier portal/accounting posting introduced.
+- No external procurement integrations added.
+

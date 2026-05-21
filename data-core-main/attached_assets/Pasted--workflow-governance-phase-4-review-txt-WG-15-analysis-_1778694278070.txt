@@ -1,0 +1,206 @@
+راجع:
+- workflow-governance-phase-4-review.txt
+خصوصًا:
+- WG-15 analysis
+- P4-A section
+- execution context design
+- backward compatibility notes
+
+ثم نفّذ فقط:
+P4-A — CONTEXT ISOLATION
+
+ولا تنفّذ أي جزء من:
+- P4-B
+- P4-C
+- P4-D
+- P4-E
+- P4-F
+
+عنوان المهمة:
+WORKFLOW PHASE 4-A — Context Isolation & Execution Safety Foundations
+
+المهمة الحالية:
+إزالة mutable shared context pollution
+داخل workflow executor
+بدون تغيير behavior الحالي للـ workflows.
+
+الهدف:
+الانتقال من:
+shared mutable resolvedData soup
+
+إلى:
+namespaced step outputs
+
+مع الحفاظ الكامل على:
+- backward compatibility
+- existing workflows
+- existing step handlers
+- diagnostics APIs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — ADD stepOutputs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+ExecutionContext
+
+أضف:
+stepOutputs: Record<number, Record<string, unknown>>
+
+الهدف:
+كل step تخزن output الخاصة بها تحت:
+stepOutputs[step.index]
+
+بدل merge مباشر داخل resolvedData.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PRESERVE resolvedData BACKWARD COMPAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تحذف:
+resolvedData
+
+المطلوب:
+تحويلها إلى:
+computed backward-compatible aggregation
+
+يعني:
+resolvedData يتم توليدها من:
+stepOutputs
+
+بطريقة تحافظ على behavior الحالي.
+
+المطلوب:
+- merge order deterministic
+- handle undefined safely
+- no runtime throws
+
+مهم جدًا:
+لا تغيّر أي step handler حاليًا.
+كل handlers الحالية لازم تستمر تعمل بدون تعديل.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — REPLACE DIRECT MUTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل executor.ts:
+
+بدل:
+ctx.resolvedData = {
+  ...ctx.resolvedData,
+  ...result.output
+}
+
+استخدم:
+ctx.stepOutputs[step.index] = result.output ?? {}
+
+مع الحفاظ على:
+resolvedData compatibility behavior.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — IMMUTABLE triggerData
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+عند إنشاء execution context:
+
+استخدم:
+structuredClone()
+
+أو equivalent safe deep clone
+لـ:
+triggerData
+
+الهدف:
+منع mutation pollution عبر nested objects.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ADD SAFETY COMMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why shared mutable context dangerous
+- why stepOutputs isolated
+- why resolvedData still exists
+- migration strategy toward explicit stepOutputs future usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — DO NOT CHANGE EXECUTION FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تغيّر:
+- for-loop
+- step routing
+- approval behavior
+- status transitions
+- diagnostics APIs
+- event bus
+- workflow runtime behavior
+
+هذه المهمة:
+context safety فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DO NOT TOUCH STEP HANDLERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تعدّل:
+- notification.ts
+- task.ts
+- assignment.ts
+- condition.ts
+- status_update.ts
+- approval.ts
+
+كلها لازم تستمر تعمل كما هي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — ADD TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+step outputs isolated by step index
+
+T2:
+resolvedData backward compatibility preserved
+
+T3:
+nested triggerData mutation لا يؤثر على الأصل
+
+T4:
+existing workflows still produce identical outputs
+
+T5:
+undefined/null outputs لا تكسر aggregation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- DAG execution
+- cancellation
+- TTL
+- snapshots
+- queues
+- retries
+- validators جديدة
+- routing changes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-4a-report.txt
+
+ويحتوي:
+- التعديلات المنفذة
+- كيف stepOutputs تعمل
+- كيف resolvedData backward compatibility تعمل
+- كيف triggerData أصبحت immutable
+- أي edge cases مكتشفة
+- نتائج الاختبارات
+- readiness assessment قبل P4-B

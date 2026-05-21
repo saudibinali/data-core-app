@@ -1,0 +1,729 @@
+WORKFLOW PHASE 12-H — Final Governance Console Closure Report
+           & Frontend Compliance Operations Consolidation
+==============================================================================
+Documentation-only closure phase · No code changes · No backend changes
+Phase 12 complete: P12-A → P12-G all CLOSED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXECUTIVE TECHNICAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12 delivered a complete, read-only, super-admin-scoped Governance
+Console for the Internal Operations Platform. The console spans 8 routes,
+14 purpose-built governance components, 15 deterministic visual model maps,
+≥16 read-only data hooks, and 5 layered safety contracts.
+
+Every sub-phase remained strictly frontend-only. Zero backend routes were
+added. Zero DB migrations were run. Zero mutation controls exist anywhere in
+the governance console. All data access is read-only GET, driven by pre-built
+Phase 11 API endpoints. All pages are protected by SuperAdminRoute.
+
+The console provides super-admin users with:
+  - Live audit chain integrity inspection and forensic event timelines
+  - Policy violation review and evidence reference browsing
+  - Governance workflow lifecycle tracking
+  - Compliance analytics and effectiveness visualization
+  - Platform topology and boundary status inspection
+  - Cross-layer readiness dimension scoring
+  - Evidence package integrity inspection with hash display and section coverage
+
+The design philosophy throughout is: maximum visibility, zero enforcement.
+The console surfaces information for human review — it never acts on it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. FULL P12-A → P12-G ARCHITECTURE CLOSURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+────────────────────────────────────────────────────────────────────
+P12-A — Governance Dashboard Shell & Navigation Foundations
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Establish the governance console shell — routes, navigation, shared
+  components, query configuration, and safety contract foundation.
+
+Pages:
+  /super-admin/governance  → SuperAdminGovernanceDashboard
+  All 7 navigation routes registered in GOVERNANCE_ROUTES.
+
+Key additions:
+  - GOVERNANCE_ROUTES (7 entries with icon, path, label, description)
+  - ALL_GOVERNANCE_ROUTE_PATHS (readonly tuple, exactly 7 entries)
+  - GOVERNANCE_QUERY_CONFIG (staleTime, gcTime, retry, refetchOnWindowFocus)
+  - GOVERNANCE_CONSOLE_SAFETY_CONTRACT (8 props, all true)
+  - GOVERNANCE_READ_HOOK_NAMES (≥16 read-only hook names)
+  - GOVERNANCE_EMPTY_STATE (per-section empty state messages)
+  - GOVERNANCE_API_PATHS (all governance endpoint paths)
+  - GovernanceReadOnlyNotice, GovernanceSectionHeader, GovernanceErrorState
+  - SuperAdminGovernanceLayout with sidebar navigation and breadcrumbs
+
+Frontend-only boundary:
+  All navigation and shell code imports zero backend modules.
+  No mutation hooks, no API writes.
+
+Backend readiness dependency:
+  None required for the shell — pure navigation structure.
+  Dashboard stats displayed from useGovernanceDashboard() (GET).
+
+────────────────────────────────────────────────────────────────────
+P12-B — Audit Integrity UI & Forensic Timeline
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Replace the audit page placeholder with live audit chain inspection,
+  forensic event timeline, and retention classification display.
+
+Pages:
+  /super-admin/governance/audit  → SuperAdminGovernanceAudit (rewritten)
+
+Key additions:
+  - INTEGRITY_STATUS_MAP (5 statuses: verified → tampered)
+  - RETENTION_CLASSIFICATION_MAP (5 tiers: permanent → transient)
+  - GovernanceForensicTimeline component
+  - Audit chain summary cards, retention distribution grid, chain detail
+    expansion with tamper evidence flags
+
+Frontend-only boundary:
+  All data from useGovernanceAuditChain(), useGovernanceAuditStats(),
+  useGovernanceForensicTimeline() — all GET hooks.
+  Tampered entries rendered with red highlight; zero "fix" button.
+
+Backend readiness dependency:
+  Phase 11 audit chain endpoints, forensic event list endpoint.
+
+────────────────────────────────────────────────────────────────────
+P12-C — Policy Violations UI & Evidence Review Foundations
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Policy violation list/detail view, evidence reference inspection,
+  policy registry table.
+
+Pages:
+  /super-admin/governance/violations  → SuperAdminGovernanceViolations (rewritten)
+
+Key additions:
+  - VIOLATION_SEVERITY_MAP (5 levels: informational → critical)
+  - VIOLATION_SEVERITY_ORDER_DESC, ALL_VIOLATION_SEVERITY_KEYS
+  - EVIDENCE_REFERENCE_TYPE_MAP (5 types: audit_chain_entry → external_ref)
+  - POLICY_REGISTRY_COLUMNS (6 columns)
+  - VIOLATION_SEVERITY_FILTER_OPTIONS, VIOLATION_TYPE_FILTER_OPTIONS
+  - VIOLATIONS_UI_SAFETY_CONTRACT (12 props, all true)
+  - VIOLATIONS_EMPTY_STATE, FORENSIC_CONTEXT_GUIDANCE
+  - GovernanceEvidenceReferenceList component (expandable rows, type badges)
+
+Frontend-only boundary:
+  Violations listed and filtered client-side. Evidence references shown
+  read-only. No "dismiss violation", no "resolve", no "create policy" control.
+
+Backend readiness dependency:
+  Phase 11 violations list, policy registry, evidence reference endpoints.
+
+────────────────────────────────────────────────────────────────────
+P12-D — Governance Workflows UI & Lifecycle Timeline
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Workflow governance list, escalation timeline, resolution display.
+
+Pages:
+  /super-admin/governance/workflows  → SuperAdminGovernanceWorkflows (rewritten)
+
+Key additions:
+  - WORKFLOW_STATUS_MAP (6 statuses: pending → closed)
+  - ESCALATION_LEVEL_MAP (5 levels: level_0 → critical_escalation)
+  - RESOLUTION_CLASSIFICATION_MAP (5 classes: resolved → voided)
+  - WORKFLOW_FILTER_OPTIONS
+  - GovernanceWorkflowLifecycleTimeline component
+
+Frontend-only boundary:
+  Workflows browsed and filtered client-side. No reassignment, no close,
+  no trigger controls. Escalated workflows highlighted — no action button.
+
+Backend readiness dependency:
+  Phase 11 governance workflow list, escalation history, resolution endpoints.
+
+────────────────────────────────────────────────────────────────────
+P12-E — Governance Analytics UI & Compliance Intelligence Visualization
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Compliance effectiveness charts, violation trend, escalation distribution,
+  policy effectiveness table.
+
+Pages:
+  /super-admin/governance/analytics  → SuperAdminGovernanceAnalytics (rewritten)
+
+Key additions:
+  - ANALYTICS_METRIC_MAP (8 metrics with unit, higherIsBetter, tier)
+  - WORKFLOW_EFFECTIVENESS_SCORE_MAP (5 tiers: optimal → critical)
+  - ANALYTICS_TIME_RANGE_OPTIONS, ANALYTICS_DIMENSION_OPTIONS
+  - ANALYTICS_UI_SAFETY_CONTRACT (10 props, all true)
+  - ANALYTICS_EMPTY_STATE
+  - GovernanceViolationTrendChart (Recharts line chart)
+  - GovernanceEscalationDistributionChart (Recharts bar chart)
+  - GovernancePolicyEffectivenessTable (sortable, effectiveness badges)
+
+Frontend-only boundary:
+  All charts driven by useGovernanceAnalytics() GET hook.
+  Pure visualization — no alert thresholds, no auto-escalation triggers.
+  No AI summaries generated. No legal verdicts inferred from chart data.
+
+Backend readiness dependency:
+  Phase 11 analytics aggregate endpoint, policy effectiveness rollup.
+
+────────────────────────────────────────────────────────────────────
+P12-F — Governance Topology & Readiness UI Foundations
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Layer dependency map, boundary status table, topology snapshot display,
+  readiness dimension grid, dedicated readiness page.
+
+Pages:
+  /super-admin/governance/topology  → SuperAdminGovernanceTopology (rewritten)
+  /super-admin/governance/readiness → SuperAdminGovernanceReadiness (new)
+  (readiness route registered in App.tsx directly, not in GOVERNANCE_ROUTES)
+
+Key additions:
+  - TOPOLOGY_LAYER_MAP (7 layers, order 0–6, foundation → presentation)
+  - TOPOLOGY_LAYER_ORDER (readonly tuple)
+  - BOUNDARY_STATUS_MAP (7 statuses: isolated → unknown, order 0–6)
+  - BOUNDARY_STATUS_ORDER
+  - READINESS_DIMENSION_MAP (8 dimensions, order 0–7)
+  - READINESS_DIMENSION_ORDER
+  - READINESS_STATUS_MAP (4 statuses: ready → unknown)
+  - TOPOLOGY_UI_SAFETY_CONTRACT (10 props, all true)
+  - READINESS_UI_SAFETY_CONTRACT (10 props, all true)
+  - TOPOLOGY_EMPTY_STATE
+  - GovernanceTopologyDependencyMap (CSS spine, no graph library)
+  - GovernanceBoundarySummaryTable (sort: leak_detected first, then warning)
+  - GovernanceReadinessDimensionGrid (blocked=red 2px border, partial=amber)
+  - Snapshot panel, diff placeholder (static info card)
+
+Frontend-only boundary:
+  Topology data from useGovernanceTopology(), useGovernanceTopologyBoundaries(),
+  useGovernanceTopologySnapshot() — all GET.
+  Diff placeholder is static text — no diff execution.
+  boundary_leak entries rendered with red border; zero "fix" affordance.
+
+Backend readiness dependency:
+  Phase 11 topology, boundary, snapshot, readiness endpoints.
+
+────────────────────────────────────────────────────────────────────
+P12-G — Evidence Packages UI & Controlled Package Review Foundations
+────────────────────────────────────────────────────────────────────
+
+Goal:
+  Evidence package list, integrity inspection, section coverage, readiness
+  overview, expandable detail with hash display.
+
+Pages:
+  /super-admin/governance/evidence-packages  → SuperAdminGovernanceEvidence (rewritten)
+
+Key additions:
+  - EVIDENCE_PACKAGE_SCOPE_MAP (6 scopes: platform → readiness, order 0–5)
+  - EVIDENCE_PACKAGE_SCOPE_ORDER
+  - EVIDENCE_SECTION_MAP (7 sections: audit_integrity → boundary_summary, order 0–6)
+  - EVIDENCE_SECTION_ORDER
+  - PACKAGE_INTEGRITY_STATUS_MAP (5 statuses: verified → unknown, order 0–4)
+  - PACKAGE_INTEGRITY_STATUS_ORDER
+  - EVIDENCE_SCOPE_FILTER_OPTIONS, EVIDENCE_INTEGRITY_FILTER_OPTIONS
+  - EVIDENCE_PACKAGE_SAFETY_CONTRACT (10 props, all true)
+  - EVIDENCE_PACKAGE_EMPTY_STATE
+  - GovernanceEvidenceSectionCoverageGrid (stable 7-row grid, missing=red)
+  - GovernancePackageIntegrityPanel (hash collapsible, compromised=red, no repair)
+
+Frontend-only boundary:
+  Packages from useGovernanceEvidencePackages(scope) and
+  useGovernanceEvidenceReadiness() — both GET.
+  Full hash shown in copy-safe text block — no download button.
+  Compromised packages: red visual + "Critical visibility only" note.
+  Zero verify/repair/generate/export/notarize controls.
+
+Backend readiness dependency:
+  Phase 11 evidence package, evidence readiness endpoints.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. FINAL ROUTE SURFACE (8 routes total)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Path                                       Component                              Phase  Nav
+─────────────────────────────────────────  ─────────────────────────────────────  ─────  ───
+/super-admin/governance                    SuperAdminGovernanceDashboard          P12-A  ✓
+/super-admin/governance/audit              SuperAdminGovernanceAudit              P12-B  ✓
+/super-admin/governance/violations         SuperAdminGovernanceViolations         P12-C  ✓
+/super-admin/governance/workflows          SuperAdminGovernanceWorkflows          P12-D  ✓
+/super-admin/governance/analytics          SuperAdminGovernanceAnalytics          P12-E  ✓
+/super-admin/governance/topology           SuperAdminGovernanceTopology           P12-F  ✓
+/super-admin/governance/evidence-packages  SuperAdminGovernanceEvidence           P12-G  ✓
+/super-admin/governance/readiness          SuperAdminGovernanceReadiness          P12-F  —
+
+ALL_GOVERNANCE_ROUTE_PATHS: exactly 7 entries (shell test asserts this).
+/readiness is registered directly in App.tsx — not in GOVERNANCE_ROUTES.
+This preserves the shell test invariant from P12-A.
+
+Access control:
+  Every route is wrapped in SuperAdminRoute.
+  Non-super-admin users are redirected to /sign-in on any access attempt.
+  Super-admins bypass the "no workspace" screen (they have no workspace by design).
+
+Path prefix: All routes begin with /super-admin/ — completely isolated from
+  workspace-scoped admin routes (/admin/*) and member routes (/).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FINAL COMPONENT INVENTORY (14 governance components)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All components are in:
+  artifacts/ops-platform/src/components/governance/
+
+SHARED (P12-A)
+──────────────
+GovernanceReadOnlyNotice
+  Persistent read-only banner rendered at the top of every governance page.
+  Communicates that the console is observation-only and no changes can be made.
+  No props — pure informational bar.
+
+GovernanceSectionHeader
+  Standardised page header with icon, title, and description text.
+  Used on every governance sub-page as the top-of-page hero element.
+
+GovernanceErrorState
+  Centralised error display with a configurable message string.
+  Shown when any governance API call returns an error response.
+
+P12-B
+─────
+GovernanceForensicTimeline
+  Chronological event timeline for governance audit chain inspection.
+  Events are ordered by timestamp; tampered entries receive red styling.
+  Expandable rows reveal event metadata, source layer, and evidence refs.
+  No "acknowledge" or "dismiss" action afforded.
+
+P12-C
+─────
+GovernanceEvidenceReferenceList
+  Expandable list of evidence references attached to a violation or package.
+  Each row shows: type badge (audit_chain_entry, snapshot, etc.), referenceId,
+  and optional source/layer/description expansion.
+  Stable sort: by type alphabetically, then by referenceId.
+  Reused in P12-G package detail expansion.
+
+P12-D
+─────
+GovernanceWorkflowLifecycleTimeline
+  Step-by-step lifecycle display for a governance workflow.
+  Shows: status badges, escalation level, resolution classification.
+  Time-ordered; critical-escalation steps rendered with amber/red prominence.
+  No reassignment, no close/reopen controls.
+
+P12-E
+─────
+GovernanceViolationTrendChart
+  Recharts line chart showing violation counts over a configurable time range.
+  Multiple series (total, critical, high, resolved) rendered in deterministic
+  colours. No threshold editing, no alert configuration.
+
+GovernanceEscalationDistributionChart
+  Recharts bar chart showing escalation level distribution.
+  Bars coloured by ESCALATION_LEVEL_MAP tier. Pure display — no drill-down
+  navigation, no level reassignment.
+
+GovernancePolicyEffectivenessTable
+  Sortable table of policy effectiveness scores.
+  Columns: Policy, Detection Rate, Resolution Rate, Avg Time, Effectiveness.
+  Effectiveness badge from WORKFLOW_EFFECTIVENESS_SCORE_MAP.
+  No policy enable/disable controls.
+
+P12-F
+─────
+GovernanceTopologyDependencyMap
+  CSS-only layer dependency spine — no graph library.
+  Iterates TOPOLOGY_LAYER_ORDER (7 layers), renders each with boundary badge.
+  ArrowDown connectors between layers. Compact mode hides descriptions.
+  Boundary leaks and warnings highlighted (red/amber border).
+  Falls back to TOPOLOGY_LAYER_MAP config defaults if live data absent.
+
+GovernanceBoundarySummaryTable
+  4-column table: Layer | Status | Expected | Observed.
+  Sort priority: leak_detected first (priority −100), warning second (−50),
+  then layer order. Critical rows: red left border + red bg tint.
+  Evidence reference count displayed inline under Observed column.
+
+GovernanceReadinessDimensionGrid
+  2-column card grid iterating READINESS_DIMENSION_ORDER (8 dimensions).
+  blocked: red 2px border + red bg tint.
+  partial: amber 2px border + amber bg tint.
+  ScoreBar rendered when score 0.0–1.0 is present (emerald/amber/red by range).
+
+P12-G
+─────
+GovernanceEvidenceSectionCoverageGrid
+  Row-per-section grid iterating all 7 EVIDENCE_SECTION_ORDER entries.
+  3 columns: Section | Source Layer | Status (Included/Missing/Unknown).
+  Missing sections always rendered — red left border + red bg tint.
+  Never hides absent sections. Source layer label from TOPOLOGY_LAYER_MAP.
+
+GovernancePackageIntegrityPanel
+  Hash display with "Show full hash" / "Hide" collapsible toggle.
+  Full hash block is copy-safe monospaced text — no download button.
+  Compromised: red border-2 wrapper + "Critical visibility only" inline note.
+  Warnings block renders both warningCodes[] and warnings[{code, message}].
+  No verify, no repair, no notarization affordance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FINAL VISUAL MODEL MAPS (15 maps)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All maps are in governance-console-config.ts.
+All are declared "as const" — TypeScript-enforced immutability.
+All drive UI rendering only — they contain no mutation wording, no legal
+verdict wording, and no enforcement language.
+
+Map                               Phase  Entries  Order exported   Purpose
+────────────────────────────────  ─────  ───────  ───────────────  ──────────────────────────────────────
+INTEGRITY_STATUS_MAP              P12-B      5    yes (desc)       Audit chain record integrity
+RETENTION_CLASSIFICATION_MAP      P12-B      5    yes (asc)        Audit record retention tier display
+VIOLATION_SEVERITY_MAP            P12-C      5    yes (asc/desc)   Policy violation severity rendering
+WORKFLOW_STATUS_MAP               P12-D      6    yes              Governance workflow lifecycle states
+ESCALATION_LEVEL_MAP              P12-D      5    yes              Escalation level badge semantics
+RESOLUTION_CLASSIFICATION_MAP     P12-D      5    yes              Workflow resolution outcome display
+ANALYTICS_METRIC_MAP              P12-E      8    yes              Compliance metric unit/direction/tier
+WORKFLOW_EFFECTIVENESS_SCORE_MAP  P12-E      5    yes              Policy effectiveness tier rendering
+TOPOLOGY_LAYER_MAP                P12-F      7    yes (0–6)        Layer dependency stack semantics
+BOUNDARY_STATUS_MAP               P12-F      7    yes (0–6)        Boundary observation badge semantics
+READINESS_DIMENSION_MAP           P12-F      8    yes (0–7)        Readiness dimension metadata + meaning
+READINESS_STATUS_MAP              P12-F      4    yes              Readiness assessment badge semantics
+EVIDENCE_PACKAGE_SCOPE_MAP        P12-G      6    yes (0–5)        Evidence package scope display
+EVIDENCE_SECTION_MAP              P12-G      7    yes (0–6)        Evidence section metadata + meaning
+PACKAGE_INTEGRITY_STATUS_MAP      P12-G      5    yes (0–4)        Package integrity badge semantics
+
+Properties every map entry contains (at minimum):
+  label         — Human-readable display string (no legal or enforcement wording)
+  order         — Stable integer for deterministic iteration
+  tier          — Semantic grouping (good / attention / critical / muted / neutral)
+  description   — Plain-language explanation of the status
+
+Additional properties per map:
+  badgeClass    — Tailwind CSS string for badge rendering (colour-safe)
+  expectedInputs / outputMeaning — (readiness dimensions only)
+  displayHint   — (scope map only)
+  reviewMeaning — (evidence section map only)
+  expectedSourceLayer — (evidence section map only)
+  expectedBoundary / dependencyDirection — (topology layer map only)
+
+All order tuples are canonical — TOPOLOGY_LAYER_ORDER, READINESS_DIMENSION_ORDER,
+EVIDENCE_SECTION_ORDER, etc. — and are used as the single source of truth for
+component iteration. Components never sort on their own — they follow these tuples.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. FINAL HOOK / DATA ACCESS SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All governance hooks are defined in:
+  artifacts/ops-platform/src/lib/governance-console-hooks.ts
+
+GOVERNANCE_READ_HOOK_NAMES contains ≥16 entries.
+Every hook name:
+  - Starts with "useGovernance" (enforced by T10 tests in every phase)
+  - Has no mutation prefix (useMutate / useCreate / useDelete / useUpdate / usePost)
+  - Maps to a single GET endpoint in GOVERNANCE_API_PATHS
+
+Hook → Phase 11 API endpoint mapping:
+
+Hook                                    Endpoint
+───────────────────────────────────────  ─────────────────────────────────────────────────────
+useGovernanceDashboard                   GET /api/platform/governance/dashboard
+useGovernanceAuditChain                  GET /api/platform/governance/audit-chain
+useGovernanceAuditStats                  GET /api/platform/governance/audit-chain/stats
+useGovernanceForensicTimeline            GET /api/platform/governance/forensic-timeline
+useGovernanceViolations                  GET /api/platform/governance/violations
+useGovernancePolicyRegistry              GET /api/platform/governance/policy-registry
+useGovernanceWorkflows                   GET /api/platform/governance/workflows
+useGovernanceAnalytics                   GET /api/platform/governance/analytics
+useGovernanceTopology                    GET /api/platform/governance/topology
+useGovernanceTopologyBoundaries          GET /api/platform/governance/topology/boundaries
+useGovernanceTopologySnapshot            GET /api/platform/governance/topology/snapshot
+useGovernanceReadiness                   GET /api/platform/governance/readiness
+useGovernanceEvidencePackages(scope)     GET /api/platform/governance/evidence-packages?scope=…
+useGovernanceEvidenceReadiness           GET /api/platform/governance/evidence-packages/readiness
+(+ additional hooks as declared in GOVERNANCE_READ_HOOK_NAMES ≥ 16)
+
+TanStack Query configuration (GOVERNANCE_QUERY_CONFIG):
+  staleTime:             long interval — reduces unnecessary background refetches
+  gcTime:                extended — keeps governance data in cache
+  retry:                 1 — resilient but not aggressive
+  refetchOnWindowFocus:  false — governance data not volatile enough to refetch on focus
+
+No useMutation hook exists in any governance component or page.
+The word "mutate" does not appear in any governance component call site.
+All data flows are strictly read: query → render → human review.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. FINAL SAFETY CONTRACTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All safety contracts are declared in governance-console-config.ts as const.
+All properties are boolean. All are true. Tests assert this in every phase.
+
+── GOVERNANCE_CONSOLE_SAFETY_CONTRACT (8 props) — P12-A ────────────
+
+  readOnly:                  true  — entire console is observation-only
+  noMutationControls:        true  — no create/update/delete UI anywhere
+  noAutoEnforcement:         true  — no automated policy enforcement
+  noExportRendering:         true  — no PDF/XLSX/CSV rendering
+  noExternalSubmission:      true  — no regulator/external submission
+  noAiSummaries:             true  — no AI-generated explanations
+  superAdminOnly:            true  — all routes protected by SuperAdminRoute
+  allRoutesUnderSuperAdmin:  true  — all paths begin /super-admin/
+
+── VIOLATIONS_UI_SAFETY_CONTRACT (12 props) — P12-C ─────────────────
+
+  noViolationCreation:    true  noViolationDismissal:   true
+  noViolationResolution:  true  noPolicyEdit:           true
+  noPolicyEnableDisable:  true  noWorkflowTrigger:      true
+  noLegalConclusions:     true  noAiSummaries:          true
+  noExportRendering:      true  criticalAlwaysVisible:  true
+  highAlwaysVisible:      true  superAdminOnly:         true
+
+── ANALYTICS_UI_SAFETY_CONTRACT (10 props) — P12-E ──────────────────
+
+  noAlertThresholdEdit:     true  noAutoEscalation:        true
+  noAiAnalysis:             true  noLegalConclusions:      true
+  noExportRendering:        true  noExternalSubmission:    true
+  noWorkflowTrigger:        true  noPolicyModification:    true
+  noRegulatoryFiling:       true  superAdminOnly:          true
+
+── TOPOLOGY_UI_SAFETY_CONTRACT (10 props) — P12-F ───────────────────
+
+  noTopologyMutation:      true  noBoundaryAutoFix:        true
+  noSnapshotPersistence:   true  noDiffExecution:          true
+  noExportRendering:       true  noAiSummaries:            true
+  noLegalConclusions:      true  noRegulatorSubmission:    true
+  noReadinessOverride:     true  superAdminOnly:           true
+
+── READINESS_UI_SAFETY_CONTRACT (10 props) — P12-F ──────────────────
+
+  noReadinessOverride:     true  noTopologyMutation:       true
+  noSnapshotPersistence:   true  noAutoRemediation:        true
+  noExportRendering:       true  noAiSummaries:            true
+  noLegalConclusions:      true  noRegulatorSubmission:    true
+  noBusinessValuation:     true  superAdminOnly:           true
+
+── EVIDENCE_PACKAGE_SAFETY_CONTRACT (10 props) — P12-G ──────────────
+
+  noPackageGeneration:     true  noExportRendering:        true
+  noExternalSubmission:    true  noVerifyRepairAction:     true
+  noNotarization:          true  noAiSummaries:            true
+  noLegalConclusions:      true  noDownloadButtons:        true
+  superAdminOnly:          true  noPackageMutation:        true
+
+Enforcement mechanism:
+  All safety contracts are enforced at three independent layers:
+  1. Route guard: SuperAdminRoute (redirects non-super-admins to /sign-in)
+  2. UI structure: no mutation button, form, or hook exists in any component
+  3. Test coverage: every phase includes T8/T9-class forbidden-phrase tests
+     that scan all config text for mutation/export/legal wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FINAL TESTS & TYPECHECK STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FINAL TOTALS (after P12-G closure):
+  Frontend:   575 / 575   (9 test files)
+  Backend:   2399 / 2399  (42 test files)
+
+Frontend test file progression across Phase 12:
+
+  Phase  New file                                           Tests added
+  ─────  ─────────────────────────────────────────────────  ───────────
+  P12-A  governance-console-shell.test.ts                       ~45
+  P12-B  governance-audit-integrity.test.ts                     ~60
+  P12-C  governance-policy-violations.test.ts                   ~65
+  P12-D  governance-workflows.test.ts                           ~55
+  P12-E  governance-analytics.test.ts                           ~65
+  P12-F  governance-topology-readiness.test.ts                   69
+  P12-G  governance-evidence-packages.test.ts                    65
+
+All frontend governance tests run in pure Node.js (Vitest).
+They import ONLY from governance-console-config.ts — zero React/DOM/browser
+dependencies. This makes them instantaneous and immune to rendering environment
+changes.
+
+Test pattern enforced in every phase:
+  T1–T4   map/config stability (key count, canonical keys, shapes)
+  T5–T7   ordering determinism + critical-item visibility guarantees
+  T8      phrase-level forbidden-term scan (no mutation/export/legal wording)
+  T9      safety contract all-true assertion
+  T10     GOVERNANCE_READ_HOOK_NAMES read-only invariant
+  T11     filter config stability
+  T12     config shape correctness
+
+Backend tests:
+  2399 / 2399 — unchanged throughout P12.
+  Zero backend files were modified in any P12 sub-phase.
+  No new routes, no new DB migrations, no new schema changes.
+
+Typecheck:
+  Zero new TypeScript errors introduced in any P12 sub-phase.
+  Pre-existing errors in workflows.tsx and workflow-detail.tsx
+  (isActive property on UpdateWorkflowBody) remain unchanged and are
+  excluded per the documented scratchpad policy — they predate Phase 12.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. FINAL REMAINING FRONTEND GAPS — CLASSIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These gaps are intentionally deferred. None are implemented in P12.
+
+── A) Deep Linking / Detail Routes ──────────────────────────────────
+
+  - /super-admin/governance/audit/:entityId
+    Dedicated audit chain detail page for a specific entity, linked from
+    the forensic timeline and violation detail.
+
+  - /super-admin/governance/violations/:violationId
+    Dedicated violation detail page with full evidence reference tree.
+
+  - /super-admin/governance/workflows/:workflowId
+    Dedicated workflow lifecycle page with full escalation history.
+
+  - /super-admin/governance/evidence-packages/:packageId
+    Dedicated package detail page — enables deep linking for governance
+    review sessions and bookmarking specific packages.
+
+  Requirement: GET /…/:id endpoints on the backend (not yet implemented).
+
+── B) Export Rendering / Download UX ────────────────────────────────
+
+  All governance pages show "export not available" placeholders.
+  A future controlled export rendering phase would add:
+  - PDF rendering of governance reports (scoped access token required)
+  - XLSX/CSV export for violation and audit lists
+  - Human-authorised delivery controls before any file is transmitted
+  - Audit log entry for every export event
+
+  This is intentionally excluded from Phase 12 to maintain the read-only
+  boundary. Export rendering is a separate concern with its own security model.
+
+── C) Snapshot Persistence / History UX ─────────────────────────────
+
+  The topology page displays the latest snapshot only.
+  A future snapshot history phase would add:
+  - Paginated snapshot list (GET /topology/snapshots)
+  - Two-snapshot selector for diff comparison
+  - GovernanceTopologyDiffViewer replacing the current static placeholder
+  - Snapshot timeline visualization
+
+  Requires: snapshot list endpoint + diff computation endpoint (backend).
+
+── D) Cross-Page Evidence Linking ───────────────────────────────────
+
+  - Audit chain events → violation detail
+    A forensic timeline event with a violationRef should link to the
+    violations page filtered to that violation.
+
+  - Evidence section rows → topology / audit pages
+    GovernanceEvidenceSectionCoverageGrid shows expectedSourceLayer labels.
+    A future pass could make these labels clickable links to the relevant
+    governance page.
+
+  - Evidence reference IDs → audit chain entry detail
+    GovernanceEvidenceReferenceList shows raw referenceIds. When type is
+    "audit_chain_entry", the ID should resolve to a specific timeline event.
+
+  - Boundary warnings → evidence packages
+    GovernanceBoundarySummaryTable shows evidenceReferences counts.
+    Deep-links to the evidence packages page filtered by that layer.
+
+── E) Advanced Filtering / Pagination ───────────────────────────────
+
+  - Audit chain: pagination for chains with >50 entries
+  - Violations: server-side pagination (currently client-side filtered)
+  - Workflows: assignee filter, date range filter
+  - Analytics: custom date range picker (currently fixed presets)
+  - Evidence packages: server-side multi-package list endpoint
+  - Topology: layer filter in boundary summary table
+
+── F) Warning Code Dictionaries ────────────────────────────────────
+
+  The following raw code arrays are displayed as strings without descriptions:
+  - Package warningCodes[] in GovernancePackageIntegrityPanel
+  - Boundary warning codes in GovernanceBoundarySummaryTable
+  - Readiness blocker codes in GovernanceReadinessDimensionGrid
+
+  A future INTEGRITY_WARNING_CODE_MAP, BOUNDARY_WARNING_CODE_MAP, and
+  READINESS_BLOCKER_CODE_MAP would provide human-readable descriptions per code.
+
+── G) Future UX Enhancements ────────────────────────────────────────
+
+  - Real-time boundary push (WebSocket/SSE for boundary_leak events)
+  - Governance console keyboard navigation (focus management, skip links)
+  - Printable governance report layout (CSS print media query)
+  - Dashboard customisation (pin/reorder governance metric cards)
+  - Cross-workspace comparison view (super-admin viewing N workspaces side-by-side)
+  - Evidence package readiness score trend chart (time-series for evidence completeness)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. BUSINESS-SAFE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The platform now includes a complete Governance Console — a structured,
+read-only operational view designed for platform administrators. The console
+consolidates audit trail inspection, policy compliance monitoring, workflow
+review, analytics visualization, topology health assessment, and evidence
+package integrity inspection into a single, access-controlled interface.
+All data is surfaced for human review without any automated enforcement,
+legal inference, or external data transmission. The design prioritizes
+clarity and traceability while keeping the review boundary entirely within
+the platform's own access controls.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. FINAL READINESS VERDICT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12 is COMPLETE.
+
+All 7 governance sub-phases delivered:
+  ✓ P12-A  Governance Dashboard Shell & Navigation
+  ✓ P12-B  Audit Integrity UI & Forensic Timeline
+  ✓ P12-C  Policy Violations UI & Evidence Review
+  ✓ P12-D  Governance Workflows UI & Lifecycle Timeline
+  ✓ P12-E  Governance Analytics UI & Compliance Visualization
+  ✓ P12-F  Governance Topology & Readiness UI
+  ✓ P12-G  Evidence Packages UI & Package Review
+
+The platform is ready for:
+  → Controlled export rendering phase
+       A scoped, human-authorised delivery layer for PDF/XLSX governance reports
+  → Persisted snapshot / history phase
+       Topology snapshot archiving + diff comparison UI
+  → Advanced evidence linking phase
+       Cross-page navigation between violations, audit chains, and packages
+  → Workspace-scoped governance review workflows
+       Delegating specific governance review tasks to workspace admins
+  → Executive governance dashboards
+       Aggregated platform health views for non-technical stakeholders
+
+The platform is NOT yet ready for:
+  ✗ Regulator submission
+       No external transmission controls, no submission audit trail
+  ✗ Legal automation
+       No legal conclusion inference, no regulatory deadline tracking
+  ✗ AI compliance decisioning
+       No AI models, no automated recommendations, no inference layer
+  ✗ Autonomous enforcement
+       No automated policy enforcement, no auto-remediation controls
+  ✗ Uncontrolled export / download flows
+       No file generation without a controlled delivery layer in place
+
+The read-only, human-review-first design of Phase 12 is intentional and
+enforced at three levels (route guard, UI structure, test coverage).
+Any future phase that introduces export rendering, submission controls,
+or enforcement actions must be implemented as separate, independently
+audited capabilities — not as extensions of the read-only governance console.
+
+──────────────────────────────────────────────────────────────────────
+PHASE 12 CLOSED · Frontend 575/575 · Backend 2399/2399 · 0 new errors
+──────────────────────────────────────────────────────────────────────

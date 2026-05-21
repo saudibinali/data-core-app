@@ -1,0 +1,379 @@
+WORKFLOW PHASE 13-F — Subscription Expiry, Grace Period & Renewal Intelligence
+================================================================================
+Date:    2026-05-16
+Status:  COMPLETE
+Branch:  main
+
+────────────────────────────────────────────────────────────────────────────────
+OBJECTIVE
+────────────────────────────────────────────────────────────────────────────────
+Deliver a read-only renewal intelligence foundation for super-admins:
+visibility into subscription expiry, grace periods, and renewal urgency —
+with zero billing, enforcement, suspension, or automatic actions of any kind.
+
+────────────────────────────────────────────────────────────────────────────────
+SAFETY CONTRACT  (RENEWAL_INTELLIGENCE_SAFETY_CONTRACT — all 11 properties: true)
+────────────────────────────────────────────────────────────────────────────────
+
+Property                      Value
+────────────────────────────  ──────
+superAdminOnly                true
+readOnly                      true
+noPaymentProcessing           true
+noInvoiceGeneration           true
+noChargeCollection            true
+noAutoWorkspaceSuspension     true
+noWorkspaceLocking            true
+noEntitlementEnforcement      true
+noEmailOrLegalNotices         true
+recommendationsOnly           true
+failsClosedOnInvalidDates     true
+
+A runtime guard in super-admin-tenants.tsx throws at module load if any
+property is ever flipped to false.
+
+────────────────────────────────────────────────────────────────────────────────
+1.  RENEWAL INTELLIGENCE MODEL
+────────────────────────────────────────────────────────────────────────────────
+
+1.1  RenewalSignalCode  (14 codes)
+──────────────────────────────────
+  no_subscription_metadata    trial_active           trial_ending_soon
+  trial_expired               subscription_active    renewal_due_soon
+  renewal_due_now             billing_period_expired grace_period_active
+  grace_period_ending_soon    grace_period_expired   subscription_cancelled
+  subscription_suspended      invalid_subscription_dates
+
+1.2  RenewalUrgency  (6 levels)
+────────────────────────────────
+  none  /  low  /  medium  /  high  /  critical  /  unknown
+
+1.3  RecommendedPlatformAction  (8 values — internal operational suggestions only)
+───────────────────────────────────────────────────────────────────────────────────
+  none                      monitor
+  contact_customer          prepare_grace_period
+  review_for_suspension     renew_subscription_metadata
+  fix_subscription_metadata manual_review_required
+
+────────────────────────────────────────────────────────────────────────────────
+2.  THRESHOLD CONSTANTS
+────────────────────────────────────────────────────────────────────────────────
+
+  RENEWAL_DUE_SOON_DAYS   = 14   (billingPeriodEnd within 14 days)
+  TRIAL_ENDING_SOON_DAYS  =  7   (trialEndsAt within 7 days)
+  GRACE_ENDING_SOON_DAYS  =  3   (gracePeriodEndsAt within 3 days)
+
+All calculations accept `now` as a parameter — fully deterministic for tests.
+
+────────────────────────────────────────────────────────────────────────────────
+3.  DERIVATION LIBRARY  (new file)
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/lib/subscription-renewal-intelligence.ts
+
+Exports:
+  validateRenewalDateConsistency(sub)         → { valid, errors }
+  deriveRenewalSignals(sub, now)              → RenewalSignalCode[]
+  deriveRenewalUrgency(signals)               → RenewalUrgency
+  deriveRecommendedPlatformAction(signals, urgency) → RecommendedPlatformAction
+  buildRenewalWarningMessages(profile)        → string[]
+  deriveSubscriptionRenewalProfile(workspaceId, sub, now, subscriptionId?)
+                                              → SubscriptionRenewalProfile
+
+SubscriptionRenewalProfile shape:
+  subscriptionId | workspaceId | planCode | subscriptionStatus
+  signals[] | urgency | recommendedAction
+  daysUntilBillingEnd | daysUntilTrialEnd | daysUntilGraceEnd | daysPastDue
+  warnings[] | derivedAt
+
+Signal derivation precedence (highest wins):
+  1. invalid_subscription_dates — date field inconsistency, any level
+  2. subscription_cancelled     — cancelledAt set
+  3. subscription_suspended     — subscriptionStatus = "suspended"
+  4. Trial signals              — trialEndsAt checks
+  5. Billing/grace signals      — billingPeriodEnd + gracePeriodEndsAt checks
+  6. renewal_due_soon/now       — billingPeriodEnd / renewalDueAt proximity
+  7. no_subscription_metadata   — no meaningful data present
+
+Urgency mapping (highest signal wins):
+  invalid_subscription_dates  → critical
+  grace_period_expired        → critical
+  subscription_suspended      → high
+  subscription_cancelled      → high
+  billing_period_expired (no grace) → high
+  grace_period_ending_soon    → high
+  renewal_due_now             → medium
+  renewal_due_soon            → medium
+  trial_ending_soon           → medium
+  grace_period_active         → low
+  trial_active                → low
+  subscription_active         → none
+  no_subscription_metadata    → unknown
+
+────────────────────────────────────────────────────────────────────────────────
+4.  BACKEND API
+────────────────────────────────────────────────────────────────────────────────
+
+Route:   GET /platform/tenants/:tenantId/renewal-intelligence
+Guards:  requireAuth + requireSuperAdmin
+Method:  GET — read-only, no mutations
+
+Behavior:
+  1. Validates tenantId (400 on invalid, 404 on not found)
+  2. Fetches tenant_subscriptions row for the workspace
+  3. Derives SubscriptionRenewalProfile via deriveSubscriptionRenewalProfile()
+  4. Builds subscription summary (ISO date strings) for UI context
+  5. Logs structured event: tenant_renewal_intelligence_read
+  6. Returns:
+     {
+       renewalProfile:      SubscriptionRenewalProfile,
+       subscriptionSummary: { all date fields as ISO strings } | null,
+       warnings:            string[],
+       safetyNotice:        string,
+     }
+
+No DB writes. No status changes. No suspension. No payment or billing logic.
+
+Observability log fields:
+  actorId | tenantId | workspaceId | action | urgency | recommendedAction | signalCount
+
+────────────────────────────────────────────────────────────────────────────────
+5.  TENANT REGISTRY RISK SUMMARY UPDATES
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/lib/tenant-registry.ts
+
+TenantRiskSignalSummary — 7 new fields added (P13-F):
+  renewalDueSoon:            boolean
+  renewalDueNow:             boolean
+  trialEndingSoon:           boolean
+  graceEndingSoon:           boolean
+  graceExpired:              boolean
+  renewalUrgency:            string   (RenewalUrgency value)
+  recommendedPlatformAction: string   (RecommendedPlatformAction value)
+
+riskLevel elevation rule (renewal urgency):
+  — riskLevel only ever goes UP, never down
+  — urgency "critical" → riskLevel "critical" (if not already higher)
+  — urgency "high"     → riskLevel at least "high"
+  — urgency "medium"   → riskLevel at least "medium"
+  — urgency "low"      → riskLevel at least "low"
+  — "suspended" workspace → always "high" (overrides renewal)
+  — "disabled"  workspace → always "critical" (overrides all)
+
+────────────────────────────────────────────────────────────────────────────────
+6.  FRONTEND CONFIG
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/ops-platform/src/lib/renewal-intelligence-config.ts
+
+Exports:
+  RENEWAL_SIGNAL_CONFIG             Record<RenewalSignalCode, { label, description, severity, badgeClass }>
+  RENEWAL_URGENCY_CONFIG            Record<RenewalUrgency, { label, description, badgeClass }>
+  RECOMMENDED_PLATFORM_ACTION_CONFIG Record<RecommendedPlatformAction, { label, description, badgeClass }>
+  RENEWAL_INTELLIGENCE_SAFETY_CONTRACT  (11 properties, all true)
+  RENEWAL_EMPTY_STATE               { noData, loading, noSignals, noWarnings, safetyNotice }
+  RENEWAL_READ_HOOK_NAMES           ["useTenantRenewalIntelligence"]
+  RENEWAL_INTELLIGENCE_API_PATHS    { get: (tenantId) => string }
+  ALL_RENEWAL_SIGNAL_CODES          (14 codes)
+  ALL_RECOMMENDED_PLATFORM_ACTIONS  (8 values)
+  RENEWAL_DUE_SOON_DAYS / TRIAL_ENDING_SOON_DAYS / GRACE_ENDING_SOON_DAYS
+  Types: RenewalSignalCode, RenewalUrgency, RecommendedPlatformAction
+
+────────────────────────────────────────────────────────────────────────────────
+7.  FRONTEND HOOK
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+
+New hook:
+  useTenantRenewalIntelligence(tenantId: string | null)
+    → useQuery<TenantRenewalIntelligenceData>
+    — GET /api/platform/tenants/:tenantId/renewal-intelligence
+    — queryKey: ["platform", "tenants", tenantId, "renewal-intelligence"]
+    — staleTime: 30 000 ms
+    — disabled when tenantId is null
+
+New types added to hooks file:
+  SubscriptionRenewalProfile      (mirrors backend)
+  SubscriptionSummaryForRenewal
+  TenantRenewalIntelligenceData
+
+TenantRiskSignalSummary updated with 7 new P13-F fields (mirrors backend).
+
+────────────────────────────────────────────────────────────────────────────────
+8.  FRONTEND UI — RenewalIntelligencePanel
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+
+New component: RenewalIntelligencePanel
+  — placed in TenantDetailPanel below UsagePanel (md:col-span-3, border-t)
+  — data-testid="renewal-intelligence-panel"
+
+Panel sections:
+  Header row:
+    CreditCard icon | "Renewal & Grace Intelligence" title
+    Urgency badge (color-coded from RENEWAL_URGENCY_CONFIG)
+    Recommended action badge (when action ≠ "none")
+
+  Active Signals:
+    All signal codes rendered as color-coded badges
+    Tooltip = signal description
+    data-testid="renewal-signals"
+
+  Day counters (4-column grid):
+    Billing Ends | Trial Ends | Grace Ends | Days Past Due
+    Days Past Due shown in red when > 0
+
+  Recommended Action description:
+    Muted info box with operator guidance text
+
+  Warnings panel:
+    Amber box with per-warning lines + AlertTriangle icons
+    data-testid="renewal-warnings"
+
+  Safety notice:
+    ShieldCheck icon + "Informational view only. No automatic actions are taken."
+    data-testid="renewal-safety-notice"
+
+  Loading / Error / Empty states: all handled
+
+No suspend/charge/send-notice buttons anywhere in this component.
+No payment, billing, invoice, legal, or enforcement wording.
+
+────────────────────────────────────────────────────────────────────────────────
+9.  OBSERVABILITY
+────────────────────────────────────────────────────────────────────────────────
+
+Structured log event: tenant_renewal_intelligence_read
+
+Fields logged:
+  actorId | tenantId | workspaceId | action | urgency | recommendedAction | signalCount
+
+No financial, payment, or billing data is logged.
+
+────────────────────────────────────────────────────────────────────────────────
+10. TEST RESULTS
+────────────────────────────────────────────────────────────────────────────────
+
+Backend  (artifacts/api-server)
+  Test file:  src/lib/__tests__/subscription-renewal-intelligence.test.ts
+  Test count: 83 new tests (T1–T15)
+  Total:      2858 passed  /  0 failed
+
+  T1:  ALL_RENEWAL_SIGNAL_CODES stable (14 codes, no duplicates)
+  T2:  Threshold constants stable (14, 7, 3)
+  T3:  no_subscription_metadata signal + urgency + action
+  T4:  trial_active / trial_ending_soon / trial_expired (boundary cases)
+  T5:  subscription_active / renewal_due_soon / renewal_due_now
+  T6:  billing_period_expired (no grace → high urgency)
+  T7:  grace_active / grace_ending_soon / grace_expired (boundary cases)
+  T8:  cancelled/suspended signals take sole precedence
+  T9:  invalid dates → critical signal (3 invalid date combinations)
+  T10: urgency derivation stable (13 signal combinations)
+  T11: recommended action derivation stable (11 action mappings)
+  T12: buildRenewalWarningMessages — active, expired, renewal_due_soon, invalid
+  T13: API is pure (idempotent, no side effects)
+  T14: read-only contract (ISO derivedAt, workspaceId passthrough, no mutation)
+  T15: tenant registry risk summary reflects renewal urgency
+       (grace_expired → critical, renewal_due_soon → ≥ medium, new fields present,
+        suspended stays high, disabled stays critical, action never empty)
+
+Frontend  (artifacts/ops-platform)
+  Test file:  src/lib/__tests__/renewal-intelligence-config.test.ts
+  Test count: 47 new tests (T16–T20)
+  Total:      889 passed  /  0 failed
+
+  T16: Config stable (14 signals, 6 urgencies, 8 actions, unique labels,
+       all required fields, threshold constants correct)
+  T17: Hook is read-only (RENEWAL_READ_HOOK_NAMES = 1 entry,
+       name contains no "update"/"mutation"/"create")
+  T18: Config covers all 14 panel states; RENEWAL_EMPTY_STATE has all keys;
+       safetyNotice contains no "enforcement" wording
+  T19: No forbidden wording in any config string
+       (payment / invoice / charge / billing portal / tax / legal notice /
+        auto-suspend / automatic suspension / automatic-lock)
+       RENEWAL_INTELLIGENCE_SAFETY_CONTRACT all 11 properties = true
+  T20: Frontend/backend symmetry (14 signal codes, 6 urgencies, 8 actions,
+       3 threshold constants all match)
+
+────────────────────────────────────────────────────────────────────────────────
+11. NEW / MODIFIED FILES SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+New files:
+  artifacts/api-server/src/lib/subscription-renewal-intelligence.ts    (pure lib)
+  artifacts/api-server/src/lib/__tests__/subscription-renewal-intelligence.test.ts
+  artifacts/ops-platform/src/lib/renewal-intelligence-config.ts        (frontend config)
+  artifacts/ops-platform/src/lib/__tests__/renewal-intelligence-config.test.ts
+
+Modified files:
+  artifacts/api-server/src/lib/tenant-registry.ts
+    — TenantRiskSignalSummary: +7 P13-F fields
+    — deriveRiskSignalSummary: incorporates renewal urgency into riskLevel
+    — Added import: deriveRenewalSignals, deriveRenewalUrgency, deriveRecommendedPlatformAction
+
+  artifacts/api-server/src/routes/tenants.ts
+    — Added import: deriveSubscriptionRenewalProfile
+    — Added route: GET /platform/tenants/:tenantId/renewal-intelligence
+    — Updated file header comments
+
+  artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+    — TenantRiskSignalSummary: +7 P13-F fields
+    — New types: SubscriptionRenewalProfile, SubscriptionSummaryForRenewal, TenantRenewalIntelligenceData
+    — New hook: useTenantRenewalIntelligence(tenantId)
+    — Added import: RENEWAL_INTELLIGENCE_API_PATHS, RENEWAL_READ_HOOK_NAMES from renewal-intelligence-config
+    — Re-exports: RENEWAL_READ_HOOK_NAMES added
+
+  artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+    — Added imports: renewal-intelligence-config, useTenantRenewalIntelligence
+    — Added RENEWAL_INTELLIGENCE_SAFETY_CONTRACT import-time guard
+    — New component: RenewalIntelligencePanel (read-only, data-testid attributes)
+    — TenantDetailPanel: added RenewalIntelligencePanel below UsagePanel
+
+────────────────────────────────────────────────────────────────────────────────
+12. REMAINING RENEWAL AUTOMATION GAPS (intentional — out of scope for P13-F)
+────────────────────────────────────────────────────────────────────────────────
+
+These gaps are intentional — they are NOT planned for any current phase:
+  — No payment provider integration (Stripe/Paddle/etc.)
+  — No invoice generation
+  — No charge collection or tax processing
+  — No automatic workspace suspension based on subscription state
+  — No automatic workspace locking
+  — No entitlement enforcement at access time
+  — No email notifications (grace warning, expiry notice, etc.)
+  — No legal/regulatory notice dispatch
+  — No background renewal jobs or scheduled suspension tasks
+  — No tenant self-service renewal portal
+  — No customer billing portal or payment method management
+  — No HR module integration
+
+────────────────────────────────────────────────────────────────────────────────
+13. READINESS ASSESSMENT — Before P14: Tenant Health & Operational Monitoring
+────────────────────────────────────────────────────────────────────────────────
+
+Completed intelligence layers:
+  P13-A  Tenant registry and workspace inventory        COMPLETE
+  P13-B  Workspace lifecycle management                 COMPLETE
+  P13-C  Subscription metadata and date foundations     COMPLETE
+  P13-D  Entitlements and module access                 COMPLETE
+  P13-E  Usage metrics and capacity intelligence        COMPLETE
+  P13-F  Renewal and grace period intelligence          COMPLETE
+
+Each layer is read-only, super-admin only, fully tested, and exposes
+structured signals that can be consumed by any future health dashboard.
+
+P14 prerequisites satisfied:
+  [x] Tenant profiles carry riskLevel, renewalUrgency, recommendedPlatformAction
+  [x] Subscription state + grace + trial signals are all available per tenant
+  [x] Usage capacity risk is computed per tenant
+  [x] Entitlement overrides are tracked
+  [x] All intelligence layers are pure derivation — safe to aggregate
+  [x] Backend test suite: 2858 tests, 0 failures
+  [x] Frontend test suite:  889 tests, 0 failures
+  [x] TypeScript: no new errors introduced (pre-existing errors unchanged)
+  [x] Safety contracts enforced at import time across all P13 layers
+
+STATUS: READY for P14 — Tenant Health & Operational Monitoring

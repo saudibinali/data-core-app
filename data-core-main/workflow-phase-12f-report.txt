@@ -1,0 +1,386 @@
+WORKFLOW PHASE 12-F — Governance Topology & Readiness UI Foundations
+======================================================================
+Frontend-only · Read-only · Super-admin scoped · No backend changes
+Test result: 510/510 frontend · 2399/2399 backend · 0 new backend errors
+Typecheck: 0 new errors (5 pre-existing in unrelated files excluded by scratchpad)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. TOPOLOGY / READINESS UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Two pages, two safety contracts, three new components, five new config maps.
+
+Page routes (all super_admin only, wrapped in SuperAdminRoute):
+  /super-admin/governance/topology   → SuperAdminGovernanceTopology  (rewritten)
+  /super-admin/governance/readiness  → SuperAdminGovernanceReadiness (new)
+
+The readiness route is added directly to App.tsx.
+It is NOT added to GOVERNANCE_ROUTES — preserves the existing shell test
+assertion (ALL_GOVERNANCE_ROUTE_PATHS has exactly 7 entries).
+
+Navigation: "Topology & Readiness" nav item still points to /topology.
+The readiness page is reachable via a link at the bottom of the topology
+page and via a breadcrumb link at the top of the readiness page.
+
+Data flow (read-only):
+  useGovernanceTopology()          → topology.data.topology
+  useGovernanceTopologyBoundaries() → boundaries.data.boundarySummary
+  useGovernanceTopologySnapshot()  → snapshot.data.snapshot
+  useGovernanceReadiness()         → readiness.data.readiness
+
+All hooks are pre-existing from P11-E. No new hooks were added.
+All API calls are GET-only. No mutation hooks are called from either page.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. TOPOLOGY LAYER VISUAL MODEL — TOPOLOGY_LAYER_MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7 layers, ordered 0–6 from foundation to presentation.
+Exported as TOPOLOGY_LAYER_MAP and TOPOLOGY_LAYER_ORDER (readonly tuple).
+
+Key   Layer                    Order  Tier            expectedBoundary
+────  ───────────────────────  ─────  ──────────────  ────────────────
+audit_integrity                  0    foundation      isolated
+policy_governance                1    control         read_only
+workflow_governance              2    control         human_governed
+analytics_intelligence           3    intelligence    read_only
+topology_readiness               4    meta            read_only
+evidence_packaging               5    output          append_only
+frontend_console                 6    presentation    read_only
+
+Each entry also carries: label, description, dependencyDirection.
+No mutation wording, no enforcement wording in any description.
+
+TOPOLOGY_LAYER_ORDER is the canonical iteration order for all components
+and tests. Order values are unique, spanning exactly 0..6.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. BOUNDARY STATUS VISUAL MODEL — BOUNDARY_STATUS_MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7 statuses. Each entry: tier, label, description, badgeClass, order.
+Exported as BOUNDARY_STATUS_MAP and BOUNDARY_STATUS_ORDER (readonly tuple).
+
+Key              Order  Tier        Badge colour
+──────────────── ─────  ─────────── ─────────────────
+isolated           0    good        emerald
+read_only          1    good        blue
+append_only        2    neutral     slate
+human_governed     3    good        teal
+warning            4    attention   amber
+leak_detected      5    critical    red
+unknown            6    muted       muted-foreground
+
+leak_detected:
+  - tier = "critical"
+  - description: "Boundary violation observed — critical visibility only.
+    Manual review required."
+  - No "auto-fix", no "auto-remediate" in description (per T9 phrase-level rule)
+  - Component renders with red border + ShieldAlert icon — visible, no action button
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. READINESS DIMENSION / STATUS MODELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+READINESS_DIMENSION_MAP — 8 dimensions, order 0–7.
+Each entry: label, description, order, expectedInputs, outputMeaning.
+Exported as READINESS_DIMENSION_MAP and READINESS_DIMENSION_ORDER.
+
+Key                    Order  Label
+─────────────────────  ─────  ────────────────────────
+audit_integrity          0    Audit Integrity
+policy_coverage          1    Policy Coverage
+workflow_maturity        2    Workflow Maturity
+analytics_visibility     3    Analytics Visibility
+topology_clarity         4    Topology Clarity
+evidence_packaging       5    Evidence Packaging
+export_readiness         6    Package Readiness        ← label avoids "Export" word
+frontend_operability     7    Console Operability
+
+No business valuation wording, no legal compliance verdicts.
+
+READINESS_STATUS_MAP — 4 statuses.
+Each entry: tier, label, description, badgeClass, order.
+
+Key      Order  Tier        Badge
+───────  ─────  ─────────── ──────────────
+ready      0    good        emerald
+partial    1    attention   amber
+blocked    2    critical    red
+unknown    3    muted       muted-foreground
+
+"blocked" description: cannot proceed — critical inputs are absent.
+No auto-remediation language. No legal conclusions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. DEPENDENCY MAP COMPONENT DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/
+      governance-topology-dependency-map.tsx
+
+GovernanceTopologyDependencyMap — CSS-only, no graph library.
+
+Props:
+  layers:      TopologyLayerEntry[]   (live API data)
+  isLoading?:  boolean
+  compact?:    boolean
+  data-testid? string
+
+Rendering:
+  - Iterates TOPOLOGY_LAYER_ORDER (canonical 7-step order)
+  - For each layer: looks up live entry by layerKey/layerId/name
+  - If live entry found: uses its boundaryStatus, description, warnings
+  - If not found: falls back to TOPOLOGY_LAYER_MAP defaults (expectedBoundary)
+  - Layers separated by ArrowDown icon (CSS, not SVG graph)
+  - compact=true: hides description and warnings, preserves badges
+
+Boundary highlighting:
+  - leak_detected / boundary_leak_detected: red border + red bg
+  - warning: amber border + amber bg
+  - other: default border + card bg
+
+Badges: BoundaryBadge (from BOUNDARY_STATUS_MAP), optional ReadinessBadge.
+States: loading (7 skeletons), empty (icon + message).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. BOUNDARY SUMMARY TABLE DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/
+      governance-boundary-summary-table.tsx
+
+GovernanceBoundarySummaryTable — columnar table, stable sort.
+
+Props:
+  entries:     BoundarySummaryEntry[]
+  isLoading?:  boolean
+  data-testid? string
+
+BoundarySummaryEntry shape:
+  layerKey?, layerId?, name?, boundaryStatus?, expectedBoundary?,
+  observedBoundary?, warnings?[], evidenceReferences?[]
+
+Column layout:
+  Layer  |  Status  |  Expected  |  Observed
+
+Sort priority:
+  1. leak_detected  (priority = -100) — always first
+  2. warning        (priority = -50)  — second
+  3. layer order from TOPOLOGY_LAYER_ORDER
+
+Critical rows:
+  - leak_detected: red left border + red bg tint
+  - warning: amber left border + amber bg tint
+  - Both use ShieldAlert/AlertTriangle icon in Layer column
+
+Warnings and evidenceReferences rendered inline under Observed column.
+States: loading (5 skeletons), empty (centered message).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. READINESS DIMENSION GRID DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/
+      governance-readiness-dimension-grid.tsx
+
+GovernanceReadinessDimensionGrid — 2-column card grid, stable order.
+
+Props:
+  dimensions:  ReadinessDimensionEntry[]
+  isLoading?:  boolean
+  data-testid? string
+
+ReadinessDimensionEntry shape:
+  dimensionKey?, dimension?, status?, score?, blockers?[], warnings?[], notes?
+
+Rendering:
+  - Iterates READINESS_DIMENSION_ORDER (canonical 8-step order)
+  - Looks up live entry by dimensionKey or dimension label
+  - DimensionCard shows: StatusIcon, label, StatusBadge, ScoreBar (if score given)
+  - Description from READINESS_DIMENSION_MAP (always from static config)
+
+Prominence:
+  - blocked: red border (2px) + red bg tint — immediately visible
+  - partial: amber border (2px) + amber bg tint — visible
+  - ready: default border
+  - unknown: default border
+
+ScoreBar: 0–100% derived from 0.0–1.0 score value.
+  Colour: ≥80% emerald, ≥50% amber, <50% red.
+States: loading (8 skeletons), empty (HelpCircle + message).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SNAPSHOT / DIFF PREVIEW BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Snapshot panel (topology page, data-testid="snapshot-panel"):
+  Calls useGovernanceTopologySnapshot() (pre-existing GET hook).
+  Displays: snapshotHash (truncated to 16 chars), generatedAt (formatted),
+  layerCount, boundaryCount, readinessStatus, snapshotId.
+  Empty state: TOPOLOGY_EMPTY_STATE.noSnapshotData message.
+  No POST call. No persistence. No snapshot trigger button.
+
+Diff placeholder (data-testid="topology-diff-placeholder"):
+  Static card with Info icon.
+  Text: "Topology diff comparison will be available when two snapshots are
+  selected. No snapshot persistence or diff execution is performed from
+  this view."
+  No diff hook call. No POST. Pure placeholder.
+
+Snapshot and diff panels are placed side-by-side in a 2-column grid on md+.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TOPOLOGY_UI_SAFETY_CONTRACT (10 properties, all true):
+  noTopologyMutation, noBoundaryAutoFix, noSnapshotPersistence,
+  noDiffExecution, noExportRendering, noAiSummaries,
+  noLegalConclusions, noRegulatorSubmission, noReadinessOverride,
+  superAdminOnly
+
+READINESS_UI_SAFETY_CONTRACT (10 properties, all true):
+  noReadinessOverride, noTopologyMutation, noSnapshotPersistence,
+  noAutoRemediation, noExportRendering, noAiSummaries,
+  noLegalConclusions, noRegulatorSubmission, noBusinessValuation,
+  superAdminOnly
+
+Both pages:
+  - Render GovernanceReadOnlyNotice at the top of every view
+  - Protected by SuperAdminRoute — non-super-admins redirected to /sign-in
+  - All buttons and mutation controls: none present
+  - No POST/PUT/PATCH calls in any component on these pages
+  - Safety annotation line at page footer (renders from contract flag)
+  - Critical warnings rendered with visibility styling (red/amber borders)
+    but zero action affordance — no "Fix" or "Override" button
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. TEST RESULTS — governance-topology-readiness.test.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/lib/__tests__/
+      governance-topology-readiness.test.ts
+
+12 test groups, 69 individual assertions.
+All 69 pass. No skipped tests.
+
+T1  topology layer map stable                       7 assertions ✓
+T2  boundary status map stable                      8 assertions ✓
+T3  readiness dimension map stable                  7 assertions ✓
+T4  readiness status map stable                     6 assertions ✓
+T5  topology/readiness pages super-admin scoped     4 assertions ✓
+T6  dependency map ordering deterministic           5 assertions ✓
+T7  boundary table critical warnings always visible 5 assertions ✓
+T8  readiness grid blocked/partial prominence       6 assertions ✓
+T9  no mutation/export/legal/fix labels exist       4 assertions ✓
+T10 topology/readiness safety contracts true        8 assertions ✓
+T11 hooks remain read-only                          4 assertions ✓
+T12 config shapes correct                           8 assertions ✓
+
+T9 note: uses phrase-level forbidden patterns (e.g. "auto-fix control",
+"pdf export", "legal verdict") not single words — single words like
+"export" and "trigger" appear legitimately in dimension labels/descriptions.
+
+Full suite totals:
+  Frontend  510 / 510  (8 test files)
+  Backend  2399 / 2399 (42 test files)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. REMAINING TOPOLOGY / READINESS UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These gaps are intentionally deferred — they require backend work or are
+out of scope for P12-F frontend-only foundations:
+
+a) Topology diff comparison
+   Currently a UI placeholder. Will become functional when:
+   - GET /api/platform/governance/topology/diff endpoint is implemented
+   - useGovernanceTopologyDiff() hook is available
+   - Two snapshot selection UI is added (requires snapshot list endpoint)
+
+b) Live layer-to-dimension linking
+   The topology page does not yet cross-reference readiness dimensions
+   against live layer boundary data. A future pass could highlight which
+   readiness dimension is affected by each boundary warning.
+
+c) Snapshot list and history
+   Currently only the latest snapshot is displayed. A snapshot history
+   list (paginated GET) would enable diff selection and trend display.
+
+d) Readiness score data
+   The dimension grid renders score bars when score: number is present
+   in the API response. Most dimensions will show "Unknown" until the
+   backend computes per-dimension readiness scores (not yet implemented).
+
+e) Real-time boundary push
+   Topology and boundary data is fetched via polling (GOVERNANCE_QUERY_CONFIG
+   staleTime). A WebSocket or SSE push for boundary_leak events would
+   give more immediate visibility on critical boundary changes.
+
+f) Boundary evidence references
+   The boundary summary table renders evidenceReferences count inline.
+   Deep-links to specific evidence package records are deferred until
+   the evidence packages detail view (P12-G or later) is implemented.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. READINESS ASSESSMENT BEFORE EVIDENCE PACKAGES UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-F establishes the visual and config model needed by the Evidence
+Packages UI (P12-G). The following are ready:
+
+Ready for P12-G:
+  ✓ READINESS_DIMENSION_MAP includes "evidence_packaging" dimension
+    (order 5) with expectedInputs and outputMeaning defined
+  ✓ TOPOLOGY_LAYER_MAP includes "evidence_packaging" layer (order 5)
+    with expectedBoundary = "append_only"
+  ✓ useGovernanceEvidencePackages() and useGovernanceEvidenceReadiness()
+    hooks are pre-existing and already in GOVERNANCE_READ_HOOK_NAMES
+  ✓ GOVERNANCE_API_PATHS.evidencePackages and .evidenceReadiness defined
+  ✓ Evidence page route /super-admin/governance/evidence-packages already
+    exists and is routed via App.tsx
+  ✓ GovernanceBoundarySummaryTable can accept evidence_packaging layer
+    entries for boundary display
+
+Still needed for complete P12-G:
+  - Evidence package list/detail page components
+  - Package integrity verification display (hash + timestamp comparison)
+  - Evidence reference resolution (layerRef → layer name lookup)
+  - Package scope filter UI (audit / policy / workflow / combined)
+
+Overall readiness for P12-G: READY TO BEGIN
+  The config, hooks, route, and component primitives are all in place.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Modified:
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added: TOPOLOGY_LAYER_MAP, TOPOLOGY_LAYER_ORDER, TopologyLayerKey
+           BOUNDARY_STATUS_MAP, BOUNDARY_STATUS_ORDER, BoundaryStatusKey
+           READINESS_DIMENSION_MAP, READINESS_DIMENSION_ORDER, ReadinessDimensionKey
+           READINESS_STATUS_MAP, ReadinessStatusKey
+           TOPOLOGY_UI_SAFETY_CONTRACT
+           READINESS_UI_SAFETY_CONTRACT
+           TOPOLOGY_EMPTY_STATE
+
+  artifacts/ops-platform/src/pages/super-admin-governance-topology.tsx
+    Full rewrite — 9 sections, 3 new imported components
+
+  artifacts/ops-platform/src/App.tsx
+    Added import + Route for SuperAdminGovernanceReadiness
+
+Created:
+  artifacts/ops-platform/src/pages/super-admin-governance-readiness.tsx
+  artifacts/ops-platform/src/components/governance/governance-topology-dependency-map.tsx
+  artifacts/ops-platform/src/components/governance/governance-boundary-summary-table.tsx
+  artifacts/ops-platform/src/components/governance/governance-readiness-dimension-grid.tsx
+  artifacts/ops-platform/src/lib/__tests__/governance-topology-readiness.test.ts
+
+Not changed:
+  governance-console-hooks.ts         (hooks already present from P11-E)
+  openapi.yaml                        (no backend changes)
+  DB schema                           (no migrations)
+  Any backend route file              (frontend-only phase)

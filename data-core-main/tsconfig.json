@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    { "path": "./lib/db" },
+    { "path": "./lib/api-client-react" },
+    { "path": "./lib/api-zod" },
+    { "path": "./lib/object-storage-web" },
+    { "path": "./lib/core-events" },
+    { "path": "./lib/core-approvals" },
+    { "path": "./lib/core-notifications" },
+    { "path": "./lib/core-audit" },
+    { "path": "./lib/core-permissions" },
+    { "path": "./lib/core-workflows" }
+  ]
+}

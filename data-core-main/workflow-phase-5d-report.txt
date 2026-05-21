@@ -1,0 +1,137 @@
+WORKFLOW PHASE 5-D — Validation Engine & Workflow Governance Safety
+====================================================================
+Status    : COMPLETE
+Date      : 2026-05-14
+Tests     : 452 / 452 passing (0 failures)
+Typecheck : Clean (0 errors)
+
+
+OVERVIEW
+--------
+Phase 5-D adds a multi-pass static analysis engine that runs at two points:
+
+  POST /workflows/:id/validate  — dry-run; never mutates state
+  POST /workflows/:id/activate  — enforces: activation is blocked on any error
+
+The engine performs four sequential passes over the compiled step list and
+returns a structured ValidationEngineResult containing errors, warnings,
+governance notices, and estimated execution metrics.
+
+
+FILES INTRODUCED / MODIFIED
+-----------------------------
+NEW
+  artifacts/api-server/src/lib/workflows/validation-engine.ts   (~675 lines)
+  artifacts/api-server/src/lib/workflows/__tests__/validation-engine.test.ts (~920 lines)
+
+MODIFIED
+  artifacts/api-server/src/lib/workflows/validator.ts
+    — imports runValidationEngine; merges engine warnings/errors into
+      ValidationResult; extends type with `notices` and `estimatedMetrics`
+    — re-exports GovernanceNotice, EstimatedExecutionMetrics for callers
+  artifacts/api-server/src/routes/workflows.ts
+    — validate route: emits req.log.info(workflow_validation_completed)
+                      emits req.log.warn(workflow_validation_failed) if invalid
+    — activate route: emits req.log.info(workflow_validation_completed)
+                      emits req.log.warn(workflow_validation_failed) if blocked
+                      emits req.log.info(workflow_activated) on success
+
+
+VALIDATION ENGINE — FOUR PASSES
+---------------------------------
+
+PASS 1 — Topology (runTopologyPass)
+  Builds the successor graph (buildSuccessors) from step array positions.
+  WG-TOPO-01_ISOLATED_STEP  [ERROR]  — step with no in-edges and no out-edges
+  WG-TOPO-03_STEP_REFERENCES_MISSING_TARGET [ERROR] — condition target index OOB
+
+  Note: WG-TOPO-02_BRANCHES_NEVER_CONVERGE was evaluated and removed.
+  In a forward-only sequential array, every non-terminal step always linearly
+  advances to position+1. As a result ALL paths — both true and false branches
+  from any condition — inevitably converge on the same final reachable position.
+  The check is structurally impossible to trigger; including it would generate
+  dead code that can never produce a warning.
+
+PASS 2 — Dependency Analysis (runDependencyPass)
+  Analyses which steps may be skipped on certain branch paths.
+  WG-DEP-01_CONDITIONALLY_EXECUTED_STEP [WARNING] — step only reachable on a
+    subset of branch paths; workflow remains valid but operator is informed
+
+PASS 3 — Fanout Estimation (runFanoutPass)
+  Walks every path from the root using memoised DFS (maxNotificationsOnPath).
+  estimatedMetrics returned:
+    maxExecutedSteps      — longest path through the step graph
+    maxNotificationCount  — worst-case total notifications dispatched per run
+    branchingPaths        — number of distinct branch directions encountered
+  WG-FAN-01_HIGH_NOTIFICATION_FANOUT [WARNING] — maxNotificationCount exceeds
+    FANOUT_WARN_THRESHOLD (50); workflow still activates but is flagged
+
+PASS 4 — Routing Safety (runRoutingSafetyPass)
+  WG-ROUTE-01_CONDITION_ROUTES_TO_SELF [ERROR]  — condition step targets itself
+    (infinite-loop risk)
+  WG-ROUTE-02_CONDITION_BOTH_BRANCHES_SAME [WARNING] — both onTrue and onFalse
+    resolve to the same array position; condition is effectively a no-op.
+    Detection uses direct position comparison (ps.onTrueArrayPos === ps.onFalseArrayPos)
+    rather than the deduplicated neighbour list (which normalises the two equal
+    values to one entry and thus would never see length ≥ 2).
+
+
+GOVERNANCE NOTICES
+------------------
+Notices are informational annotations attached to the ValidationEngineResult.
+They do not affect the `valid` flag. Current sources:
+  — runFanoutPass emits a notice when maxNotificationCount > 0 summarising the
+    estimated worst-case execution envelope.
+  — runRoutingSafetyPass emits a notice when any condition step routes both
+    branches identically (WG-ROUTE-02 companion notice).
+
+
+OBSERVABILITY
+--------------
+Every call to POST /workflows/:id/validate and POST /workflows/:id/activate
+now emits at least one structured log line via req.log:
+
+  event: "workflow_validation_completed"
+    workflowId, workspaceId, context ("validate"|"activate"), valid,
+    errorCount, warningCount, noticeCount, estimatedMetrics,
+    errorCodes[], warningCodes[]
+
+  event: "workflow_validation_failed"   (only when valid=false)
+    workflowId, workspaceId, context, errorCount, errorCodes[]
+
+  event: "workflow_activated"           (only on successful activation)
+    workflowId, workspaceId, warningCount, noticeCount,
+    warningCodes[], estimatedMetrics
+
+
+TEST COVERAGE — validation-engine.test.ts
+------------------------------------------
+T1  — single-step workflow: no topology errors
+T2  — two-step condition workflow: WG-DEP-01 fires, valid=true
+T3  — isolated step (unreachable, no successors): WG-TOPO-01 fires, valid=false
+T4  — condition with OOB true target: WG-TOPO-03 fires, valid=false
+T5  — fanout estimate on branched workflow: maxNotificationCount=51
+T6  — WG-FAN-01 fires at 50+ notifications, valid=true
+T7  — WG-ROUTE-01 (self-loop): fires, valid=false
+T8  — WG-ROUTE-02 (same-target branches): fires, valid=true
+T9  — WG-DEP-01 multi-step: fires exactly once per skippable step
+T10 — branched workflow with warnings: valid=true
+T11 — all four error codes block activation (valid=false)
+T12 — WG-ROUTE-02 is a warning not an error: valid=true confirmed
+T13 — empty step list: no errors, no warnings
+T14 — WG-FAN-01 warning message includes count and threshold
+T15 — linear workflow: maxExecutedSteps = step count; branchingPaths = 1
+T16 — branched workflow: maxExecutedSteps = longest path; branchingPaths = 2
+
+
+DESIGN NOTES
+------------
+- buildSuccessors uses array position (not step.index) as graph node keys.
+  This avoids aliasing bugs when step.index values are non-contiguous.
+- DFS memoisation in maxNotificationsOnPath uses a `visited` Set per call
+  (not a global cache) to remain correct across multiple independent tests
+  without cross-contamination.
+- The fanout estimator counts recipientIds.length for type="specific" and
+  uses a fixed constant (ROLE_RECIPIENT_ESTIMATE = 50) for type="role",
+  matching the documented worst-case model.
+- All passes are pure functions with no DB or I/O side-effects.

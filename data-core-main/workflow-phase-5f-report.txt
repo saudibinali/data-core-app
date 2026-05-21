@@ -1,0 +1,170 @@
+WORKFLOW PHASE 5-F — APPROVAL GOVERNANCE & HUMAN WORKFLOW INTEGRITY
+====================================================================
+Status:   COMPLETE
+Date:     2026-05-14
+Tests:    522 / 522 passing (10 new P5-F tests, 512 pre-existing)
+Typecheck: CLEAN (0 errors, all packages)
+
+────────────────────────────────────────────────────────────────────
+1. OBJECTIVE
+────────────────────────────────────────────────────────────────────
+
+Lift the WG-02 hard block on approval steps and establish immutable
+approval governance with exact-once decision guarantees, version
+linkage, structured audit events, and TTL-expiry protection.
+
+────────────────────────────────────────────────────────────────────
+2. CHANGES SUMMARY
+────────────────────────────────────────────────────────────────────
+
+A. SCHEMA — lib/db/src/schema/workflows.ts
+   - Added 4 new columns to workflow_approvals table:
+     • workflowId         INTEGER  — direct workflow FK (SET NULL on delete)
+     • workflowVersion    INTEGER  — version active at trigger time
+     • stepSnapshot       JSONB    — frozen step config at decision time
+     • executionTimeoutAt TIMESTAMPTZ — TTL deadline at decision time
+   - Added 2 new indexes:
+     • idx_wf_approval_workflow  (workflowId)
+     • idx_wf_approval_version   (workflowId, workflowVersion)
+   - DB migration applied via `pnpm --filter @workspace/db run push`
+
+B. VALIDATOR — artifacts/api-server/src/lib/workflows/validator.ts
+   - WG-02_APPROVAL_BLOCKED (blanket block) REMOVED
+   - Replaced with specific per-configuration rules:
+     • WG-02_APPROVAL_NO_CONFIG         — missing config object (ERROR)
+     • WG-02_APPROVAL_NO_APPROVER_TYPE  — missing approverType (ERROR)
+     • WG-02_APPROVAL_SPECIFIC_NO_IDS   — specific + empty approverIds (ERROR)
+     • WG-02_APPROVAL_ROLE_NO_ROLE      — role + missing approverRole (ERROR)
+     • WG-02_APPROVAL_MISSING_TITLE     — no notification title (ERROR)
+     • WG-02_APPROVAL_MISSING_MESSAGE   — no notification body (WARNING)
+   - approverType="manager" requires no additional config (runtime-resolved)
+   - Well-formed approval steps now pass validation and can be activated
+
+C. APPROVAL STEP HANDLER — steps/approval.ts
+   - Added executionId + workflowVersion parameters (optional)
+   - Added structured approval_requested audit event (P5-F) with fields:
+     executionId, workflowVersion, stepIndex, stepName, approverType,
+     approverCount, approverIds, workspaceId, action
+   - Emits approval_requested_no_approvers when no approvers resolved
+   - Preserves all existing approval notification logic and P3-D fanout cap
+
+D. EXECUTOR — executor.ts
+   - executeStep(): added workflowVersion parameter, forwards to executeApprovalStep
+   - runStepLoop(): added workflowVersion parameter, forwards to executeStep
+   - executeWorkflow(): added workflowVersion parameter, forwards to runStepLoop
+   - engine.ts: now passes workflowVersion to executeWorkflow at trigger time
+
+   resumeExecution() new in P5-F:
+   ├─ TTL expiry pre-check (EXECUTION_TTL_EXPIRED) after cancelRequested check
+   ├─ Approval INSERT enriched: workflowId, workflowVersion, stepSnapshot,
+   │  executionTimeoutAt — uses .returning() to capture approvalRecord.id
+   └─ Audit event action changed: approval_resume_started → approval_decision_recorded
+      (structured fields: approvalId, workflowVersion, decidedBy, approvalStepIndex)
+
+   rejectExecution() new in P5-F:
+   ├─ SELECT now fetches: cancelRequested, timeoutAt, workflowVersion, stepsSnapshot
+   ├─ cancelRequested pre-check added (was missing in P4-E)
+   ├─ TTL expiry pre-check (EXECUTION_TTL_EXPIRED) added
+   ├─ Approval INSERT enriched: workflowId, workflowVersion, stepSnapshot,
+   │  executionTimeoutAt — uses .returning() to capture approvalRecord.id
+   └─ Audit event action changed: approval_rejected → approval_decision_rejected
+      (structured fields: approvalId, workflowVersion, decidedBy, approvalStepIndex)
+
+E. ROUTE HANDLERS — routes/workflows.ts
+   - Added isExecutionTimedOut to TTL imports
+
+   POST /executions/:id/approve:
+   ├─ SELECT now fetches: timeoutAt, workflowVersion
+   ├─ TTL expiry pre-check: 422 EXECUTION_TTL_EXPIRED before calling resumeExecution
+   ├─ Replay prevention: approval_replay_prevented structured event on duplicate attempt
+   ├─ Result code EXECUTION_TTL_EXPIRED handled (422 response)
+   └─ Response includes: workflowVersion field
+
+   POST /executions/:id/reject:
+   ├─ SELECT now fetches: cancelRequested, timeoutAt, workflowVersion
+   ├─ cancelRequested pre-check added (409 EXECUTION_CANCEL_REQUESTED)
+   ├─ TTL expiry pre-check: 422 EXECUTION_TTL_EXPIRED before calling rejectExecution
+   ├─ Replay prevention: approval_replay_prevented structured event on duplicate attempt
+   ├─ Result codes EXECUTION_TTL_EXPIRED + EXECUTION_CANCEL_REQUESTED handled
+   └─ Response includes: workflowVersion field
+
+────────────────────────────────────────────────────────────────────
+3. NEW AUDIT EVENTS (structured log fields)
+────────────────────────────────────────────────────────────────────
+
+  approval_requested              — step fired, notifications sent, execution pausing
+  approval_requested_no_approvers — step fired but no approvers resolved (skip)
+  approval_decision_recorded      — approved; guarded UPDATE won; loop resuming
+  approval_decision_rejected      — rejected; guarded UPDATE won; execution failed
+  approval_resume_blocked_ttl_expired  — TTL expired, approve blocked
+  approval_rejection_blocked_ttl_expired — TTL expired, reject blocked
+  approval_replay_prevented       — duplicate decision attempt detected (pre-flight)
+  transition_race_lost            — guarded UPDATE returned empty (concurrent operation)
+
+All events carry: executionId, workflowId, workspaceId, workflowVersion,
+approvalId (where applicable), decidedBy, approvalStepIndex.
+
+────────────────────────────────────────────────────────────────────
+4. TEST COVERAGE — approval-governance.test.ts (NEW)
+────────────────────────────────────────────────────────────────────
+
+  T1  WG-02 LIFTED: well-configured approval step passes validation (3 assertions)
+  T2  WG-02_APPROVAL_SPECIFIC_NO_IDS fires correctly (2 assertions)
+  T3  WG-02_APPROVAL_NO_APPROVER_TYPE fires + blocks activation (2 assertions)
+  T4  WG-02_APPROVAL_ROLE_NO_ROLE fires (3 assertions, including empty-string)
+  T5  WG-02_APPROVAL_MISSING_TITLE fires as error (2 assertions)
+  T6  WG-02_APPROVAL_MISSING_MESSAGE fires as WARNING only (2 assertions)
+  T7  TTL expiry guard: isExecutionTimedOut + cancel-takes-priority (4 assertions)
+  T8  TTL null = no deadline, never blocks legacy executions (3 assertions)
+  T9  Version linkage shape: workflowId, workflowVersion, stepSnapshot, timeoutAt
+      including null-safety for pre-P5-F records (4 assertions)
+  T10 Replay prevention: two independent defence layers (5 assertions)
+
+Total new assertions: 30
+All 522 tests pass.
+
+────────────────────────────────────────────────────────────────────
+5. EXACT-ONCE DECISION GUARANTEE (two-layer model)
+────────────────────────────────────────────────────────────────────
+
+Layer 1 — Pre-flight (route handler):
+  • SELECT workflow_approvals WHERE executionId + stepIndex
+  • If found → 409 APPROVAL_ALREADY_DECIDED + approval_replay_prevented event
+  • Catches: client double-submit, browser retry, UI bug
+
+Layer 2 — Atomic gate (executor):
+  • UPDATE WHERE status='waiting_approval' (resume also adds cancelRequested=false)
+  • .returning() — empty result = race lost → TRANSITION_RACE_LOST
+  • Catches: concurrent approve+approve, approve+timeout, approve+reject
+
+Both layers log structured events with full traceability fields.
+Approval records are only inserted AFTER the guarded UPDATE wins.
+No orphaned records can exist.
+
+────────────────────────────────────────────────────────────────────
+6. GOVERNANCE INVARIANTS VERIFIED
+────────────────────────────────────────────────────────────────────
+
+  ✓ WG-02 lifted: approval steps with valid config can be published
+  ✓ WG-02 sub-rules fire for each specific misconfiguration
+  ✓ Every approval decision carries immutable version linkage
+  ✓ TTL expiry blocks both approve and reject at route + executor layers
+  ✓ cancelRequested blocks both resume AND reject (gap in P4-E fixed)
+  ✓ Replay prevention: pre-flight + atomic guard = two-layer exact-once
+  ✓ stepSnapshot frozen at decision time (no definition drift on audit)
+  ✓ executionTimeoutAt preserved on record (TTL audit after the fact)
+  ✓ All new columns are nullable (zero migration needed for pre-P5-F rows)
+  ✓ approval_requested event emitted at step fire time (lifecycle start)
+  ✓ approval_decision_recorded / _rejected events emitted after INSERT
+
+────────────────────────────────────────────────────────────────────
+7. PREVIOUS PHASE INVARIANTS PRESERVED
+────────────────────────────────────────────────────────────────────
+
+  ✓ P4-D: All status transitions guarded with .returning() race detection
+  ✓ P4-E: resumeExecution / rejectExecution guard model intact
+  ✓ P5-A: stepsSnapshot source-of-truth model used in rejectExecution
+  ✓ P5-C: cursor-based traversal + resolveNextCursor unchanged
+  ✓ P5-E: workflowVersion from publish pipeline flows into audit records
+  ✓ P3-D: MAX_APPROVER_NOTIFICATIONS fanout cap preserved in step handler
+  ✓ All 492 pre-P5-F tests continue to pass

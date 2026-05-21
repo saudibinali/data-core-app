@@ -1,0 +1,450 @@
+راجع:
+- workflow-phase-14b-report.txt
+- workflow-phase-14a-report.txt
+- workflow-phase-13j-final-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/lib/platform-permissions.ts
+- artifacts/api-server/src/middlewares/requireAuth.ts
+- artifacts/api-server/src/routes/platform-users.ts
+- artifacts/api-server/src/routes/tenants.ts
+- artifacts/ops-platform/src/lib/platform-permissions-config.ts
+- artifacts/ops-platform/src/lib/platform-users-config.ts
+- artifacts/ops-platform/src/lib/platform-users-hooks.ts
+- artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+- artifacts/ops-platform/src/components/super-admin-layout.tsx
+- Tenant Registry page
+- Tenant Admin Console page/tabs
+- SuperAdminRoute
+- any current frontend auth/user context
+- activity/audit pages if present
+
+ثم نفّذ فقط:
+P14-C — Platform Access Boundary & Route Guards
+
+ولا تنفّذ:
+- billing/commercial modules
+- invoice/payment
+- tenant-side billing
+- tenant users
+- customer users
+- HR employee users
+- SSO
+- MFA
+- password reset
+- email invite sending
+- delete user
+- custom role builder
+- permission editor
+- break-glass recovery
+
+عنوان المهمة:
+WORKFLOW PHASE 14-C — Platform Access Boundary & Route Guards
+
+المهمة الحالية:
+تثبيت حدود الوصول داخل واجهة Platform Administration بحيث تكون الصفحات، التبويبات، الأزرار، والإجراءات متوافقة مع صلاحيات P14-B.
+
+الهدف:
+منع تجربة "زر ظاهر ثم backend يرفض" قدر الإمكان، مع بقاء backend هو المصدر النهائي للحماية.
+
+بمعنى:
+- Backend authorization remains source of truth
+- Frontend hides/disables unauthorized UI
+- Routes redirect أو تعرض Access Denied حسب الصلاحية
+- Navigation sidebar يصير permission-aware
+- Tenant console tabs/actions تصير permission-aware
+- Platform users page actions تصير permission-aware
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW P14-B PERMISSION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- 18 permission codes
+- 8 platform roles
+- role permission matrix
+- requirePlatformPermission middleware
+- current frontend config mirror
+- current user auth context
+- كيف الواجهة تعرف role/platformRoleCode حاليًا
+
+وثق في التقرير:
+- هل current frontend auth payload يحتوي platformRoleCode؟
+- هل يحتاج endpoint profile/current-user؟
+- هل legacy root يظهر كـ root_platform_owner في الواجهة؟
+- هل الواجهة تقدر تحسب permissions محليًا من roleCode؟
+
+مهم:
+لا تكسر login.
+لا تغير auth جذريًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CURRENT PLATFORM USER CONTEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا current frontend لا يملك platformRoleCode بشكل موثوق:
+أضف endpoint آمن:
+
+GET /platform/me
+
+requireAuth
+returns:
+- id
+- email
+- displayName
+- role
+- workspaceId
+- platformRoleCode
+- effectivePlatformRoleCode
+- isRootOwner
+- isProtected
+- permissions[]
+
+Rules:
+- فقط platform user
+- workspace users يرجع 403
+- legacy root بدون platformRoleCode يرجع:
+  effectivePlatformRoleCode = root_platform_owner
+  permissions = all
+
+Frontend hook:
+- useCurrentPlatformUser()
+- useCurrentPlatformPermissions()
+
+مهم:
+لا تضف تعديل بيانات profile.
+لا تضف password/email.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — FRONTEND PERMISSION HELPERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/حدّث helper:
+
+platform-access.ts
+
+Exports:
+- getEffectivePlatformRoleCode(user)
+- getCurrentPlatformPermissions(user)
+- canAccessPlatformRoute(user, routeKey)
+- canViewPlatformNavItem(user, navItem)
+- canViewTenantConsoleTab(user, tabKey)
+- canPerformPlatformAction(user, actionKey)
+- hasPlatformPermissionClient(user, permissionCode)
+- hasAnyPlatformPermissionClient(user, permissionCodes)
+- hasAllPlatformPermissionsClient(user, permissionCodes)
+
+Route keys:
+- platform.users
+- tenant.registry
+- tenant.console.overview
+- tenant.console.lifecycle
+- tenant.console.subscription
+- tenant.console.entitlements
+- tenant.console.usage
+- tenant.console.renewal
+- tenant.console.health
+- tenant.console.evaluation
+- platform.activity
+- audit
+
+Action keys:
+- platform.user.create
+- platform.user.status.update
+- platform.user.role.update
+- tenant.lifecycle.update
+- tenant.subscription.update
+- tenant.entitlement.override.update
+
+Rules:
+- Root sees all
+- unknown role sees nothing
+- read-only roles see read pages only
+- action controls require write permissions
+- frontend never offers root assignment
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ROUTE GUARD COMPONENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف components:
+- PlatformPermissionRoute
+- PlatformAccessDenied
+
+PlatformPermissionRoute props:
+- permission
+- anyOf
+- allOf
+- children
+
+Behavior:
+- loading state while current platform user loads
+- if not platform user → redirect /sign-in أو access denied حسب pattern الحالي
+- if missing permission → PlatformAccessDenied
+- if allowed → render children
+
+PlatformAccessDenied:
+- English + Arabic short message
+- shows required permission code
+- no sensitive data
+- no stack trace
+
+مهم:
+SuperAdminRoute يبقى موجود للتوافق.
+لكن routes الجديدة أو الحساسة تستخدم PlatformPermissionRoute.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — NAVIGATION FILTERING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث Super Admin sidebar/navigation:
+
+كل nav item يكون له:
+- requiredPermission
+أو
+- anyOfPermissions
+
+Examples:
+- Platform Users → platform.users.read
+- Tenant Registry → tenants.read
+- Platform Activity → platform.activity.read أو audit.read
+- Workflows إذا موجودة → حسب permission الحالي أو اتركها requireSuperAdmin إذا خارج scope
+
+Rules:
+- لا تعرض nav item إذا المستخدم ما يملك صلاحيتها
+- Root يشوف الكل
+- read_only_operator يشوف read-only فقط
+- finance_admin لا يشوف Platform Users إذا ما عنده platform.users.read
+- support_admin لا يشوف role/status management actions
+
+مهم:
+إذا صفحة موجودة خارج permission matrix، لا تكسرها؛ اتركها SuperAdminRoute واذكرها في التقرير كـ out-of-scope.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PLATFORM USERS PAGE ACTION VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في /super-admin/platform-users:
+
+حسب permissions:
+- Create Platform User button:
+  يحتاج platform.users.create
+- StatusChangePanel:
+  يحتاج platform.users.status.update
+- RoleChangePanel:
+  يحتاج platform.users.role.update
+- Role/Permission Matrix read:
+  يحتاج platform.roles.read أو platform.users.read
+
+Rules:
+- إذا لا يملك الصلاحية:
+  - لا تعرض الزر
+  - أو اعرض disabled مع سبب مختصر
+- Root/protected restrictions تبقى كما هي
+- backend error handling يبقى
+
+مهم:
+لا تضف permission editor.
+لا تضف custom roles.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TENANT REGISTRY / TENANT CONSOLE ACCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث Tenant Registry:
+- page requires tenants.read
+- lifecycle action buttons require tenants.lifecycle.update
+- subscription edit controls require subscriptions.update
+- entitlement override controls require entitlements.override.update
+
+Tenant Admin Console tabs:
+- Overview:
+  - visible if user has any tenant read permission:
+    tenants.read أو health.read أو usage.read أو renewal.read
+- Lifecycle tab:
+  - visible if tenants.read أو tenants.lifecycle.update
+  - action controls require tenants.lifecycle.update
+- Subscription tab:
+  - visible if subscriptions.read
+  - edit controls require subscriptions.update
+- Entitlements tab:
+  - visible if entitlements.read
+  - override controls require entitlements.override.update
+- Usage tab:
+  - visible if usage.read
+- Renewal tab:
+  - visible if renewal.read
+- Health tab:
+  - visible if health.read
+- Evaluation tab:
+  - visible if evaluation.read
+
+If no tabs visible:
+- show PlatformAccessDenied
+
+مهم:
+لا تغير backend logic.
+لا تغير business rules.
+فقط access visibility/guards.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — DENIED STATES / EMPTY STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف reusable messages:
+
+- Access denied — لا تملك صلاحية الوصول
+- Required permission: {permissionCode}
+- Contact Platform Owner — تواصل مع مالك المنصة
+- This action is restricted — هذا الإجراء مقيّد
+
+لا تعرض:
+- stack traces
+- internal policy details الحساسة
+- DB names
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — AUDIT / OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Backend:
+- permission denied already audited in P14-B
+- لا تضف audit للـ frontend hide
+- إذا أضفت GET /platform/me:
+  - لا يحتاج DB audit write
+  - req.log.info فقط
+
+Frontend:
+- console.warn ممنوع للإنتاج إلا إذا pattern موجود
+- error boundary آمن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+GET /platform/me returns effective role + permissions for legacy root
+
+T2:
+GET /platform/me denies workspace users
+
+T3:
+client permission helpers root sees all
+
+T4:
+client permission helpers unknown role sees none
+
+T5:
+navigation hides Platform Users without platform.users.read
+
+T6:
+navigation shows Tenant Registry with tenants.read
+
+T7:
+PlatformPermissionRoute renders allowed user
+
+T8:
+PlatformPermissionRoute shows access denied for missing permission
+
+T9:
+Platform Users create button requires platform.users.create
+
+T10:
+StatusChangePanel requires platform.users.status.update
+
+T11:
+RoleChangePanel requires platform.users.role.update
+
+T12:
+root/protected still hides status/role controls
+
+T13:
+Tenant Registry requires tenants.read
+
+T14:
+Tenant lifecycle action requires tenants.lifecycle.update
+
+T15:
+Subscription edit controls require subscriptions.update
+
+T16:
+Entitlement override controls require entitlements.override.update
+
+T17:
+Tenant console tabs visibility matches permission matrix
+
+T18:
+Access denied message contains required permission and Arabic short text
+
+T19:
+No password reset/delete/email invite/SSO/MFA/custom roles/permission editor introduced
+
+T20:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P14-C MUST:
+- keep backend authorization source of truth
+- add frontend permission awareness
+- hide unauthorized nav/actions/tabs
+- preserve root protection
+- preserve fixed role matrix
+- avoid custom roles
+- avoid permission editor
+- avoid tenant/customer/HR users
+- avoid password reset/delete/email invite/SSO/MFA
+- avoid billing/commercial
+- avoid invoice/payment
+- avoid break-glass recovery
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- custom role builder
+- permission editor
+- tenant users
+- customer users
+- HR employee users
+- password reset
+- delete user
+- email invite sending
+- SSO
+- MFA
+- break-glass recovery
+- billing/commercial
+- invoice/payment
+- tenant-side billing
+- HR modules
+
+خلك:
+Access boundary + route guards + permission-aware UI فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-14c-report.txt
+
+ويحتوي:
+- P14-B permission model review
+- current platform user context
+- /platform/me إذا أضيف
+- frontend permission helpers
+- route guard components
+- navigation filtering
+- Platform Users page action visibility
+- Tenant Registry / Tenant Console access behavior
+- denied states
+- safety guarantees
+- tests results
+- limitations intentionally left for P14-D
+- readiness assessment قبل Platform User Audit & Activity Tracking

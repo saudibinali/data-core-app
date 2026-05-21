@@ -1,0 +1,244 @@
+Phase 13-B Report: Workspace Lifecycle Management & Controlled State Transitions
+=================================================================================
+
+Phase:      P13-B
+Status:     COMPLETE
+Date:       2026-05-16
+Tests:      2569 backend (44 files) · 726 frontend (11 files) — ALL PASS
+Prior:      2482 backend (43 files) · 656 frontend (10 files) [P13-A baseline]
+New tests:  +87 backend · +70 frontend
+
+────────────────────────────────────────────────────────────────
+DELIVERABLES
+────────────────────────────────────────────────────────────────
+
+1. BACKEND STATE MACHINE
+   File: artifacts/api-server/src/lib/workspace-lifecycle.ts (NEW)
+
+   Pure state machine — no DB, no HTTP, fully testable in isolation.
+
+   Exports:
+   • WorkspaceLifecycleState — 5 states: pending_activation | active |
+     suspended | locked | archived
+   • WorkspaceLifecycleAction — 5 actions: activate | suspend | restore |
+     lock | archive
+   • LIFECYCLE_STATE_TO_DB_STATUS — state → DB column value map
+   • deriveLifecycleState(workspaceStatus) — DB status → lifecycle state
+   • lifecycleStateToDbStatus(state) — lifecycle state → DB column value
+   • LIFECYCLE_ACTION_MODEL — full action definitions with allowedFrom[],
+     targetState, severity, requiresReason=true, requiresConfirmation=true,
+     isDestructive=false, auditEventType
+   • ALL_LIFECYCLE_ACTIONS — ordered list of 5 actions
+   • isTransitionAllowed(currentState, action) → boolean
+   • getAllowedActionsFrom(currentState) → action[]
+   • REASON_MIN_LENGTH = 10
+   • validateLifecycleRequest(req, currentState) → LifecycleValidationResult
+   • validateLifecycleActorRole(role) → boolean (super_admin only)
+   • buildLifecycleAuditPayload(...) → LifecycleAuditPayload
+
+   Transition table:
+     pending_activation → activate → active
+     active             → suspend  → suspended
+     active             → lock     → locked
+     active             → archive  → archived
+     suspended          → restore  → active
+     suspended          → lock     → locked
+     suspended          → archive  → archived
+     locked             → restore  → active
+     locked             → suspend  → suspended
+     locked             → archive  → archived
+     archived           → restore  → active
+     archived           → suspend  → suspended
+
+   Validation order (validateLifecycleRequest):
+     1. Action must be a known action     → UNKNOWN_ACTION
+     2. Reason ≥ REASON_MIN_LENGTH chars  → REASON_REQUIRED
+     3. confirmation === true             → CONFIRMATION_REQUIRED
+     4. Transition must be allowed        → TRANSITION_NOT_ALLOWED
+
+2. DB STATUS EXTENSION
+   File: lib/db/src/schema/workspaces.ts — NO CHANGE NEEDED
+   File: artifacts/api-server/src/lib/tenant-registry.ts — deriveTenantStatus updated
+
+   workspaces.status is a TEXT column (not enum) — writing "locked" directly
+   is valid without any migration. deriveTenantStatus now handles:
+     "active"    → active
+     "suspended" → suspended
+     "locked"    → locked     ← NEW in P13-B
+     "disabled"  → archived
+     other       → pending_activation
+
+3. BACKEND ROUTE
+   File: artifacts/api-server/src/routes/tenants.ts — PATCH route added
+
+   PATCH /platform/tenants/:tenantId/lifecycle
+   Auth: requireAuth + requireSuperAdmin
+   Body: { action, reason, internalNote?, confirmation }
+   Returns: { tenant: PlatformTenantProfile, lifecycleEvent: LifecycleAuditPayload }
+
+   Route logic:
+     1. Validate tenantId (positive integer)
+     2. Load workspace from DB — 404 if not found
+     3. Derive current lifecycle state from workspace.status
+     4. validateLifecycleRequest() — 400 on any validation failure
+     5. Compute targetState and newDbStatus
+     6. UPDATE workspaces SET status = newDbStatus
+     7. INSERT into activity_logs (activityLogsTable) — full audit record
+     8. req.log.info — structured log with actorId, tenantId, transition detail
+     9. Return updated PlatformTenantProfile + LifecycleAuditPayload
+
+   Audit log schema (activity_logs):
+     userId     = req.userId (actor)
+     workspaceId = workspace.id
+     action     = auditEventType (e.g. "workspace_lifecycle_suspended")
+     metadata   = JSON.stringify({ action, previousState, targetState,
+                                   reason, internalNote, tenantId })
+
+4. FRONTEND CONFIG
+   File: artifacts/ops-platform/src/lib/workspace-lifecycle-config.ts (NEW)
+
+   Exports:
+   • LIFECYCLE_STATE_CONFIG — display config for each of 5 states
+     (label, tier, description, badgeClass, order)
+   • LIFECYCLE_ACTION_CONFIG — UI action config for each of 5 actions
+     (label, description, confirmationPrompt, allowedFrom, targetState,
+      severity, buttonClass, requiresReason=true, requiresConfirmation=true,
+      isDestructive=false)
+   • ALL_LIFECYCLE_ACTIONS — ordered list
+   • deriveLifecycleStateFromWorkspaceStatus(status) — mirrors backend
+   • getAllowedActionsFromState(state) — UI-friendly allowed action list
+   • REASON_MIN_LENGTH = 10
+   • isLifecycleFormValid(form) → boolean — submit-gate
+   • getLifecycleFormError(form) → string | null — user-facing validation
+   • LIFECYCLE_API_PATHS.transition(tenantId) → path string
+   • LIFECYCLE_MUTATION_HOOK_NAMES — exactly 1 entry
+   • LIFECYCLE_SAFETY_CONTRACT — 14 properties, all true
+   • LIFECYCLE_SEVERITY_STYLE — severity → UI classes mapping
+   • LIFECYCLE_EMPTY_STATE — placeholder text constants
+
+   LIFECYCLE_SAFETY_CONTRACT (14 properties, all true):
+     superAdminOnly, requiresReason, requiresConfirmation,
+     noWorkspaceDeletion, noHardArchive, noHrDataMutation,
+     noBillingActions, noPaymentActions, noAutomaticSuspension,
+     noExternalLegalNotices, noEmailNotifications, noAiDecisions,
+     failClosedOnUnknownState, nonDestructive
+
+5. MUTATION HOOK
+   File: artifacts/ops-platform/src/lib/tenant-registry-hooks.ts — hook added
+
+   useWorkspaceLifecycleTransition() — P13-B mutation hook (exactly one)
+     Sends PATCH /api/platform/tenants/:tenantId/lifecycle
+     On success: invalidates ["platform", "tenants"] query family
+     Returns: { mutate, isPending, error, isSuccess }
+
+   Supporting types exported: LifecycleTransitionInput, LifecycleTransitionResult
+   patchJson<T> helper added (private to module)
+   useMutation + useQueryClient imported
+
+6. FRONTEND LIFECYCLE CONTROLS
+   File: artifacts/ops-platform/src/pages/super-admin-tenants.tsx — updated
+
+   LifecycleControlPanel component (new, before TenantDetailPanel):
+     • Derives currentState from tenant.workspaceStatus
+     • Computes allowedActions via getAllowedActionsFromState()
+     • Renders action buttons (color-coded by severity)
+     • Empty state message when no actions available
+     • Safety note: "Controlled transitions only — all changes are audited."
+     • Confirmation modal (shadcn/ui Dialog):
+       - Workspace name info banner
+       - Reason textarea (required, min 10 chars with live counter)
+       - Internal note textarea (optional)
+       - Severity-styled confirmation checkbox
+       - Cancel + Confirm buttons (with loading spinner)
+       - Mutation error display
+     • Success banner appears after completed transition
+
+   TenantDetailPanel:
+     • Unchanged ownership / subscription / usage sections
+     • New md:col-span-3 section at bottom → LifecycleControlPanel
+
+   New imports: Dialog, DialogContent, DialogHeader, DialogTitle,
+     DialogDescription, DialogFooter, Loader2, workspace-lifecycle-config
+     functions, useWorkspaceLifecycleTransition
+
+7. BACKEND TESTS
+   File: artifacts/api-server/src/lib/__tests__/workspace-lifecycle.test.ts (NEW)
+   87 new tests across 16 test groups:
+
+   T1   deriveLifecycleState — all 7 cases (including locked, empty string)
+   T2   LIFECYCLE_ACTION_MODEL — structure, severity, audit event naming
+   T3   isTransitionAllowed — 12 allowed + 7 forbidden transitions
+   T4   validateLifecycleRequest — invalid transitions rejected
+   T5   validateLifecycleRequest — reason length enforcement
+   T6   validateLifecycleRequest — confirmation enforcement (incl. coercion)
+   T7   validateLifecycleActorRole — 6 cases
+   T8   validateLifecycleRequest — unknown actions rejected (UNKNOWN_ACTION)
+   T9   lifecycleStateToDbStatus — round-trip + coverage of all 5 states
+   T10  buildLifecycleAuditPayload — all 5 actions, internalNote, fields
+   T11  buildTenantProfile — returns correct tenantStatus after status change
+   T12  getAllowedActionsFrom(pending_activation) — only activate
+   T13  getAllowedActionsFrom(active) — exactly suspend, lock, archive
+   T14  LIFECYCLE_ACTION_MODEL — no destructive/billing/payment wording
+   T15  LIFECYCLE_ACTION_MODEL — all requiresReason + requiresConfirmation
+   T16  ALL_LIFECYCLE_ACTIONS — 5 total, no duplicates
+
+8. FRONTEND TESTS
+   File: artifacts/ops-platform/src/lib/__tests__/workspace-lifecycle.test.ts (NEW)
+   70 new tests across 16 test groups:
+
+   T1   LIFECYCLE_STATE_CONFIG — 5 states, required fields, unique order values
+   T2   LIFECYCLE_ACTION_CONFIG — 5 actions, required fields, safety flags
+   T3   getAllowedActionsFromState(active) — exactly suspend, lock, archive
+   T4   getAllowedActionsFromState(pending_activation) — only activate
+   T5   getAllowedActionsFromState(archived) — suspend and restore
+   T6   isLifecycleFormValid — returns false for empty/short reason
+   T7   isLifecycleFormValid — returns false for unconfirmed / null action
+   T8   isLifecycleFormValid — returns true for fully valid form (all 5 actions)
+   T9   LIFECYCLE_SAFETY_CONTRACT — all properties are true
+   T10  LIFECYCLE_SAFETY_CONTRACT — exactly 14 properties
+   T11  LIFECYCLE_MUTATION_HOOK_NAMES — exactly 1 entry
+   T12  LIFECYCLE_MUTATION_HOOK_NAMES — contains useWorkspaceLifecycleTransition
+   T13  getLifecycleFormError — correct error messages for all states
+   T14  No forbidden wording in action config text
+   T15  LIFECYCLE_API_PATHS.transition — function, correct path format
+   T16  deriveLifecycleStateFromWorkspaceStatus — all mappings, deterministic
+
+────────────────────────────────────────────────────────────────
+SAFETY NOTES
+────────────────────────────────────────────────────────────────
+
+• No workspace deletion — archive writes "disabled" to status, data preserved
+• No billing/payment/HR/email actions in scope
+• No autonomous suspension — all transitions are operator-initiated
+• No AI decisions — pure deterministic rule-based state machine
+• Reason required (min 10 chars) for every transition
+• Explicit boolean confirmation required for every transition
+• Super-admin role enforced at both HTTP middleware and pure function level
+• All transitions audit-logged to activity_logs before response is sent
+• Invalid transitions fail with structured error code (TRANSITION_NOT_ALLOWED)
+• Unknown states default to pending_activation (fail-closed)
+
+────────────────────────────────────────────────────────────────
+FILES CHANGED / CREATED
+────────────────────────────────────────────────────────────────
+
+NEW:
+  artifacts/api-server/src/lib/workspace-lifecycle.ts
+  artifacts/api-server/src/lib/__tests__/workspace-lifecycle.test.ts
+  artifacts/ops-platform/src/lib/workspace-lifecycle-config.ts
+  artifacts/ops-platform/src/lib/__tests__/workspace-lifecycle.test.ts
+
+MODIFIED:
+  artifacts/api-server/src/lib/tenant-registry.ts      (added "locked" case)
+  artifacts/api-server/src/routes/tenants.ts             (added PATCH route + imports)
+  artifacts/ops-platform/src/lib/tenant-registry-hooks.ts (added hook + patchJson)
+  artifacts/ops-platform/src/pages/super-admin-tenants.tsx (added lifecycle controls)
+
+────────────────────────────────────────────────────────────────
+KNOWN PRE-EXISTING TYPECHECK ISSUES (IGNORED — NOT P13-B)
+────────────────────────────────────────────────────────────────
+
+  src/pages/super-admin-governance-audit.tsx    — TS2322 (pre-existing)
+  src/pages/super-admin-governance-violations.tsx — TS2503 (pre-existing)
+  src/pages/workflow-detail.tsx                 — isActive TS2353 (pre-existing)
+  src/pages/workflows.tsx                       — isActive TS2353 (pre-existing)

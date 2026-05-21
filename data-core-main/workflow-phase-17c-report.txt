@@ -1,0 +1,188 @@
+================================================================================
+WORKFLOW PHASE 17-C — Super Admin Protection Policies
+================================================================================
+Status: COMPLETE
+Date: 2026-05-18
+Builds on: P17-A (directory/lifecycle), P17-B (permission overrides)
+Next phase: P17-D — Access Review & Audit (NOT started in this phase)
+
+================================================================================
+1) PROTECTION POLICY MODEL / CONFIG
+================================================================================
+Static module (no DB table in P17-C):
+  artifacts/api-server/src/lib/platform-admin-protection-policy-config.ts
+  artifacts/ops-platform/src/lib/platform-admin-protection-config.ts (client mirror)
+
+Policy name: default_platform_admin_protection
+Storage key equivalent: platform_admin_protection_policies (documented; not migrated)
+
+Defaults (verified in tests):
+  minActiveRootOwners = 1
+  minActivePlatformOwners = 1
+  requireReasonForSensitiveChanges = true
+  requireTwoStepApprovalForRootChanges = false
+  preventSelfDemotion = true
+  preventSelfDisable = true
+  preventLastOwnerDisable = true
+  preventLastOwnerCriticalPermissionDeny = true
+  emergencyAccessMode = disabled
+
+Catalogs:
+  CRITICAL_PLATFORM_PERMISSIONS (10 codes)
+  PROTECTED_PERMISSION_PATTERNS (platform.permissions.*, platform.users.*, …)
+
+SUPER_ADMIN_PROTECTION_SAFETY_CONTRACT — all 20 flags true at import time.
+
+================================================================================
+2) CENTRAL PROTECTION EVALUATOR
+================================================================================
+  artifacts/api-server/src/lib/platform-admin-protection-evaluator.ts
+  evaluatePlatformAdminProtection(action, actor, target, counts, payload)
+
+Actions supported:
+  disable_user, suspend_user, reactivate_user, change_role,
+  update_permission_override, bulk_update_permission_overrides,
+  clear_permission_override, update_root_owner_flag (always blocked),
+  update_own_profile_sensitive (reserved)
+
+Returns: allowed, blockedReason, severity, requiredReason, requiredApproval,
+          policySnapshot (safe), warnings[]
+
+Helpers:
+  resolveStatusProtectionAction(nextStatus)
+  buildProtectionAuditMetadata()
+  protectionAuditActionForBlocked()
+
+Integration wrapper:
+  artifacts/api-server/src/lib/platform-protection-integration.ts
+  evaluateAndAuditPlatformProtection()
+
+Owner counts:
+  artifacts/api-server/src/lib/platform-owner-counts.ts
+
+================================================================================
+3) PROTECTED USER RULES
+================================================================================
+  artifacts/api-server/src/lib/platform-protected-user.ts
+  isProtectedPlatformAdminUser()
+
+Protected when:
+  - isRootOwner / legacy root account
+  - isProtected flag
+  - platform_owner user type
+  - protected role types (root_platform_owner, platform_owner)
+  - role grants platform.permissions.update, platform.users.disable, or
+    platform.users.role.update (includes platform_admin)
+
+Rules enforced:
+  - Root owner flag immutable (update_root_owner_flag blocked)
+  - Self-disable / self-demotion / self permission override blocked
+  - Last active root owner cannot be disabled/suspended/demoted
+  - Last active platform owner cannot be disabled/suspended/demoted
+  - Non-root cannot modify root/protected users
+  - Critical permission deny blocked for last root/platform owner
+
+================================================================================
+4) BACKEND INTEGRATION
+================================================================================
+A) PATCH /platform/users/:userId/status
+   → evaluateAndAuditPlatformProtection before update
+   → 403 with blockedReason code on deny
+
+B) PATCH /platform/users/:userId/role
+   → protection evaluator before legacy canManage checks
+   → reason + confirmation still required
+
+C) PATCH /platform/users/:userId (profile)
+   → blocks isRootOwner in body via update_root_owner_flag action
+
+D) Permission overrides (P17-B routes)
+   → platform-user-permissions.ts uses runOverrideProtection on
+     PUT bulk, PATCH single, DELETE soft clear
+
+E) Read-only policy API:
+   GET /platform/admin-protection-policy
+   Permission: platform.permissions.read OR platform.users.read
+   File: artifacts/api-server/src/routes/platform-admin-protection.ts
+   Registered in artifacts/api-server/src/routes/index.ts
+   No PATCH/PUT policy update in P17-C.
+
+List API enrichment:
+   buildPlatformUserProfile() sets isProtected via isProtectedPlatformAdminUser()
+
+================================================================================
+5) AUDIT EVENTS
+================================================================================
+Logged via activityLogsTable (metadata: actorId, targetUserId, action,
+blockedReason, severity, requiredReason, requiredApproval, reason, timestamp)
+No full payload or secrets.
+
+Actions:
+  platform_admin_protection_evaluated_blocked
+  platform_admin_protection_warning
+  platform_admin_sensitive_change_allowed
+  platform_admin_sensitive_change_blocked
+  platform_root_owner_change_blocked
+  platform_last_owner_action_blocked
+
+================================================================================
+6) FRONTEND PROTECTION UX
+================================================================================
+  artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+    - Protected / Root Owner badges
+    - AdminProtectionNotice with policy tooltip text
+    - Status/role panels replaced with notice when user is protected
+    - blockedReason surfaced via formatProtectionBlockedReason in hooks
+
+  artifacts/ops-platform/src/components/platform-users/CustomPermissionsSection.tsx
+    - Protected users: notice only, no grant/deny controls
+
+Forbidden UI (absent): Make Root Owner, Remove Root Owner, Override Protection,
+Emergency Access, Force Disable, Force Permission Change, Bypass Policy, Delete User
+
+NOT built: approval workflow UI, emergency access UI, root promotion UI
+
+================================================================================
+7) TESTS
+================================================================================
+API (vitest):
+  artifacts/api-server/src/lib/__tests__/platform-admin-protection-evaluator.test.ts
+  Result: 16/16 passed
+
+Ops (vitest):
+  artifacts/ops-platform/src/lib/__tests__/phase-17c-super-admin-protection.test.ts
+  Result: 8/8 passed
+
+================================================================================
+8) SAFETY GUARANTEES (P17-C SCOPE)
+================================================================================
+superAdminProtectionPoliciesOnly = true
+noApprovalWorkflow = true
+noEmergencyAccessUi = true
+noRootOwnerPromotion / noRootOwnerRemoval = true
+rootOwnerImmutable = true
+protectLastRootOwner / protectLastPlatformOwner = true
+preventSelfDisable / preventSelfDemotion / preventSelfPermissionModification = true
+preventCriticalPermissionDenyForLastOwner = true
+nonRootCannotModifyProtectedUsers = true
+noRoleMatrixRedesign / noTenantWorkspacePermissions = true
+noPasswordManagement / noMfaManagement / noSsoManagement = true
+auditSensitiveAdminChanges / permissionGated = true
+
+================================================================================
+9) INTENTIONAL LIMITATIONS (FOR P17-D)
+================================================================================
+- No full two-step approval workflow (requireTwoStepApprovalForRootChanges=false)
+- No emergency access mode UI or manual break-glass (emergencyAccessMode=disabled)
+- No policy admin UI or PUT /platform/admin-protection-policy
+- No access review campaigns, periodic certification, or compliance export
+- No consolidated access-review dashboard
+
+================================================================================
+10) NEXT: P17-D — Access Review & Audit
+================================================================================
+Do NOT start P17-D in this deliverable. P17-D will add access review workflows,
+audit surfacing, and certification — building on the protection and override
+foundation from P17-A/B/C.
+
+================================================================================

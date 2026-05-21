@@ -1,0 +1,502 @@
+WORKFLOW GOVERNANCE — PHASE 4-C: COOPERATIVE CANCELLATION & EXECUTION ABORT SAFETY
+Implementation Report
+Date:   2026-05-13
+Status: COMPLETE — 93/93 tests passed (35 new P4-C), typecheck clean, server running.
+Scope:  schema, executor.ts, engine.ts, routes/workflows.ts, cancellation.test.ts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 4-C adds explicit cancellation support to the workflow runtime.
+
+An admin or workspace manager can request cancellation of any non-terminal
+execution via POST /api/workflows/executions/:id/cancel.  The route handler
+sets a cancel_requested flag.  The executor checks this flag at the next
+inter-step boundary (after the current step fully completes, before the next
+step begins) and transitions the execution to status='cancelled'.
+
+No AbortController.  No Promise cancellation.  No mid-step interruption.
+No rollback.  No side-effect compensation.  Cooperative only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — SCHEMA CHANGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: lib/db/src/schema/workflows.ts
+Table: workflow_executions
+
+New column:
+  cancel_requested BOOLEAN NOT NULL DEFAULT FALSE
+
+  Purpose: decoupled cancellation signal.
+  The route handler sets this to true.  The executor reads it at the
+  inter-step boundary and transitions status → 'cancelled' when true.
+  DEFAULT FALSE: all existing rows behave as before — zero data migration.
+
+Status values (text column):
+  New (P4-C): cancelled
+
+  'cancelled' was pre-registered in TERMINAL_STATUSES in ttl.ts (P4-B).
+  No change to ttl.ts required — 'cancelled' was already:
+    • Listed in TERMINAL_STATUSES
+    • Handled by isTerminalStatus()
+    • Excluded by the stuck endpoint filter
+    • Rejected by the force-timeout endpoint
+
+Migration:
+  pnpm --filter @workspace/db run push
+  Result: [✓] Changes applied — zero data loss, zero downtime.
+  All existing rows: cancel_requested = false (default, no touch).
+
+Backward compatibility:
+  All existing rows have cancel_requested = false.
+  The executor's cancellation check: if (execState?.cancelRequested)
+  evaluates to false for all legacy rows — no cancellation fires.
+  All diagnostic queries now include cancelRequested in responses
+  (false for all legacy and non-cancelled executions).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — CANCELLATION LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Full flow from cancellation request to final cancelled status:
+
+  1. Admin/manager calls POST /api/workflows/executions/:id/cancel.
+
+  2. Route handler validates:
+       a. 404 if execution not found (or wrong workspace).
+       b. 422 if already terminal (isTerminalStatus guard).
+       c. 409 if cancel_requested is already true (CANCEL_ALREADY_REQUESTED).
+
+  3. Route handler:
+       UPDATE workflow_executions SET cancel_requested = true
+       Responds immediately: { executionId, cancelRequested: true, requestedAt }
+       Logs: req.log.warn({ ..., action: 'cancel_requested', cancelledBy: req.userId })
+
+  4. Meanwhile, the executor is running steps (or waiting between steps).
+     The route handler does NOT change status — only sets the flag.
+
+  5. executor.ts inter-step boundary (P4-C check, AFTER step i completes):
+       Re-fetch: SELECT cancel_requested FROM workflow_executions WHERE id = executionId
+       If cancel_requested = true:
+         UPDATE workflow_executions SET status='cancelled', completed_at=now()
+         logger.warn({ ..., action: 'execution_cancelled' })
+         return  ← stops cleanly, step i+1 never starts
+
+  6. Final state: status='cancelled', completedAt=<timestamp>.
+     The cancel_requested flag remains true in the DB (historical record).
+
+Key invariant: The executor is the SOLE owner of status transitions.
+The route handler ONLY sets the boolean flag — never touches status.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — WHY FLAG-BASED (NOT DIRECT STATUS MUTATION)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If the route handler set status='cancelled' directly:
+
+  Timeline (race condition):
+    t=0  Executor: step i starts executing.
+    t=1  Route:    UPDATE status='cancelled'  ← route handler sets status.
+    t=2  Executor: step i completes.
+    t=3  Executor: UPDATE currentStepIndex = i  ← overwrites status to 'running'.
+    t=4  Executor: (no further steps) → UPDATE status='completed'.
+
+  Result: status='completed', not 'cancelled'.  The cancellation is silently lost.
+
+The flag model prevents this:
+    t=0  Executor: step i starts executing.
+    t=1  Route:    UPDATE cancel_requested = true  ← only flag is set.
+    t=2  Executor: step i completes.
+    t=3  Executor: UPDATE currentStepIndex = i     ← safe (no status touch).
+    t=4  Executor: RE-FETCH cancel_requested → true
+    t=5  Executor: UPDATE status='cancelled', completed_at=now()
+
+  Result: status='cancelled'.  Correct.
+
+P4-D will add WHERE status='running' guards to the terminal UPDATE statements.
+Until then, the flag model provides a clean, race-safe separation of concerns.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — INTER-STEP BOUNDARY: EXECUTION ORDER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+At the inter-step boundary (after step i, before step i+1):
+
+  Order of checks:
+    1. step.waitForApproval → pause as 'waiting_approval'   [existing]
+    2. P4-A ctx.stepOutputs update                           [P4-A]
+    3. P4-B TTL check (isExecutionTimedOut)                  [P4-B]
+    4. P4-C cancellation check (cancel_requested DB re-fetch) [P4-C — new]
+    5. Continue to step i+1                                  [normal]
+
+  Why TTL before cancellation:
+    TTL is a hard deadline — a system-level governance constraint.
+    Cancellation is user intent — an application-level request.
+    System constraints take priority.  In practice, both rarely fire
+    simultaneously.  The order only matters at the exact deadline moment.
+
+  Why approval check before TTL:
+    waitForApproval returns immediately from the loop (pauses execution).
+    A paused execution can still be timed-out by the stuck endpoint.
+    This is intentional: the approval check is a control flow signal,
+    not a governance constraint.  It runs before the governance checks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — CANCEL ENDPOINT DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+POST /api/workflows/executions/:id/cancel
+
+  Auth:    requireAuth + requirePermission("workflow.manage")
+  Scope:   Workspace-isolated.  Cannot cancel executions from other workspaces.
+           (Unlike POST /timeout which is super_admin across all workspaces.)
+
+  Validation:
+    404 if execution not found OR belongs to a different workspace.
+    422 if execution is already terminal (isTerminalStatus guard):
+        → { error, code: 'EXECUTION_ALREADY_TERMINAL', currentStatus, executionId }
+    409 if cancel_requested is already true (duplicate request):
+        → { error, code: 'CANCEL_ALREADY_REQUESTED', currentStatus, executionId }
+
+  Success response (immediate):
+    {
+      executionId:    <id>,
+      workflowId:     <id>,
+      previousStatus: 'running' | 'waiting_approval' | 'pending',
+      cancelRequested: true,
+      requestedAt:    '<ISO8601>'
+    }
+
+  The response is IMMEDIATE — the caller does not wait for the execution to
+  reach 'cancelled'.  The caller should poll GET /executions/:id to observe
+  the final status transition.
+
+  Audit log (req.log.warn):
+    executionId, workflowId, workspaceId, cancelledBy (req.userId),
+    currentStatus, timeoutAt, requestedAt, action: 'cancel_requested'
+
+  Versus POST /timeout:
+    /cancel:  workspace-scoped; sets a flag; execution must reach a boundary.
+    /timeout: super_admin only; directly sets terminal status immediately.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) No mid-step interruption.
+   The cancellation check fires ONLY at the inter-step boundary.
+   The current step ALWAYS runs to completion.
+
+B) No AbortController / Promise cancellation / worker termination.
+   These would interrupt DB writes mid-step, orphaning side effects
+   with no compensation path.
+
+C) No side-effect rollback.
+   Completed steps (notifications sent, tasks created, status updates
+   applied) are NOT rolled back.  The cancelled execution reflects
+   the partial work done — this is intentional and correct.
+   Future retries (P4-E+) may re-run steps if compensation is needed.
+
+D) No background cancellation sweeper.
+   Cancellation fires only when the executor reaches the next boundary.
+   For 'waiting_approval' executions: the cancel flag is set but the
+   executor won't reach a boundary until approval is resolved.
+   In this case, an admin should use POST /timeout to force-terminate.
+
+E) The executor owns status transitions.
+   The route handler ONLY sets cancel_requested = true.
+   It NEVER sets status directly.
+
+F) 'cancelled' is definitively terminal.
+   isTerminalStatus('cancelled') = true.  Cancelled executions:
+     • Cannot be force-timed-out (POST /timeout → 422).
+     • Cannot be cancelled again (POST /cancel → 422 EXECUTION_ALREADY_TERMINAL).
+     • Do not appear in GET /stuck (terminal status excluded by filter).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — STATUS MODEL (COMPLETE, P4-B + P4-C)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Non-terminal statuses (executor can still make progress):
+  pending          — created, not yet started
+  running          — executor is in the step loop
+  waiting_approval — paused at an approval step
+
+Terminal statuses (executor has returned; no further transitions):
+  completed        — all steps succeeded
+  failed           — a step returned { success: false } or threw
+  error            — unhandled exception (engine-level catch)
+  timed_out        — TTL deadline expired (P4-B) or admin force (POST /timeout)
+  cancelled        — admin/user cancellation (P4-C: flag + boundary check)
+
+Differentiation matrix:
+
+  Status      Who sets it          Why                           Intentional?
+  ──────────  ───────────────────  ────────────────────────────  ────────────
+  completed   executor             all steps ran successfully     N/A
+  failed      executor             step error / success=false     N/A
+  error       engine (catch)       unhandled exception            N/A
+  timed_out   executor (boundary)  TTL exceeded passively         No (passive)
+              admin (POST /timeout) forced by admin               Yes
+  cancelled   executor (boundary)  cancel flag found              Yes (active)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — DIAGNOSTICS INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All execution list and detail endpoints now include cancelRequested:
+  GET /api/workflows/executions/failed   → cancelRequested per row
+  GET /api/workflows/executions/stuck    → cancelRequested per row
+  GET /api/workflows/executions          → cancelRequested per row
+  GET /api/workflows/executions/:id      → cancelRequested in execution object
+
+cancelRequested interpretation for consumers:
+  false (default) — no cancellation requested (or execution already completed)
+  true            — cancellation was requested; status may still be non-terminal
+                    if the executor hasn't reached the boundary yet.
+
+Note: cancelled executions have cancelRequested=true AND status='cancelled'.
+      Running executions may have cancelRequested=true AND status='running'
+      (cancellation requested but boundary not yet reached).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Two structured log entries per cancelled execution:
+
+  1. Route handler (req.log.warn) — fires when cancel is requested:
+     action:        'cancel_requested'
+     executionId, workflowId, workspaceId
+     cancelledBy:   req.userId  ← who requested the cancellation
+     currentStatus: existing status at request time
+     timeoutAt:     execution TTL deadline (may be null)
+     requestedAt:   ISO8601 timestamp
+
+  2. Executor (logger.warn) — fires when cancellation actually takes effect:
+     action:            'execution_cancelled'
+     executionId, workflowId, workspaceId
+     completedStepIndex: last step that ran (0-indexed)
+     nextStepIndex:      step that would have run next
+     completedSteps:     total steps completed
+     totalSteps:         total steps in workflow
+     timeoutAt:          TTL deadline (for correlation with P4-B)
+
+  Why two entries?
+    The route log captures WHO requested the cancellation (cancelledBy).
+    The executor log captures WHEN it fired and WHAT the execution state was.
+    Together they form a complete audit trail without requiring a DB column
+    for cancelled_by_user_id (which would be P4-D+ scope).
+
+  Log level: WARN (both entries).
+    Cancellation is an operational event requiring admin awareness.
+    It is not an error (no system failure occurred).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Command:  pnpm --filter @workspace/api-server run test
+Runner:   vitest v4.1.6
+Duration: 634ms
+
+  Test Files:  3 passed (3)
+  Tests:       93 passed (93)
+
+Breakdown — NEW P4-C tests (cancellation.test.ts):
+
+  T1 — cooperative cancellation guard logic                    5 tests  ✓
+  T2 — step-completion invariant (cooperative model)           2 tests  ✓
+  T3 — terminal executions cannot be cancelled                 8 tests  ✓
+  T4 — duplicate cancellation rejection logic                  3 tests  ✓
+  T5 — 'cancelled' in status system                            6 tests  ✓
+  T6 — timeout endpoint rejects cancelled executions           5 tests  ✓
+  T7 — cancel_requested flag semantics                         6 tests  ✓
+  ─────────────────────────────────────────────────────────────────────
+  Total P4-C                                                  35 tests  ✓
+
+  P4-B tests (ttl.test.ts):                                  40 tests  ✓
+  P4-A tests (context.test.ts):                              18 tests  ✓
+  ─────────────────────────────────────────────────────────────────────
+  Grand total                                                 93 tests  ✓ ALL PASS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — EDGE CASES DISCOVERED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EC-1: Cancel requested on 'waiting_approval' execution
+  The cancel flag is set correctly (cancel_requested = true).
+  However, the executor is paused in the approval step and has returned.
+  It will NOT reach the inter-step boundary again until approval is provided.
+  Result: the execution remains in 'waiting_approval' state indefinitely.
+  Resolution: the admin should use POST /timeout to force-terminate such
+  executions.  A future background sweeper (P4-D+) would auto-enforce TTL
+  for executions stuck at waiting_approval.
+  Note: cancelRequested = true in the response tells the caller the flag is
+  set, but doesn't guarantee the executor will act on it.
+
+EC-2: Cancel requested on 'pending' execution
+  Allowed (pending is non-terminal).  The executor hasn't started yet.
+  When the executor begins, it sets status='running' — without checking
+  cancel_requested at that point.  The cancellation check only fires at
+  the inter-step boundary (after step 0 completes).
+  Edge: if cancel is requested after INSERT but before the executor's
+  first UPDATE (status → running), and then step 0 completes, the check
+  fires correctly at the boundary and the execution is cancelled.
+  Risk: a single-step workflow where step 0 is very fast may complete
+  before the route handler's UPDATE reaches the DB.  In this case,
+  the execution completes normally — cancel arrived too late.
+  Severity: ACCEPTABLE. Single-step workflows complete in milliseconds.
+  The window for cancellation to be missed is negligible.
+
+EC-3: Cancel + TTL race at the same boundary
+  If cancel_requested = true AND timeout_at < now() simultaneously:
+  The TTL check (P4-B) runs FIRST → status = 'timed_out'.
+  The cancellation check (P4-C) is never reached.
+  Result: status = 'timed_out', not 'cancelled'.
+  This is intentional: TTL is a hard system deadline; cancellation is intent.
+  The audit trail: POST /cancel log (cancel_requested) + TTL log (timed_out).
+  The operator can reconstruct what happened from the logs.
+
+EC-4: Double cancel (409 vs 422)
+  First cancel:  cancel_requested = false, status = 'running' → 200 OK.
+  Second cancel: cancel_requested = true,  status = 'running' → 409 CONFLICT.
+  If executor already transitioned to 'cancelled' between the two calls:
+  Second cancel: status = 'cancelled' → 422 EXECUTION_ALREADY_TERMINAL.
+  Both correctly reject the duplicate request with distinct error codes.
+
+EC-5: Zero-step workflow (no inter-step boundary)
+  Same as EC-2 from P4-B: the for-loop body never executes.
+  No inter-step boundary → no cancellation check via the cooperative path.
+  The execution transitions directly to 'completed' after the loop.
+  Resolution: admin can use POST /timeout (super_admin) to force-terminate.
+
+EC-6: workflowId parameter added to executeWorkflow
+  P4-C adds workflowId as the second parameter to executeWorkflow() so
+  the executor can include workflowId in structured cancellation logs
+  without a DB re-fetch.  engine.ts passes def.id directly.
+  The parameter position:
+    (executionId, workflowId, steps, ctx, timeoutAt)
+  This is a breaking change to the function signature — internal only
+  (engine.ts is the sole caller).  No external callers exist.
+
+EC-7: cancel_requested remains true after cancellation
+  Once set to true, cancel_requested is never reset to false.
+  This is intentional: it preserves the historical record that a
+  cancellation was requested.  The final status ('cancelled') is the
+  definitive indicator.  Consumers should read status, not cancel_requested,
+  to determine if an execution is cancelled.
+
+EC-8: DB re-fetch overhead
+  The P4-C check adds one SELECT (primary key lookup) per inter-step boundary.
+  Estimated cost: < 1ms per step on a local PostgreSQL instance.
+  For a 10-step workflow: ~10ms additional overhead total.
+  This is acceptable for the current scale.  Future optimization:
+  pass cancel_requested as an in-process signal (channel) if overhead
+  becomes measurable at larger step counts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — REMAINING RACE CONDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RC-1 (inherited from P4-B — P4-D scope):
+  Executor's final UPDATE after the loop lacks WHERE status='running'.
+  If admin calls POST /timeout concurrently with the last step completing,
+  the executor's UPDATE status='completed' can overwrite status='timed_out'.
+  P4-D will add WHERE status IN ('running', 'waiting_approval') to all
+  terminal UPDATEs.
+
+RC-2: cancel_requested + pending execution start race
+  If the executor reads status='pending' and begins execution BEFORE the
+  cancel flag is read (first DB call after INSERT), the execution starts.
+  The flag will be read at the first inter-step boundary.  Unless it's a
+  zero-step workflow (EC-5), the cancellation will fire correctly.
+
+RC-3: waiting_approval + cancel (EC-1 race)
+  If the execution is at 'waiting_approval' and cancel is requested:
+  The executor has already returned.  The cancel flag is set but never read
+  unless the execution resumes (approval provided + new executor call).
+  If approval arrives after cancel was requested, the executor would read
+  cancel_requested = true at the NEXT inter-step boundary.
+  Behavior depends on whether approval handling re-enters the executor loop.
+  Current approval implementation: the executor's waitForApproval = true path
+  returns immediately without re-entering the loop.  Approval resolution is
+  handled separately (different code path — not part of P4-C scope).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — READINESS ASSESSMENT BEFORE P4-D
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P4-C is complete and the server is running with all changes active.
+
+P4-D (Status Transition Safety) readiness checklist:
+
+  ✓  P4-C typecheck: 0 errors
+  ✓  P4-C tests: 93/93 pass
+  ✓  cancel_requested column in DB — cooperative flag model in place.
+  ✓  TERMINAL_STATUSES complete: completed, failed, error, timed_out, cancelled.
+  ✓  isTerminalStatus() guards all terminal-rejection points.
+  ✓  E2E verified: cancelRequested appears in all diagnostic responses.
+  ✓  E2E verified: POST /cancel returns 422 for terminal executions.
+  ✓  Server restarted and running with P4-C changes active.
+
+P4-D will:
+  1. Add WHERE status IN ('running', 'waiting_approval') to all terminal UPDATE
+     statements in executor.ts (step failure, TTL, cancellation, completion).
+  2. Add WHERE status NOT IN (...TERMINAL_STATUSES) to the force-timeout UPDATE.
+  3. Add WHERE cancel_requested = false to the cancel route's UPDATE.
+  4. Add WHERE status = 'running' to the executor's opening UPDATE.
+  5. Use .returning() checks after each conditional UPDATE to detect races
+     (if .returning() is empty, the race fired — log and return safely).
+
+These guards convert the current "best-effort" model into a strict
+"exactly-once" transition model with no status overwrite risk.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX — FILES CHANGED SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED:
+    artifacts/api-server/src/lib/workflows/__tests__/cancellation.test.ts
+      — 35 unit tests across T1–T7 (pure logic, no DB)
+
+  MODIFIED:
+    lib/db/src/schema/workflows.ts
+      + cancelRequested column (BOOLEAN NOT NULL DEFAULT FALSE)
+      + 28-line comment block explaining the flag-based design
+
+    artifacts/api-server/src/lib/workflows/executor.ts
+      + workflowId: number as second parameter (for logging)
+      + P4-C cooperative cancellation check at inter-step boundary:
+          SELECT cancel_requested FROM workflow_executions WHERE id = executionId
+          IF true → UPDATE status='cancelled' + logger.warn + return
+      + Combined TTL+cancellation comment block (replaces P4-B-only comment)
+      + workflowId added to P4-B timed_out logger.warn fields
+
+    artifacts/api-server/src/lib/workflows/engine.ts
+      + Pass def.id as workflowId to executeWorkflow() call
+      + Comment: "P4-C: Pass def.id for structured cancellation audit logs"
+
+    artifacts/api-server/src/routes/workflows.ts
+      + POST /workflows/executions/:id/cancel (new, 100-line route)
+          requireAuth + requirePermission("workflow.manage")
+          workspace-isolated, 404/422/409 validation, audit log
+      + cancelRequested field added to:
+          GET /executions/failed list response
+          GET /executions/stuck list response
+          GET /executions list response (cross-workflow)
+          GET /executions/:id detail response
+
+  UNCHANGED (P4-C does not touch):
+    ttl.ts                — 'cancelled' was already in TERMINAL_STATUSES
+    context.ts            — P4-A, no changes
+    conditions.ts         — no changes
+    validator.ts          — no changes
+    steps/*.ts            — no changes
+    engine.ts (event bus) — no changes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

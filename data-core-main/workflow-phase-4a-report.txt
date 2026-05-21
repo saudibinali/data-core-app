@@ -1,0 +1,369 @@
+WORKFLOW GOVERNANCE — PHASE 4-A: CONTEXT ISOLATION
+Implementation Report
+Date:   2026-05-13
+Status: COMPLETE — 18/18 tests passed, typecheck clean, server running.
+Scope:  types.ts, executor.ts, engine.ts (context creation only)
+New:    context.ts (pure utility), __tests__/context.test.ts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 4-A eliminates WG-15 (mutable shared context pollution) by introducing
+namespaced step outputs (ctx.stepOutputs) while preserving 100% backward
+compatibility with all existing step handlers, diagnostics APIs, and running
+workflows.
+
+The execution flow, for-loop, step routing, approval behavior, status
+transitions, and event bus are all completely unchanged.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — CHANGES IMPLEMENTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─── CREATED: context.ts ─────────────────────────────────────────────────────
+File: artifacts/api-server/src/lib/workflows/context.ts
+
+New pure utility module — no DB imports, no Express, no external deps.
+Fully testable in isolation.
+
+  buildResolvedData(stepOutputs)
+    Computes the backward-compatible flat resolvedData from the namespaced
+    stepOutputs map. Steps are merged in ascending index order (deterministic).
+    Undefined/null per-step outputs handled safely (treated as {}).
+
+  createExecutionContext(triggerEvent, triggerData, workspaceId, triggeredBy?)
+    Single factory for ExecutionContext construction. Enforces:
+      • structuredClone(triggerData)  — immutable deep clone (WG-15 fix)
+      • stepOutputs: {}              — namespaced output map initialized empty
+      • resolvedData: {}             — flat view initialized empty
+
+─── MODIFIED: types.ts ──────────────────────────────────────────────────────
+File: artifacts/api-server/src/lib/workflows/types.ts
+
+ExecutionContext interface — two new fields:
+
+  stepOutputs: Record<number, Record<string, unknown>>
+    Namespaced step output map. Each step stores its result under step.index.
+    Documented with full JSDoc explaining the isolation guarantee and migration path.
+    Step handlers do NOT write to this directly — the executor manages it.
+
+  resolvedData: Record<string, unknown>
+    Unchanged as a field (still a plain property, not a getter).
+    JSDoc updated: marked @deprecated, explains it is now computed from stepOutputs.
+    Will be removed in Phase 7 when handlers migrate to stepOutputs references.
+
+  triggerData: Record<string, unknown>
+    JSDoc updated to document the P4-A deep-clone guarantee.
+
+─── MODIFIED: executor.ts ───────────────────────────────────────────────────
+File: artifacts/api-server/src/lib/workflows/executor.ts
+
+Replaced the direct resolvedData mutation:
+
+  BEFORE:
+    if (result.output) {
+      ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+    }
+
+  AFTER:
+    ctx.stepOutputs[step.index] = result.output ?? {};
+    ctx.resolvedData = buildResolvedData(ctx.stepOutputs);
+
+Changes:
+  • Imports buildResolvedData from ./context
+  • Stores output under step.index (namespaced — no key collision)
+  • Recomputes resolvedData from all stepOutputs after each step
+  • Added detailed comment block explaining the before/after and why
+
+No other changes to executor.ts:
+  • for-loop unchanged
+  • step routing unchanged (waitForApproval behavior identical)
+  • status transitions unchanged
+  • DB writes unchanged
+  • logger calls unchanged
+
+─── MODIFIED: engine.ts ─────────────────────────────────────────────────────
+File: artifacts/api-server/src/lib/workflows/engine.ts
+
+Replaced inline ExecutionContext construction with createExecutionContext():
+
+  BEFORE:
+    const ctx: ExecutionContext = {
+      triggerEvent: payload.event,
+      triggerData:  payload.data,        ← shallow reference, mutation-unsafe
+      workspaceId:  payload.workspaceId,
+      triggeredBy:  payload.triggeredBy,
+      resolvedData: {},
+    };
+
+  AFTER:
+    const ctx = createExecutionContext(   ← factory enforces all P4-A invariants
+      payload.event,
+      payload.data,                       ← deep-cloned inside factory
+      payload.workspaceId,
+      payload.triggeredBy,
+    );
+
+Changes:
+  • Imports createExecutionContext from ./context
+  • Removed ExecutionContext from the type imports (no longer needed directly)
+  • ExecutionContext is now inferred from createExecutionContext's return type
+
+─── CREATED: __tests__/context.test.ts ──────────────────────────────────────
+File: artifacts/api-server/src/lib/workflows/__tests__/context.test.ts
+
+18 unit tests across 6 describe blocks covering all 5 acceptance criteria (T1–T5)
+plus a shape validation block. Pure tests — no DB, no mocks.
+
+─── CREATED: vitest.config.ts ───────────────────────────────────────────────
+File: artifacts/api-server/vitest.config.ts
+
+Minimal vitest config: include src/**/*.test.ts, environment node.
+
+─── MODIFIED: package.json ──────────────────────────────────────────────────
+File: artifacts/api-server/package.json
+
+Added:
+  "test": "vitest run"
+  devDependencies: "vitest": "^4.1.6"  (installed via pnpm add -D)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — HOW stepOutputs WORKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+stepOutputs is a Record<number, Record<string, unknown>> on ExecutionContext.
+The number key is step.index (not array position — matches step.index from config).
+
+Lifecycle:
+  • Context created: stepOutputs = {}
+  • Step 0 completes: stepOutputs[0] = { notified: 3, recipientIds: [1,2,3] }
+  • Step 1 completes: stepOutputs[1] = { taskId: 42, assigneeId: 7 }
+  • Step 2 completes: stepOutputs[2] = { entity: "ticket", newStatus: "resolved" }
+
+The executor stores output AFTER the step completes successfully (i.e., after
+the step log has already been written to DB). Failed steps do not populate
+stepOutputs (the execution halts at the failure handling block before reaching
+the P4-A line).
+
+Isolation guarantee: stepOutputs[0].status and stepOutputs[2].status are
+independent values. A key "status" in step 0's output CANNOT silently overwrite
+the same key from step 2 within the isolated slots. This is the WG-15 fix.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — HOW resolvedData BACKWARD COMPATIBILITY WORKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step handlers (notification, task, assignment, condition, status_update, approval)
+all read from:
+  data = { ...ctx.triggerData, ...ctx.resolvedData }
+
+ctx.resolvedData is now a computed flat merge of all stepOutputs.
+It is recomputed by buildResolvedData() after every step completion.
+
+buildResolvedData():
+  1. Takes all entries from stepOutputs.
+  2. Sorts them by step index ascending (0, 1, 2, ...).
+  3. Reduces them left-to-right with object spread.
+  4. Result: flat map where later steps shadow earlier steps on key collision.
+
+This is IDENTICAL to the old behavior:
+  Old: each step's output was merged into a single flat object in sequence.
+  New: each step's output is stored namespaced, then merged in the same order.
+
+The only difference: the OLD merge was irreversible (once merged, you could
+not tell which step produced which key). The NEW merge is reversible — you can
+always inspect stepOutputs[i] to see exactly what step i produced.
+
+Merge order example (non-sequential indices 0, 5, 10):
+  stepOutputs = { 10: {c:3}, 0: {a:1}, 5: {b:2, a:99} }
+  After sort:  [(0,{a:1}), (5,{b:2,a:99}), (10,{c:3})]
+  Merge result: { a: 99, b: 2, c: 3 }
+  Step 5's a=99 shadows step 0's a=1 — correct (later step wins).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — HOW triggerData BECAME IMMUTABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Problem (before P4-A):
+  engine.ts assigned: triggerData: payload.data
+  payload.data is the original EventPayload object passed through the bridge.
+  Step handlers that call: data = { ...ctx.triggerData, ...ctx.resolvedData }
+  spread the top-level keys safely.
+  BUT: if a handler mutates a NESTED object (e.g., data.metadata.priority = "low"),
+  it mutates the original payload.data object, which could affect:
+    - The original event log entry (if the object is shared).
+    - Other concurrent executions triggered by the same event
+      (all receive the same payload reference from the loop in handleEvent()).
+
+Fix (P4-A):
+  createExecutionContext() calls: triggerData: structuredClone(triggerData)
+  structuredClone() is a Node.js v17+ built-in (available on Node 24).
+  It performs a deep clone of the entire payload, including nested objects and arrays.
+  Each execution receives its own independent copy of the event data.
+
+Result:
+  - Mutations to triggerData inside a step handler do not affect the original payload.
+  - Multiple concurrent executions for the same event each get an independent clone.
+  - The original payload.data passed to handleEvent() remains intact.
+
+Cost: one structuredClone() per execution at trigger time.
+Typical trigger payload: < 1KB. Clone cost: < 1ms. Negligible.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — EDGE CASES DISCOVERED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EC-1: step.index vs. array position (pre-existing, documented)
+  buildResolvedData uses step.index (the numeric key), not array position.
+  If steps are stored with non-sequential indices (e.g., 0, 5, 10), the merge
+  order is by step.index ascending — correct and deterministic.
+  The current executor still uses array position i for stepIndex logging (DB),
+  but uses step.index for stepOutputs storage. Both are internally consistent:
+  stepOutputs[step.index] and the DB log at position i refer to the same step.
+  This inconsistency between DB-logged stepIndex (= array pos) and step.index
+  will be fully resolved in P4-F when the cursor model aligns them.
+
+EC-2: Failed step does not write to stepOutputs (correct behavior)
+  The P4-A write:
+    ctx.stepOutputs[step.index] = result.output ?? {}
+    ctx.resolvedData = buildResolvedData(ctx.stepOutputs)
+  ...is only reached when result.success === true AND result.waitForApproval !== true.
+  Failed steps write to the DB step log (status='failed') and then return early.
+  They do NOT pollute stepOutputs. This is correct: subsequent steps in a resumed
+  execution (future Phase 5) will not see partial outputs from failed steps.
+
+EC-3: waitForApproval returns before P4-A write (correct behavior)
+  The return for waitForApproval also happens BEFORE the P4-A write.
+  The approval step's output is therefore NOT stored in stepOutputs.
+  This is intentional for Phase 4: approval steps are blocked by the validator
+  and cannot be activated. When Phase 5 enables approval resume, the resume
+  mechanism will need to store the approval step's output at pause time.
+  No action required in Phase 4.
+
+EC-4: result.output undefined/null (handled)
+  The executor always writes:
+    ctx.stepOutputs[step.index] = result.output ?? {}
+  The ?? {} guard means: even if a step returns { success: true } with no output
+  field, an empty object is stored. buildResolvedData handles empty objects by
+  spreading nothing ({} spread adds no keys). No throw, no corruption.
+
+EC-5: structuredClone on non-serializable payload values
+  structuredClone cannot clone certain values (functions, Symbols, WeakMaps, DOM
+  nodes, etc.). EventPayload.data comes from the event bus, which already JSON-
+  serializes event data for the DB (via workspace_event_logs). Any value that
+  survives the bus is structuredClone-safe.
+  Risk: NONE for current event types. If future steps inject non-serializable
+  values into payload.data, structuredClone would throw. Documented for awareness.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Command:  pnpm --filter @workspace/api-server run test
+Runner:   vitest v4.1.6
+Duration: 469ms
+
+  Test Files:  1 passed (1)
+  Tests:       18 passed (18)
+
+Breakdown by acceptance criterion:
+
+  T1 — Step outputs isolated by step index              2 tests  ✓
+  T2 — resolvedData backward compatibility preserved    4 tests  ✓
+  T3 — Nested triggerData mutation does not affect original  2 tests  ✓
+  T4 — Existing workflows produce identical outputs     3 tests  ✓
+  T5 — Undefined/null outputs do not break aggregation  5 tests  ✓
+  Shape — ExecutionContext P4-A fields present          2 tests  ✓
+  ────────────────────────────────────────────────────────────────
+  Total                                                18 tests  ✓ ALL PASS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — TYPECHECK RESULT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Command:  pnpm --filter @workspace/api-server run typecheck
+Result:   0 errors, 0 warnings
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — WHAT DID NOT CHANGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These files were NOT touched in Phase 4-A:
+
+  steps/notification.ts    — unchanged
+  steps/task.ts            — unchanged
+  steps/approval.ts        — unchanged
+  steps/condition.ts       — unchanged
+  steps/status-update.ts   — unchanged
+  steps/assignment.ts      — unchanged
+  conditions.ts            — unchanged
+  validator.ts             — unchanged
+  index.ts                 — unchanged
+  All route handlers       — unchanged
+  All diagnostics APIs     — unchanged
+  EventBus / bridge        — unchanged
+  DB schema                — unchanged (no migration needed)
+  OpenAPI spec             — unchanged
+
+The execution for-loop in executor.ts is identical. Only the single line that
+wrote to resolvedData was replaced, plus the import of buildResolvedData.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — READINESS ASSESSMENT BEFORE P4-B
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P4-A is the foundational prerequisite for all subsequent Phase 4 steps.
+It does not depend on any other Phase 4 work (no blockers).
+
+P4-B readiness checklist:
+
+  ✓  P4-A typecheck: 0 errors
+  ✓  P4-A unit tests: 18/18 pass
+  ✓  ExecutionContext has stepOutputs field (P4-B will add cursor fields there)
+  ✓  createExecutionContext() is the single context factory (P4-B can add
+     timeout_at parameter when setting up the execution in engine.ts)
+  ✓  executor.ts inter-step boundary is clean (P4-B adds cancel/TTL check here)
+  ✓  No step handlers changed (P4-B does not need to touch them either)
+  ✓  Server restarted and running with P4-A changes active
+
+P4-B (Lazy TTL) will:
+  1. Add timeout_at TIMESTAMP column to workflow_executions (schema migration).
+  2. Engine sets timeout_at = now() + 24h when creating the execution record.
+  3. Executor checks now() > timeout_at at the inter-step boundary (same place
+     the P4-A line was added — clean insertion point).
+  4. New GET /workflows/executions/stuck diagnostics endpoint.
+  5. New POST /workflows/executions/:id/timeout admin action.
+  6. Status enum extended: 'timed_out' added.
+
+P4-B can be implemented independently without touching context.ts or types.ts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX — FILES CHANGED SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED:
+    artifacts/api-server/src/lib/workflows/context.ts
+    artifacts/api-server/src/lib/workflows/__tests__/context.test.ts
+    artifacts/api-server/vitest.config.ts
+
+  MODIFIED:
+    artifacts/api-server/src/lib/workflows/types.ts
+      + stepOutputs field on ExecutionContext
+      + resolvedData @deprecated JSDoc
+      + triggerData immutability JSDoc
+    artifacts/api-server/src/lib/workflows/executor.ts
+      + import buildResolvedData from ./context
+      + replaced ctx.resolvedData direct merge with stepOutputs + buildResolvedData
+      + detailed comment block on the P4-A change
+    artifacts/api-server/src/lib/workflows/engine.ts
+      + import createExecutionContext from ./context
+      + replaced inline ctx object with createExecutionContext() factory call
+      + removed ExecutionContext from explicit type imports (now inferred)
+    artifacts/api-server/package.json
+      + "test": "vitest run" script
+      + "vitest": "^4.1.6" devDependency
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

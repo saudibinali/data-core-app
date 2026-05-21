@@ -1,0 +1,423 @@
+WORKFLOW PHASE 6-B REPORT
+Simulation Engine & Workflow Preview Foundations
+=================================================
+Date:      2026-05-14
+Phase:     6-B
+Status:    COMPLETE
+Tests:     587 / 587 passing (40 new in simulation.test.ts)
+TypeCheck: Clean (0 errors)
+
+
+OBJECTIVE
+─────────
+Enable deterministic workflow preview — let admins understand routing, branch
+traversal, unreachable behaviour, delays, and approvals — before publish or live
+execution, without any DB writes, notifications, scheduler interaction, or
+production state mutation.
+
+
+DELIVERABLES
+────────────
+
+T001 — simulation.ts (new file)
+  artifacts/api-server/src/lib/workflows/simulation.ts
+
+  Single-file simulation engine (~420 lines).  Contains:
+    • SimulationApprovalDecision    — "approve" | "reject" | "timeout"
+    • SimulatedStepStatus          — "executed" | "skipped" | "unreachable" | "paused_delay"
+    • SimulatedStepRecord          — per-step prediction with governance codes attached
+    • SimulationContext            — pure-data inputs (triggerData, approvalDecisions, clock)
+    • SimulatedStatus              — "completed" | "rejected" | "timed_out" | "empty_workflow" | "failed"
+    • SimulationResult             — complete prediction output
+    • simulate(steps, context)     — main entry point (synchronous, returns SimulationResult)
+    • formatDurationMs(ms)         — human-readable duration helper (exported for UI use)
+
+T002 — simulation.test.ts (new file, 40 tests)
+  artifacts/api-server/src/lib/workflows/__tests__/simulation.test.ts
+
+  Test groups: T1–T15 (see TESTS section below).
+
+
+SIMULATION ARCHITECTURE
+───────────────────────
+
+simulate(steps, context) → SimulationResult
+
+  Phase 1 — Validation
+    Calls validateWorkflow(steps, triggerEvent) to collect:
+      • Per-step errors (validation.errors)
+      • Per-step warnings (validation.warnings)
+      • Engine notices from 4-pass analysis (validation.notices)
+      • EstimatedExecutionMetrics from the engine
+    These are folded into the SimulationResult and indexed by stepIndex so each
+    SimulatedStepRecord carries the codes of warnings that mention it.
+    Simulation runs regardless of validation errors — a workflow with errors
+    can still be previewed to understand its structure.
+
+  Phase 2 — Graph analysis
+    Inlined successor graph + BFS reachability (mirrors validation-engine.ts):
+      buildSuccessors(steps)   — adjacency map: array pos → [successor positions]
+      bfsReachable(0, succs)   — set of all structurally reachable array positions
+    Used post-traversal to classify non-visited steps as "skipped" vs "unreachable".
+
+  Phase 3 — Cursor traversal
+    Mirrors executor.ts runStepLoop cursor model (no DB writes):
+
+    condition step:
+      evaluateConditions(step.config.conditions, mergedData)
+      selectedNextStepIndex = matched ? onTrueStepIndex : onFalseStepIndex
+      resolveSimulationCursor() → validated forward-only jump or linear advance
+      Emits: workflow_simulation_branch_selected
+
+    approval step:
+      Reads context.approvalDecisions[step.index] ?? "approve"
+      "approve"  → cursor++
+      "reject"   → simulatedStatus="rejected", break
+      "timeout" + onTimeout="auto_approve" → cursor++
+      "timeout" + onTimeout="auto_reject"  → simulatedStatus="timed_out", break
+      "timeout" + absent/escalate          → simulatedStatus="timed_out", break
+
+    delay step:
+      computeWakeAt(step.config, simulatedNow)  (pure, from steps/delay.ts)
+      Records wakeAt, delayMs, delayMinutes, delayMode in SimulatedStepRecord
+      Adds delayMs to estimatedDurationMs + totalDelayMs
+      status = "paused_delay" (resumes; execution continues)
+
+    all other steps (notification, task, status_update, assignment):
+      Mark "executed", add STEP_OVERHEAD_MS (200ms) to duration, cursor++
+
+  Phase 4 — Classification of non-visited steps
+    for each step not in visited set:
+      reachable.has(arrayPos) → status = "skipped"    (bypassed by routing this run)
+      !reachable.has(arrayPos) → status = "unreachable"  (no path from step 0)
+
+
+TRAVERSAL PREDICTION MODEL
+──────────────────────────
+
+The simulation produces one execution path — the specific path determined by
+the provided SimulationContext inputs.  To preview multiple paths (e.g., both
+branches of a condition), callers run simulate() twice with different triggerData
+or approvalDecisions.
+
+Forward-only routing model (inherited from executor.ts):
+  • A condition step with onTrue=X jumps the cursor to the array position of
+    step.index === X.  All steps between the condition's position and X that are
+    not reachable from X are skipped.
+  • Steps after a routed target are visited linearly unless a later condition
+    routes again.  This means both branches of a condition may share a "tail"
+    (steps linearly after the higher-indexed branch target).
+
+skipped vs unreachable:
+  • "skipped"     — step IS reachable by BFS from step 0 (via some path),
+                    but was NOT visited on this specific traversal.
+                    Appears in result.skippedSteps.
+  • "unreachable" — step is NOT reachable from step 0 by ANY path.
+                    Flagged by WG-TOPO-01 in the validation engine.
+                    Appears in result.unreachableSteps.
+
+Invariant: traversalPath.length + skippedSteps.length + unreachableSteps.length
+            === steps.length  (every step is accounted for)
+
+
+ROUTING PREVIEW BEHAVIOUR
+─────────────────────────
+
+For each condition step in traversalPath:
+  conditionMatched  — boolean (true/false evaluation result)
+  branchTaken       — "true" | "false" | "linear" (null routing = "linear")
+  onTrueStepIndex   — the configured true target (may be null)
+  onFalseStepIndex  — the configured false target (may be null)
+
+Branch preview workflow for admins:
+  1. Run simulate(steps, ctx) with triggerData representative of the true case
+     → traversalPath shows the true-path execution
+     → skippedSteps shows all steps bypassed on this path
+  2. Run simulate(steps, ctx) with triggerData for the false case
+     → traversalPath shows the false-path execution
+  3. Compare results: approvalPoints, delayPoints, estimatedDurationMs differ
+     between the two paths.
+
+Routing violation detection:
+  If resolveSimulationCursor() returns an error (SELF_LOOP, BACKWARD_JUMP,
+  ROUTE_NOT_FOUND), the simulation appends to simulationWarnings and sets
+  simulatedStatus="failed".  The traversalPath up to the fault is still present.
+
+
+APPROVAL & DELAY SIMULATION BEHAVIOUR
+──────────────────────────────────────
+
+Approval simulation:
+  Decision source: context.approvalDecisions[step.index] (map by step logical index)
+  Default (absent key): "approve"  (optimistic path — execution continues)
+
+  "approve"        → continues to next step; wait time = step.timeoutHours * 3600000
+                     (or DEFAULT_APPROVAL_WAIT_HOURS=24h if no timeout configured)
+  "reject"         → simulatedStatus="rejected"; stops traversal
+  "timeout"
+    + auto_approve → continues; same wait time calculation as approve
+    + auto_reject  → simulatedStatus="timed_out"; stops traversal
+    + escalate     → simulatedStatus="timed_out"; stops traversal
+    + absent       → simulatedStatus="timed_out"; stops traversal
+
+Delay simulation:
+  Uses computeWakeAt(step.config, simulatedNow) — the same pure function used
+  by the production delay handler.  No scheduler is registered.
+
+  context.simulatedNow defaults to new Date() at call time.
+  Inject a fixed value for deterministic test results.
+
+  Both delay modes are supported:
+    delayForMinutes     → wakeAt = simulatedNow + minutes * 60000
+    delayUntilTimestamp → wakeAt = new Date(timestamp)
+
+  delayRecord.status = "paused_delay" (signifies: execution pauses here in
+  real life, but simulation continues after this step to show the full path).
+
+
+DURATION ESTIMATION MODEL
+──────────────────────────
+
+estimatedDurationMs = sum of all visited step contributions:
+
+  delay step:     delayMs = wakeAt.getTime() - simulatedNow.getTime()
+  approval step:  (timeoutHours ?? 24) × 3_600_000 ms
+                  Exception: "reject" decision → 0ms (execution stopped here)
+  all others:     STEP_OVERHEAD_MS = 200ms per step
+
+estimatedDurationLabel (formatDurationMs):
+  0ms or negative → "instant"
+  < 60 000ms       → "less than 1 minute"
+  < 3 600 000ms    → "N minutes"
+  < 86 400 000ms   → "N hours M minutes"
+  ≥ 86 400 000ms   → "N days H hours"
+
+estimatedDurationMs is a simulation estimate only — it reflects the
+configured/simulated inputs, not actual runtime measurements.
+
+
+GOVERNANCE WARNINGS INTEGRATION
+────────────────────────────────
+
+simulate() calls validateWorkflow(steps, triggerEvent) internally and folds
+all results into SimulationResult:
+
+  result.validationErrors     — per-step errors (WG-refs from validator.ts)
+  result.validationWarnings   — per-step warnings (validator + engine)
+  result.governanceNotices    — structural notices (P5-D engine)
+  result.estimatedMetrics     — maxExecutedSteps, maxNotificationCount,
+                                 branchingPaths, conditionStepCount, etc.
+
+Per-step attachment: each SimulatedStepRecord.stepWarnings contains the codes
+of all warnings/notices that mention that step's index, so the UI can render
+governance annotations directly on each step in the preview.
+
+Governance warnings surfaced in simulation:
+  WG-TOPO-01_UNREACHABLE_STEP       — step never reached by any path
+  WG-DEP-01_CONDITIONALLY_EXECUTED  — step only on some paths; output may be absent
+  WG-FAN-01_HIGH_NOTIFICATION_FANOUT — notification amplification risk
+  WG-FAN-02_HIGH_PATH_COUNT          — routing complexity
+  WG-FAN-03_HIGH_STEP_COUNT          — unusually long workflow
+  WG-ROUTE-01_LONG_JUMP              — condition skips many steps
+  WG-ROUTE-02_CONVERGENT_BRANCHES    — both routes to same target
+  WG-ROUTE-03_NESTED_CONDITIONS      — deeply nested condition chain
+  WG-04_DELAY_*                      — all delay configuration rules
+  (and all per-step errors from validator.ts)
+
+
+SIDE-EFFECT ISOLATION GUARANTEES
+──────────────────────────────────
+
+STRUCTURAL (enforced by import graph — not runtime flags):
+
+  simulation.ts imports:
+    logger.ts          — structured log emission only (fire-and-forget)
+    conditions.ts      — evaluateConditions (pure function, no I/O)
+    steps/delay.ts     — computeWakeAt (pure function, no I/O)
+    validator.ts       — validateWorkflow (pure function, no I/O)
+    validation-engine.ts — types only (via validator.ts re-exports)
+    types.ts           — WorkflowStep types only
+
+  simulation.ts does NOT import:
+    @workspace/db or any Drizzle module
+    executor.ts write paths (only resolveNextCursor logic is inlined)
+    steps/notification.ts, steps/task.ts, steps/approval.ts,
+    steps/assignment.ts, steps/status-update.ts
+    scheduler.ts
+
+  Therefore:
+    • No DB rows are created, read with locks, or updated
+    • No approval records are created
+    • No notifications are sent
+    • No activity log entries are written
+    • No timers or scheduler jobs are registered
+    • No execution state is mutated
+
+simulate() is synchronous — it returns SimulationResult directly (not a
+Promise), making the absence of async DB calls structurally enforced.
+
+
+OBSERVABILITY ADDITIONS
+────────────────────────
+
+Four structured log events emitted by simulate():
+
+  workflow_simulation_started
+    workflowId, workspaceId, workflowVersion, stepCount, triggerEvent,
+    simulatedNow, action
+
+  workflow_simulation_completed
+    workflowId, workspaceId, workflowVersion, simulatedStatus,
+    visitedStepCount, skippedStepCount, unreachableStepCount,
+    approvalCount, delayCount, estimatedDurationMs, estimatedDurationLabel,
+    simulatedPathCount, warningsCount, action
+
+  workflow_simulation_failed
+    (via simulatedStatus="failed" in completed event + simulationWarnings field)
+
+  workflow_simulation_branch_selected (one per condition step)
+    workflowId, workspaceId, workflowVersion, stepIndex, stepName,
+    conditionMatched, branchTaken, selectedNextStepIndex,
+    simulatedPathCount, warningsCount, action
+
+All events use logger.info with action field — queryable via structured log
+search the same way as executor.ts execution events.
+
+
+TESTS RESULTS
+─────────────
+
+40 new tests in simulation.test.ts.  All 587 tests pass.
+
+T1  Linear workflow simulation (2 tests)
+    ✓ all steps executed, simulatedStatus=completed, no skipped steps
+    ✓ estimated duration is sum of step overheads for non-waiting steps
+
+T2  Condition true-path simulation (3 tests)
+    topology: condition(onTrue=2, onFalse=1) — true path forward-jumps over step 1
+    ✓ with priority=high → takes true branch (skips False Branch)
+    ✓ false-branch step appears in skippedSteps
+    ✓ condition step record has correct fields
+
+T3  Condition false-path simulation (2 tests)
+    topology: condition(onTrue=1, onFalse=3) — false path jumps over steps 1+2
+    ✓ with priority=low → takes false branch (skips True Branch A and B)
+    ✓ true-branch steps appear in skippedSteps
+
+T4  Approval simulate approve path (3 tests)
+    ✓ approve decision → execution continues, simulatedStatus=completed
+    ✓ approval step appears in approvalPoints with correct decision
+    ✓ default decision is approve (absent approvalDecisions key)
+
+T5  Approval simulate reject path (3 tests)
+    ✓ reject decision → execution stops, simulatedStatus=rejected
+    ✓ rejected approval record has approvalDecision=reject
+    ✓ step after rejected approval is in skippedSteps
+
+T6  Delay timeline estimation (4 tests)
+    ✓ delay step populates wakeAt, delayMs, delayMinutes, delayMode
+    ✓ delay step duration is added to estimatedDurationMs
+    ✓ absolute timestamp delay uses delayUntilTimestamp correctly
+    ✓ execution continues after delay step (simulation does not stop)
+
+T7  Simulation produces no DB writes (3 tests)
+    ✓ simulate() result is a plain object — no DB round-trips
+    ✓ simulate() is synchronous — not a Promise
+    ✓ no DB artifact references in serialized output
+
+T8  Validation warnings integrated (3 tests)
+    ✓ WG-TOPO-01_UNREACHABLE_STEP appears in validationWarnings
+    ✓ step-level warning codes attached to stepRecord.stepWarnings
+    ✓ estimatedMetrics come from the validation engine
+
+T9  Deterministic across repeated runs (2 tests)
+    ✓ identical inputs produce identical traversalPath order + simulatedStatus
+    ✓ changing triggerData changes condition outcome deterministically
+
+T10 Skipped branches visible in results (3 tests)
+    topology: condition(onTrue=1, onFalse=3) — false path jumps over 2 steps
+    ✓ skipped steps have status=skipped and appear in skippedSteps
+    ✓ traversalPath + skippedSteps + unreachableSteps covers all steps
+    ✓ skipped steps have estimatedDurationMs=0
+
+T11 Approval timeout auto_approve (1 test)
+    ✓ timeout + onTimeout=auto_approve → execution continues
+
+T12 Approval timeout auto_reject (1 test)
+    ✓ timeout + onTimeout=auto_reject → simulatedStatus=timed_out
+
+T13 Delay step metrics (1 test)
+    ✓ multiple delay steps sum into totalDelayMs correctly
+
+T14 formatDurationMs (8 tests)
+    ✓ 0ms → "instant", <1min → "less than 1 minute", 1h → "1 hour",
+      1h30m → "1 hour 30 minutes", 1 day → "1 day", 1 day 1h → "1 day 1 hour", etc.
+
+T15 Empty workflow edge case (1 test)
+    ✓ simulatedStatus=empty_workflow, no traversal, warning in simulationWarnings
+
+
+REMAINING SIMULATION LIMITATIONS
+──────────────────────────────────
+
+1.  SINGLE PATH PER CALL
+    simulate() produces one execution path per invocation.  To preview both
+    branches of a condition step, callers must run simulate() twice with
+    different triggerData / approvalDecisions.  A future "full-path enumeration"
+    mode could run all N paths and return them together, but this is not in scope
+    for P6-B.
+
+2.  NO LIVE DATA CONTEXT
+    Condition evaluation uses simulated triggerData only.  Fields that reference
+    live DB state (e.g., "ticket.assigneeId resolves to user X who has role Y")
+    cannot be tested without providing the expected value explicitly in triggerData.
+
+3.  APPROVAL WAIT TIME IS WORST-CASE ONLY
+    The approval duration estimate uses timeoutHours (or 24h default) for all
+    approve/auto_approve decisions.  Actual approval decisions happen at
+    unpredictable times.  The estimate is upper-bound, not predictive.
+
+4.  NOTIFICATION / TASK FANOUT NOT SIMULATED AT RUNTIME
+    Notification recipient counts use the same static estimate as the validation
+    engine (MAX_ESTIMATED_ROLE_RECIPIENTS=50 for role/department recipients).
+    Actual runtime fan-out depends on DB data unknown at simulation time.
+
+5.  NO PARALLEL BRANCH EXPLORATION
+    The simulation does not explore multiple condition branches simultaneously.
+    This is deliberate per the P6-B scope ("no DAG execution", "no parallel graph
+    simulation").  Each simulate() call explores exactly one linear path.
+
+6.  resolveSimulationCursor INLINED
+    The cursor resolution logic is inlined from executor.ts to keep simulation.ts
+    free of executor.ts's DB imports.  A future P7-A refactor should extract this
+    to a shared routing.ts module so it cannot drift.
+
+7.  simulatedNow DEFAULTS TO CALL TIME
+    If no simulatedNow is provided, the delay duration estimate varies based on
+    when simulate() is called.  Always inject simulatedNow in tests.
+
+
+READINESS ASSESSMENT — BEFORE OPERATIONAL GOVERNANCE PHASE
+───────────────────────────────────────────────────────────
+
+READY:
+  ✓ Core simulation engine: pure, synchronous, no side effects
+  ✓ All step types handled: condition, approval, delay, notification, task,
+    status_update, assignment
+  ✓ Governance warnings integrated into result (per-step + structural)
+  ✓ Deterministic: same inputs always produce same output
+  ✓ Observable: 4 structured log events (searchable alongside execution events)
+  ✓ Test coverage: 40 tests across all step types, edge cases, and invariants
+  ✓ TypeScript: 0 errors
+  ✓ Full test suite: 587/587 passing
+
+SUGGESTED NEXT STEPS (P6-C and beyond):
+  • Expose simulate() via POST /api/workflows/:id/simulate (HTTP endpoint)
+    so the frontend can trigger previews
+  • Add an API endpoint that returns validation + simulation in one call
+    (pre-publish review page)
+  • Multi-path enumeration: run all branch combinations and return a list of
+    SimulationResult objects (one per distinct path)
+  • UI: render SimulationResult as an annotated workflow diagram with step
+    status badges (executed / skipped / unreachable / paused_delay)
+  • Extract resolveNextCursor to routing.ts (shared between executor + simulator)

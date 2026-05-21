@@ -1,0 +1,782 @@
+================================================================================
+EVENT ARCHITECTURE DEEP ASSESSMENT REPORT
+Date: 2026-05-13
+Scope: Full analysis of the current appEventBus / eventDispatcher dual-system
+       before continuing any further migration work.
+Status: ANALYSIS ONLY — no code changes in this report.
+================================================================================
+
+EXECUTIVE SUMMARY
+─────────────────
+The current event architecture is structurally sound in its migration approach
+(bridge pattern, typed events, idempotency guards, listener ownership model).
+However, it carries four risks that will compound if ignored:
+
+  1. ticket.updated acts as a "god event" — listeners branch on payload shape
+     instead of reacting to a clear semantic trigger.
+  2. ticket.updated and ticket.status_changed are currently dual-emitted on every
+     status change — producing two workspace_event_log writes and two WorkflowEngine
+     triggers per status transition.
+  3. Two events in EVENT_TYPES (notification.created, workflow.executed) are
+     infrastructure/meta events, not domain events. Including them in the canonical
+     domain event catalog is a category error that will cause confusion and
+     potentially introduce recursive event chains.
+  4. The legacy EVENTS map contains 14 event names with no path to EVENT_TYPES.
+     Some of these (TICKET_COMMENTED, LEAVE_APPROVED, LEAVE_REJECTED) represent
+     important business domain events that will eventually need to be in the catalog.
+     Their absence is a gap, not a plan.
+
+None of these risks are fires today. All are manageable. But they need conscious
+decisions before the migration accelerates, or the cost to fix them grows.
+
+================================================================================
+SECTION 1 — EVENT TAXONOMY ANALYSIS
+================================================================================
+
+1.1  Current EVENT_TYPES Catalog (10 events)
+─────────────────────────────────────────────
+  ticket.created          Domain    B  Publisher: tickets.ts POST
+  ticket.updated          Domain    B  Publisher: tickets.ts PATCH
+  ticket.status_changed   Domain*   B  Publisher: tickets.ts PATCH (simultaneous with above)
+  form.submitted          Domain    B  Publisher: forms.ts (not yet emitting)
+  approval.created        Domain    B  Publisher: approvals.ts POST
+  approval.completed      Domain    B  Publisher: approvals.ts PATCH
+  leave.requested         Domain    B  Publisher: not yet emitting
+  employee.created        Domain    B  Publisher: admin.ts (not yet emitting to bus)
+  notification.created    Infra     ⚠  Publisher: undefined — not implemented anywhere
+  workflow.executed       Meta      ⚠  Publisher: undefined — not implemented anywhere
+
+  Legend:
+    Domain  = a business fact that external observers care about
+    Infra   = an internal implementation artifact
+    Meta    = event about the event system itself
+    B       = business-grade (clear producer, consumer, payload)
+    ⚠       = flagged for category concern (see §3)
+
+1.2  Legacy EVENTS Map (22 event names, types.ts)
+──────────────────────────────────────────────────
+  These exist in the old EVENTS constant but have NO canonical equivalent
+  in EVENT_TYPES today:
+
+  EMPLOYEE_UPDATED        Domain    — no EVENT_TYPES entry
+  EMPLOYEE_DELETED        Domain    — no EVENT_TYPES entry
+  EMPLOYEE_RESIGNED       Domain    — no EVENT_TYPES entry
+  TICKET_COMMENTED        Domain    — no EVENT_TYPES entry  ← HIGH IMPORTANCE GAP
+  APPROVAL_REQUESTED      Domain    — legacy name for APPROVAL_CREATED (being renamed)
+  APPROVAL_APPROVED       Domain    — legacy name for APPROVAL_COMPLETED (outcome=approved)
+  APPROVAL_REJECTED       Domain    — legacy name for APPROVAL_COMPLETED (outcome=rejected)
+  DEPARTMENT_CREATED      Domain    — no EVENT_TYPES entry
+  DEPARTMENT_UPDATED      Domain    — no EVENT_TYPES entry
+  GROUP_CREATED           Domain    — no EVENT_TYPES entry
+  GROUP_MEMBER_ADDED      Domain    — no EVENT_TYPES entry
+  LEAVE_APPROVED          Domain    — no EVENT_TYPES entry  ← INCOMPLETE LEAVE LIFECYCLE
+  LEAVE_REJECTED          Domain    — no EVENT_TYPES entry  ← INCOMPLETE LEAVE LIFECYCLE
+  MEETING_CREATED         Domain    — no EVENT_TYPES entry
+  MEETING_UPDATED         Domain    — no EVENT_TYPES entry
+  USER_LOGGED_IN          Domain    — no EVENT_TYPES entry
+
+  Summary: 16 legacy event names with no canonical equivalent.
+  Of these, the most consequential gaps are:
+    TICKET_COMMENTED  — comments are a core feature; comment_added notifications
+                        are currently handled inline in comments.ts. There is no
+                        path for this to join the bus architecture.
+    LEAVE_APPROVED / LEAVE_REJECTED — leave.requested is in EVENT_TYPES but its
+                        lifecycle continuation events are absent. A leave request
+                        without approval/rejection events is an incomplete model.
+
+1.3  Classification of Current 10 EVENT_TYPES
+───────────────────────────────────────────────
+
+  ┌────────────────────────┬──────────────────┬──────────────────────────────────┐
+  │ Event                  │ Classification   │ Notes                            │
+  ├────────────────────────┼──────────────────┼──────────────────────────────────┤
+  │ ticket.created         │ Domain ✓         │ Clean. Single producer.          │
+  │ ticket.updated         │ Domain ✓         │ Sound concept; payload shape is  │
+  │                        │                  │ the concern (see §2).            │
+  │ ticket.status_changed  │ Domain* partial  │ Derived from ticket.updated.     │
+  │                        │                  │ Justified for workflow triggers   │
+  │                        │                  │ but creates dual-emit problem.   │
+  │ form.submitted         │ Domain ✓         │ Clean. No producer yet.          │
+  │ approval.created       │ Domain ✓         │ Clean. But naming inconsistency  │
+  │                        │                  │ with legacy (requested→created). │
+  │ approval.completed     │ Domain ✓         │ Good unified terminal event.     │
+  │ leave.requested        │ Domain ✓         │ Naming violates the convention   │
+  │                        │                  │ (see §5). Lifecycle incomplete.  │
+  │ employee.created       │ Domain ✓         │ Clean. No bus producer yet.      │
+  │ notification.created   │ Infrastructure ⚠ │ Category error (see §3.2).       │
+  │ workflow.executed      │ Meta ⚠           │ Category error + loop risk       │
+  │                        │                  │ (see §3.3).                      │
+  └────────────────────────┴──────────────────┴──────────────────────────────────┘
+
+================================================================================
+SECTION 2 — SEMANTIC OVERLAP AND CONFLICT ANALYSIS
+================================================================================
+
+2.1  ticket.updated vs ticket.status_changed — THE MOST IMPORTANT OVERLAP
+───────────────────────────────────────────────────────────────────────────
+
+  The events.ts spec says:
+    "When ONLY the status changes, emit ticket.status_changed instead.
+     When status AND other fields change, emit BOTH events."
+
+  The current tickets.ts PATCH implementation does NOT follow this spec:
+
+    // Current code (tickets.ts, post-06-B):
+    void appEventBus.emit(TICKET_UPDATED, { changes, previousValues, ... });  // ALWAYS
+    if (newStatus && newStatus !== oldTicket.status) {
+      void appEventBus.emit(TICKET_STATUS_CHANGED, { fromStatus, toStatus, ... }); // IF status changed
+    }
+
+  This means: when status changes, BOTH events are always emitted regardless of
+  whether other fields also changed. The spec's "instead of" is ignored.
+
+  Consequences of the current dual-emit approach:
+    a) Two workspace_event_log DB writes per status change (one per event).
+    b) Two WorkflowEngine trigger evaluations per status change.
+       If any workflow template conditions on EITHER event name, it fires.
+       If it conditions on BOTH (unlikely but possible), it fires twice.
+    c) activity.ts handles status changes via ticket.updated (checks changes.status).
+       activity.ts does NOT listen to ticket.status_changed.
+       ticket.status_changed is only consumed by notifications-bus.ts.
+    d) The bridge forwards both events into workspace_event_logs with different
+       event names ("ticket.updated" and "ticket.status_changed") — they look like
+       two separate events in the audit trail even when they describe the same operation.
+
+  Three valid resolution paths:
+    PATH A — "Strict spec": emit ticket.status_changed ONLY (not ticket.updated)
+             when status is the only changing field. Emit both when status + other
+             fields change. Update activity.ts to also subscribe to TICKET_STATUS_CHANGED.
+             Eliminates the dual-emit for pure status changes.
+             Cost: activity.ts needs a new listener branch.
+
+    PATH B — "Always-both": formalize that both events are ALWAYS emitted together
+             on any status change. Document this as intentional. WorkflowEngine
+             templates must be aware. Accept the 2x workspace_event_log writes.
+             Cost: WorkflowEngine must be guarded against double-trigger.
+
+    PATH C — "Merge": eliminate ticket.status_changed. Use only ticket.updated.
+             WorkflowEngine conditions on changes.status key in payload.
+             Notifications-bus.ts ticket.status_changed listener becomes a
+             ticket.updated branch.
+             Cost: workflow trigger UI needs to support payload field conditions,
+             not just event type matching.
+
+  RECOMMENDATION: PATH A is the correct DDD approach. STATUS CHANGES are
+  semantically distinct from field updates and deserve their own event.
+  But both activity.ts and notifications-bus.ts should subscribe to it
+  directly — and ticket.updated should NOT be emitted for pure status-only changes.
+  This requires a small fix to tickets.ts: compute the diff first, then decide
+  which events to emit.
+
+2.2  ticket.created notification type inconsistency
+────────────────────────────────────────────────────
+  ticket.created listener in notifications-bus.ts writes:
+    type: "ticket_assigned"    ← when a new ticket is created WITH an assignee
+
+  ticket.updated listener in notifications-bus.ts writes:
+    type: "assigned"           ← when a ticket is reassigned
+
+  Both represent "you've been assigned to a ticket" but use different type strings.
+  The frontend must handle two distinct type values for the same user-facing concept.
+  This is a minor inconsistency but will cause confusion as notification filtering/
+  display logic grows. Both should use the same type string ("ticket_assigned").
+
+2.3  approval event name transition (approval.requested → approval.created)
+─────────────────────────────────────────────────────────────────────────────
+  The LEGACY_EVENT_NAMES map correctly documents the rename.
+  The approval route (approvals.ts) already emits approval.created (not approval.requested).
+  The bridge forwards "approval.created" to eventDispatcher.
+  workspace_event_logs now stores "approval.created" event names.
+
+  RISK: Any workflow template configured in the database with:
+    trigger.eventName = "approval.requested"
+  ...will no longer fire. The WorkflowEngine receives "approval.created".
+  There is no automatic migration of workflow template trigger names in the DB.
+
+  This is a SILENT BREAKAGE risk for any existing workflow automations.
+  Check: does the workflow_templates table have rows with eventName = "approval.requested"?
+  If yes, those templates are dead and need a data migration.
+
+2.4  Two independent IdempotencyGuard class definitions
+────────────────────────────────────────────────────────
+  Identical IdempotencyGuard class is defined twice:
+    - artifacts/api-server/src/lib/events/listeners/activity.ts
+    - artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+
+  Both use the same algorithm, same default TTL (5 minutes), same Set<string>.
+  This is code duplication that creates two separate dedup scopes.
+
+  If the same event reaches both listeners (which it always does), each guard
+  independently tracks the event ID. This is correct behavior — each listener
+  should independently decide whether it has seen the event. But the implementation
+  should be a shared exported class, not two copies of the same code.
+
+2.5  notifyUsers() vs insertNotification() — two parallel notification functions
+─────────────────────────────────────────────────────────────────────────────────
+  notifications.ts (legacy) has:
+    notifyUsers(userIds, type, title, titleAr, message, messageAr, link?)
+    → writes titleAr, messageAr, link columns that DO NOT EXIST in notificationsTable
+    → Drizzle silently ignores these extra fields
+    → these fields ARE silently dropped (data loss, not an error)
+
+  notifications-bus.ts (new) has:
+    insertNotification({ userId, type, title, message, ticketId? })
+    → correct 5-column insert, no phantom fields
+
+  The legacy notifyUsers() has a schema mismatch bug that has existed undetected
+  because Drizzle silently drops unknown fields. The fields (titleAr, messageAr, link)
+  suggest these were planned features that were partially implemented.
+
+================================================================================
+SECTION 3 — CATEGORY ERROR ANALYSIS: INFRASTRUCTURE EVENTS IN DOMAIN CATALOG
+================================================================================
+
+3.1  The Domain Event Catalog should only contain business facts
+──────────────────────────────────────────────────────────────────
+  A domain event represents something that happened in the business that
+  observers — other systems, workflow automation, analytics, audit — care about.
+  A domain event is: "a ticket was created by user X in workspace Y at time T."
+
+  An infrastructure event is an internal implementation detail: "the notification
+  delivery subsystem processed a DB insert." External observers should not care.
+
+3.2  notification.created — a category error
+──────────────────────────────────────────────
+  notification.created is defined as:
+    "A notification was written to the notifications table and is ready for delivery."
+
+  Problems:
+    a) It fires AFTER domain events have already been processed. It's a side effect
+       of a side effect. A ticket.created event causes a notification to be inserted
+       (by notifications-bus.ts). If that insert then fires notification.created,
+       we have a secondary cascade: domain event → listener → side effect → event.
+    b) The current insertNotification() already handles SSE push synchronously.
+       The stated goal for notification.created ("WebSocket adapter subscribes to
+       push to user's socket") is a valid future need — but the implementation
+       plan requires removing the emitToUser() from insertNotification() to avoid
+       double-push. This creates another migration risk.
+    c) notification.created should NOT be in the domain event catalog. It belongs
+       in an internal notification subsystem interface, not in EVENT_TYPES.
+    d) Critically: if notification.created is forwarded through the bridge to
+       eventDispatcher, it writes to workspace_event_logs. workspace_event_logs
+       would then contain one entry per notification sent — potentially tens of
+       entries for a single business event (batch notifications to multiple admins).
+       This pollutes the audit trail with infrastructure noise.
+
+  RECOMMENDATION: Remove notification.created from EVENT_TYPES. If a WebSocket
+  or push notification system is built, it should subscribe to insertNotification()
+  directly (via a callback or a local pub/sub inside the notification subsystem),
+  NOT via the domain event bus.
+
+3.3  workflow.executed — a meta event with loop risk
+──────────────────────────────────────────────────────
+  workflow.executed is defined as:
+    "A workflow automation run has completed (success or failure)."
+
+  Problems:
+    a) The WorkflowEngine is triggered by eventDispatcher (via the bridge's
+       eventDispatcher.dispatch() → WorkflowEngine "*" wildcard listener).
+    b) If workflow.executed is emitted to appEventBus, the bridge forwards it to
+       eventDispatcher. eventDispatcher triggers the WorkflowEngine.
+    c) If any workflow template conditions on workflow.executed, the WorkflowEngine
+       runs it. That run completes. That completion emits workflow.executed.
+       → Infinite loop.
+    d) The events.ts comments say "should NOT itself trigger other workflows unless
+       cycle detection is in place." But cycle detection is NOT implemented.
+    e) More fundamentally: workflow.executed is only useful to the workflow engine
+       itself (for chaining/orchestration) or to an external monitoring system.
+       For internal workflow monitoring, the WorkflowEngine already has its own
+       workspace_event_logs UPDATE (status: "completed"/"failed"). That is sufficient.
+       For external monitoring, a separate "workflow health" subsystem is the right
+       abstraction, not a domain event on the main bus.
+
+  RECOMMENDATION: Remove workflow.executed from EVENT_TYPES entirely for now.
+  Add it back ONLY when: (a) cycle detection is implemented in the WorkflowEngine,
+  AND (b) there is a concrete use case requiring external subscription to workflow
+  execution results. The current motivation ("enable meta-automation: notify me when
+  workflow X fails") can be satisfied by a direct WorkflowEngine callback, not a
+  domain bus event.
+
+================================================================================
+SECTION 4 — NAMING CONVENTION ANALYSIS
+================================================================================
+
+4.1  Convention stated vs convention observed
+──────────────────────────────────────────────
+  Stated convention: entity.action (2-level, lowercase, dot-separated)
+    Good examples: ticket.created ✓, form.submitted ✓, employee.created ✓
+
+  Violations and edge cases:
+
+  leave.requested         ✗ — "requested" is passive/adjective, not an action verb.
+                              The convention uses action verbs: created, updated,
+                              submitted, completed. "leave.requested" should be
+                              "leave.submitted" or "leave.created" for consistency.
+                              However: "leave.requested" matches the existing EVENTS.LEAVE_REQUESTED
+                              (marked as "✓ MATCH" in constants.ts), so this was
+                              intentionally preserved to avoid migration. This is
+                              correct pragmatism for NOW, but the naming is wrong
+                              and will be confusing when leave.approved and leave.rejected
+                              are added (those follow the verb form).
+
+  ticket.status_changed   ✓ — "status_changed" is compound snake_case (correct per spec)
+                              "status" is a noun + "changed" is a past participle → passivish.
+                              "ticket.status_updated" or "ticket.transitioned" would
+                              be more consistent with the verb convention but this is minor.
+
+  notification.created    ← naming is correct by convention, but category is wrong (§3.2).
+
+  workflow.executed       ← naming is fine. "executed" follows the action verb form.
+                            Category concern stands (§3.3).
+
+  approval.created vs approval.completed asymmetry:
+    "created" = initial state — consistent with ticket.created, employee.created ✓
+    "completed" = terminal state — this is the ONLY event using "completed" as action verb.
+    Other terminal events use more specific verbs: ticket.status_changed (toStatus=closed),
+    employee.created (no terminal event). The word "completed" is ambiguous —
+    an approval could be "completed" by being withdrawn, timed out, or decided.
+    The payload clarifies (outcome: "approved" | "rejected") but the event name
+    itself doesn't telegraph that it means "a decision was made."
+    Alternative: approval.decided would be more precise. But this is a minor point
+    and approval.completed is acceptable — the payload makes the outcome clear.
+
+4.2  Namespace collisions risk
+───────────────────────────────
+  The current entities are: ticket, form, approval, leave, employee, notification, workflow.
+  All 2-level and flat. No namespace collisions exist today.
+
+  Future risks:
+    If "ticket.comment" events are added: ticket.comment.created (3-level — forbidden)
+    or ticket.commented (2-level — compound entity name, unusual).
+    The EVENTS map has TICKET_COMMENTED = "ticket.commented" which uses "commented"
+    as a compound action. This is slightly awkward but acceptable.
+
+    If leave management expands: leave.approved, leave.rejected are obvious additions.
+    But "approved" and "rejected" are adjectives/past participles, consistent with
+    the current leave.requested naming (which is also a past participle).
+    So the leave namespace is internally consistent but inconsistent with the rest.
+
+4.3  Actionable naming stabilization
+──────────────────────────────────────
+  Priority decisions needed (highest to lowest impact):
+    1. Decide: leave.requested → rename to leave.submitted? (Ticket 03 scope)
+       If yes, update EVENTS.LEAVE_REQUESTED and all usages.
+       If no, document the exception explicitly in constants.ts.
+
+    2. Decide: notification.created and workflow.executed → remove from EVENT_TYPES?
+       (RECOMMENDATION: yes, per §3.2 and §3.3)
+
+    3. Decide: ticket.commented → add to EVENT_TYPES?
+       Comments are a core product feature. comment_added notifications are currently
+       inline in comments.ts. This is a HIGH IMPORTANCE gap in the catalog.
+
+================================================================================
+SECTION 5 — LISTENER OWNERSHIP AND COUPLING ANALYSIS
+================================================================================
+
+5.1  The "god event" problem in ticket.updated
+────────────────────────────────────────────────
+  The ticket.updated listener in activity.ts contains this logic:
+
+    if ("status" in changes)        → action = "status_changed"
+    else if ("assigneeId" in changes) → action = "assigned"
+    else                             → action = "ticket_updated"
+
+  This is a branching tree inside a single listener — the listener is making
+  routing decisions that should be semantic event distinctions. The behavior of
+  a listener should be: "I know what to do when I receive this event." Instead,
+  the activity.ts listener is doing: "Let me look at the payload to figure out
+  what event this really is."
+
+  If ticket.updated gains more change types (departmentId, priority, description,
+  title), the branching tree grows. Each new branch is a new coupling point.
+
+  The correct pattern is:
+    - ticket.status_changed  → activity listener writes action="status_changed"
+    - ticket.assigned        → activity listener writes action="assigned"
+      (either a separate event or ticket.updated with assigneeId as the ONLY change)
+    - ticket.updated         → activity listener writes action="ticket_updated"
+      (for all other field changes)
+
+  This requires either more specific events OR a committed interpretation of
+  "ticket.updated means non-status, non-assignment changes only."
+
+5.2  Notification type string inconsistency (ownership defect)
+───────────────────────────────────────────────────────────────
+  ticket.created notification:  type = "ticket_assigned"
+  ticket.updated notification:  type = "assigned"
+
+  Both represent "you have been assigned to a ticket." These should be unified.
+  The frontend notification display and filtering will need to handle both strings
+  as equivalent, which is invisible complexity.
+
+  Correct solution: standardize on "ticket_assigned" for all assignment notifications
+  regardless of whether the ticket was just created or was reassigned.
+  (Or "assigned" if the shorter form is preferred — but pick one.)
+
+5.3  notifications-bus.ts ticket.status_changed listener fetches from DB
+─────────────────────────────────────────────────────────────────────────
+  The ticket.status_changed listener fetches ticket data from DB:
+
+    const [ticket] = await db.select({ createdBy, title }).from(ticketsTable).where(...)
+
+  This happens because createdByUserId and title are NOT in TicketStatusChangedPayload.
+  This is a design gap: the emitter (tickets.ts PATCH) already has this data but
+  doesn't include it in the payload. The listener must do an extra DB round-trip.
+
+  Two valid solutions:
+    A. Add createdByUserId and title to TicketStatusChangedPayload — emitter already
+       has oldTicket.createdByUserId and ticket.title at emit time.
+    B. Keep the DB fetch in the listener (current approach). Acceptable if the DB
+       round-trip is cheap (indexed PK lookup). The legacy listener did the same.
+
+  Solution A is better for correctness and performance. The extra fields in the
+  payload cost nothing and eliminate the DB dependency in the notification listener.
+  The listener becomes pure: receives event data, inserts notification, done.
+
+5.4  The bridge is a synchronous bottleneck in the fanout chain
+────────────────────────────────────────────────────────────────
+  The bridge handler awaits eventDispatcher.dispatch() which includes:
+    - db.insert(workspaceEventLogsTable)   ← DB write
+    - db.update(workspaceEventLogsTable)   ← DB write (status update)
+    - listener fanout (Promise.allSettled) ← including WorkflowEngine
+
+  This runs IN PARALLEL with activity.ts and notifications-bus.ts listeners
+  (all are registered as appEventBus subscribers and run in Promise.allSettled).
+  But since the route uses `void appEventBus.emit(...)`, none of this blocks the
+  HTTP response. Acceptable for current scale.
+
+  The bridge comment notes: "TODO(future): Make bridge dispatch fire-and-forget
+  if latency becomes an issue." This is correctly deferred. Flag for scale review
+  at >50 req/s sustained ticket mutation rate.
+
+================================================================================
+SECTION 6 — SCALABILITY RISK REGISTER
+================================================================================
+
+  RISK-001: Dual-emit on status change — TWO workspace_event_log rows
+  ─────────────────────────────────────────────────────────────────────
+  Severity: MEDIUM
+  Status:   ACTIVE (already in production as of Ticket 06-B)
+  Impact:   workspace_event_logs grows at 2x rate for status-changing PATCHes.
+            WorkflowEngine evaluates templates twice per status change.
+            If a workflow template conditions on ticket.updated AND a separate
+            template on ticket.status_changed, both fire — potentially executing
+            duplicate actions (e.g., two emails sent, two tasks created).
+  Mitigation: Adopt PATH A from §2.1. Fix before WorkflowEngine templates are
+              configured in production.
+
+  RISK-002: notification.created recursive cascade
+  ─────────────────────────────────────────────────
+  Severity: HIGH (if implemented as designed)
+  Status:   LATENT (notification.created not yet emitted anywhere)
+  Impact:   If notification.created is emitted inside insertNotification():
+              ticket.created → notification insert → notification.created →
+              bridge → eventDispatcher → workspace_event_logs (NOISE)
+              + potential WorkflowEngine trigger on notification.created
+            For batch inserts (employee.created notifying 10 admins):
+              10 notification.created events emitted, 10 bridge calls,
+              10 workspace_event_logs rows — all for one business operation.
+  Mitigation: Remove notification.created from EVENT_TYPES (§3.2).
+
+  RISK-003: workflow.executed infinite loop
+  ──────────────────────────────────────────
+  Severity: HIGH (if implemented as designed without cycle detection)
+  Status:   LATENT (workflow.executed not yet emitted anywhere)
+  Impact:   WorkflowEngine triggered by workflow.executed → runs workflow →
+            emits workflow.executed → WorkflowEngine triggered again → ...
+  Mitigation: Remove workflow.executed from EVENT_TYPES until cycle detection
+              is in place (§3.3).
+
+  RISK-004: approval.requested vs approval.created silent workflow breakage
+  ──────────────────────────────────────────────────────────────────────────
+  Severity: MEDIUM
+  Status:   ACTIVE (approvals.ts already emits approval.created via appEventBus)
+  Impact:   Workflow templates with trigger.eventName = "approval.requested" are
+            now dead. The bridge forwards "approval.created" to eventDispatcher.
+            WorkflowEngine sees "approval.created" only.
+  Mitigation: Query workflow_templates table for "approval.requested" triggers.
+              Run a one-time data migration: UPDATE workflow_templates SET
+              trigger = jsonb_set(trigger, '{eventName}', '"approval.created"')
+              WHERE trigger->>'eventName' = 'approval.requested'.
+              Do the same for "approval.approved" → "approval.completed" and
+              "approval.rejected" → "approval.completed" (if any exist).
+
+  RISK-005: ticket.commented has no path to appEventBus
+  ────────────────────────────────────────────────────────
+  Severity: LOW-MEDIUM (growing over time)
+  Status:   ACTIVE — comments.ts still uses inline notificationsTable insert
+  Impact:   Comment notifications cannot be driven by listeners.
+            Cannot add comment-triggered workflow automations via the new bus.
+            Cannot add comment activity logging via the new bus.
+  Mitigation: Add ticket.commented to EVENT_TYPES when comments.ts is migrated.
+              Define TicketCommentedPayload (ticketId, commentId, authorId,
+              isInternal, ticketTitle, recipientIds).
+
+  RISK-006: leave lifecycle is incomplete (leave.approved/rejected absent)
+  ──────────────────────────────────────────────────────────────────────────
+  Severity: LOW (until leave management is built out)
+  Status:   LATENT
+  Impact:   When leave approvals are built, the continuation events are undefined.
+            If they use the legacy EVENTS.LEAVE_APPROVED, they bypass the new bus.
+  Mitigation: Add leave.approved and leave.rejected to EVENT_TYPES when the
+              leave approval flow is built. Define payloads at that time.
+
+  RISK-007: IdempotencyGuard in-memory dedup lost on server restart
+  ──────────────────────────────────────────────────────────────────
+  Severity: LOW (single-instance deployment, restarts are controlled events)
+  Status:   KNOWN (documented in both listener files with TODO)
+  Impact:   If server restarts mid-operation (e.g., during a deploy), the same
+            event could be processed twice — creating duplicate activity_logs rows
+            and duplicate notifications.
+  Mitigation: The existing TODO correctly identifies adding a processed_event_ids
+              column. Priority: low until multi-instance deployment is needed.
+
+  RISK-008: ticket.updated payload carries title field but notifications use ticketId
+  ──────────────────────────────────────────────────────────────────────────────────
+  Severity: LOW
+  Status:   ACTIVE — notification message says "ticket #123" not "Ticket Title Here"
+  Impact:   Assignment notification quality is lower than before the migration.
+            Before: "You have been assigned to: <ticket title>"
+            After:  "You have been assigned to ticket #<id>"
+  Mitigation: Add optional entityLabel to TicketUpdatedPayload or fetch title in
+              the listener. Simpler: include title in the payload (tickets.ts has
+              oldTicket.title and ticket.title at emit time).
+
+================================================================================
+SECTION 7 — ARCHITECTURE DIRECTION ASSESSMENT
+================================================================================
+
+7.1  Are we moving toward clean event-driven architecture or event chaos?
+──────────────────────────────────────────────────────────────────────────
+
+  POSITIVE signals:
+    ✓ Bridge pattern is the right incremental migration strategy. It prevents
+      big-bang rewrites and allows parallel operation of both systems.
+    ✓ TypedEvent<K, Payload> gives compile-time safety and autocomplete.
+    ✓ Contract-first: events.ts defines the schema before implementation.
+    ✓ EventTypeMap discriminated union enables exhaustive type narrowing.
+    ✓ IdempotencyGuard per listener prevents double-processing.
+    ✓ Listener ownership model is explicit: each listener "owns" specific
+      notification types for specific events (documented in header table).
+    ✓ Pino adapter correctly separates the bus abstraction from logging concerns.
+    ✓ bridge.ts tracing fields (_busEventId, _busCorrelationId) link bus events
+      to workspace_event_logs rows — essential for debugging.
+    ✓ Registration order in index.ts is correctly reasoned (domain listeners
+      before bridge so domain work runs in parallel with bridge fanout).
+    ✓ The "fire-and-forget with void" pattern correctly separates HTTP response
+      latency from background processing latency.
+
+  NEGATIVE signals / emerging smells:
+    ✗ ticket.updated is becoming a "god event" — listeners branch on payload
+      shape instead of event type. This is an anti-pattern that grows in
+      complexity with each new PATCH field.
+    ✗ dual-emit on status change (ticket.updated + ticket.status_changed) is
+      an implementation artifact that doesn't match the stated spec.
+      It produces spurious workspace_event_log duplication and WorkflowEngine
+      double-triggers.
+    ✗ notification.created and workflow.executed in the domain catalog are
+      category errors. Domain catalogs should contain business facts, not
+      infrastructure artifacts. Adding them will cause confusion about what
+      the bus is for.
+    ✗ The EVENTS legacy map has 16 events with no path to EVENT_TYPES.
+      The catalog expansion strategy is unclear — there's no documented policy
+      for when a legacy EVENTS entry gets promoted to EVENT_TYPES.
+    ✗ Two notification type strings for the same semantic ("ticket_assigned"
+      and "assigned") are in production. The frontend must handle both.
+    ✗ One listener (ticket.status_changed) still does a DB read inside the
+      listener that could be eliminated by richer payload.
+
+  VERDICT: The architecture is trending in the right direction but has
+  accumulated 2-3 design decisions that need course-correction before they
+  become structural problems. The dual-emit issue (RISK-001) is the most
+  urgent. The category errors (notification.created, workflow.executed) should
+  be resolved before any new events are added to EVENT_TYPES.
+
+7.2  Is EVENT_TYPES growing too fast?
+───────────────────────────────────────
+  10 events is appropriate for the current feature surface. The concern is not
+  volume but quality. Of the 10:
+    - 8 are solid domain events
+    - 1 (notification.created) should be removed
+    - 1 (workflow.executed) should be deferred/removed
+    - 1 of the 8 (ticket.status_changed) needs semantic clarification vs ticket.updated
+
+  The EVENTS legacy map at 22 entries shows the full scope of events the platform
+  will eventually need. Getting 10 of them right first (the busy migration path) is
+  the right sequencing. The risk is that EVENTS entries that are not in EVENT_TYPES
+  get forgotten — no plan exists for them today.
+
+7.3  Is the naming hierarchy scalable?
+───────────────────────────────────────
+  The entity.action 2-level hierarchy scales well. Industry precedent confirms:
+  Stripe uses charge.created, payment_intent.succeeded, subscription.updated.
+  GitHub uses push, pull_request.opened, issues.closed. Both work at thousands
+  of event types without namespace collision.
+
+  The one constraint: if entity names become compound (hr.leave, ticket.comment),
+  the convention breaks (hr.leave.created would be 3-level). The current practice
+  of using underscores (leave.requested) handles this correctly.
+  The naming is scalable with the existing convention.
+
+================================================================================
+SECTION 8 — STABILIZATION RECOMMENDATIONS
+================================================================================
+
+These are ordered by urgency. None require broad refactoring. Each is a surgical
+decision or a small targeted change.
+
+  REC-01: URGENT — Resolve dual-emit on status change [RISK-001]
+  ─────────────────────────────────────────────────────────────────
+  Decision required: choose PATH A, B, or C from §2.1.
+  Recommendation: PATH A (strict spec compliance).
+  Change: in tickets.ts PATCH, compute diff first, then decide:
+    - status changed only → emit TICKET_STATUS_CHANGED only
+    - other fields changed (no status) → emit TICKET_UPDATED only
+    - both → emit both (this is the only case where dual-emit is correct)
+  Impact: activity.ts must add a TICKET_STATUS_CHANGED subscriber for
+          status_changed activity log. Small change.
+  Effort: ~1 hour. No schema changes.
+
+  REC-02: URGENT — Remove notification.created and workflow.executed from EVENT_TYPES
+  ─────────────────────────────────────────────────────────────────────────────────────
+  These are not domain events. Remove them from constants.ts and events.ts.
+  If/when they are needed, re-introduce with explicit documentation of their
+  infrastructure-only nature and cycle detection requirements.
+  Effort: ~30 minutes. Remove 2 entries. No listeners use them yet.
+  No migration needed.
+
+  REC-03: IMPORTANT — Check for "approval.requested" in workflow_templates table [RISK-004]
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  Run: SELECT id, name, trigger FROM workflow_templates
+       WHERE trigger->>'eventName' IN ('approval.requested','approval.approved','approval.rejected');
+  If any rows found: run a data migration to update the event names to their
+  canonical equivalents (approval.created, approval.completed).
+  Effort: ~15 minutes to query + 30 minutes for migration if needed.
+
+  REC-04: IMPORTANT — Unify notification type strings for assignment [RISK-008 partial]
+  ──────────────────────────────────────────────────────────────────────────────────────
+  ticket.created listener: change type from "ticket_assigned" to "assigned"
+  OR ticket.updated listener: change type from "assigned" to "ticket_assigned"
+  Pick one and apply consistently. Also update ticket title in the message.
+  Effort: ~30 minutes. May require a data migration if frontend filters by type string.
+
+  REC-05: RECOMMENDED — Add createdByUserId and title to TicketStatusChangedPayload [§5.3]
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  The notifications-bus.ts ticket.status_changed listener fetches ticket data from DB.
+  tickets.ts has this data at emit time (oldTicket.createdByUserId, ticket.title).
+  Add these to the payload. Eliminate the DB query in the listener.
+  Effort: ~30 minutes. No schema changes. Pure payload enrichment.
+
+  REC-06: RECOMMENDED — Extract IdempotencyGuard to shared utility [§2.4]
+  ─────────────────────────────────────────────────────────────────────────
+  Create: artifacts/api-server/src/lib/events/idempotency.ts
+  Export: class IdempotencyGuard + singleton dedup instance.
+  Import in both activity.ts and notifications-bus.ts.
+  Eliminates code duplication. Makes the 5-minute TTL a single configurable constant.
+  Effort: ~20 minutes. Pure refactor, no behavior change.
+
+  REC-07: RECOMMENDED — Document EVENT_TYPES promotion policy for EVENTS entries [§7.2]
+  ────────────────────────────────────────────────────────────────────────────────────────
+  Add a section to constants.ts or bridge.ts:
+    "Events in EVENTS but not in EVENT_TYPES are legacy-only events.
+     They are promoted to EVENT_TYPES when:
+       a) a route migrates from eventDispatcher.dispatch() to appEventBus.emit()
+       b) OR a new bus listener is created for that event
+     Until promoted, these events only reach workspace_event_logs + WorkflowEngine."
+  This prevents the 16 untracked events from becoming forgotten.
+  Effort: ~15 minutes. Documentation only.
+
+  REC-08: DEFERRED — Add ticket.commented to EVENT_TYPES
+  ────────────────────────────────────────────────────────
+  Defer until comments.ts is migrated to appEventBus.emit().
+  But: when that migration happens, add TicketCommentedPayload to events.ts FIRST
+  (contract-first principle) before touching comments.ts.
+  Payload must include recipientIds OR a mechanism to determine recipients
+  (CC list, ticket creator) — the current inline logic in comments.ts is complex.
+
+  REC-09: DEFERRED — leave.requested naming
+  ──────────────────────────────────────────
+  Defer to when the leave module is built out. At that time, standardize
+  the entire leave event namespace (leave.submitted vs leave.requested,
+  leave.approved vs leave.decided) consistently and migrate in one ticket.
+  Do NOT rename just leave.requested in isolation — it would create
+  a partially-consistent namespace.
+
+================================================================================
+SECTION 9 — READINESS EVALUATION BEFORE CONTINUING MIGRATIONS
+================================================================================
+
+  Next planned migration: admin.ts EMPLOYEE_CREATED → appEventBus.emit()
+
+  Pre-migration checklist:
+  ┌───┬────────────────────────────────────────────────────────────────────┬───────────┐
+  │ # │ Item                                                               │ Status    │
+  ├───┼────────────────────────────────────────────────────────────────────┼───────────┤
+  │ 1 │ REC-03: Check workflow_templates for "approval.requested" triggers │ ⚠ DO NOW  │
+  │ 2 │ REC-01: Resolve dual-emit (ticket.updated+status_changed)          │ ⚠ BEFORE  │
+  │   │         Before continuing, decide the policy even if not fixed yet │ NEXT TICK │
+  │ 3 │ REC-02: Remove notification.created + workflow.executed            │ SOON      │
+  │ 4 │ REC-04: Unify notification type strings                            │ SOON      │
+  │ 5 │ REC-05: Enrich TicketStatusChangedPayload                          │ SOON      │
+  │ 6 │ REC-06: Extract IdempotencyGuard to shared utility                 │ ANYTIME   │
+  │ 7 │ admin.ts EMPLOYEE_CREATED listener is ⏳ READY in notifications-bus│ READY     │
+  │   │         and activity.ts — awaiting bus emit + legacy listener REMOVAL│         │
+  │ 8 │ No schema changes needed for EMPLOYEE_CREATED migration             │ READY     │
+  │ 9 │ No new listeners needed for EMPLOYEE_CREATED migration              │ READY     │
+  └───┴────────────────────────────────────────────────────────────────────┴───────────┘
+
+  VERDICT: The EMPLOYEE_CREATED migration (Ticket 07 equivalent) is READY from
+  a listener perspective. However, REC-01 (dual-emit) and REC-03 (workflow template
+  check) should be resolved first — they affect correctness of the system in its
+  current state, independent of the next migration.
+
+  DO BEFORE CONTINUING:
+    1. REC-03: Query the workflow_templates table NOW. 5-minute task. Zero risk.
+    2. REC-01: Make a documented architecture decision about dual-emit.
+               Even if not fixed in the next ticket, the decision should be recorded
+               so that future code follows the correct policy.
+
+  DO CONCURRENT WITH NEXT MIGRATION:
+    3. REC-02: Remove notification.created + workflow.executed from EVENT_TYPES.
+    4. REC-04: Unify notification type string ("assigned" vs "ticket_assigned").
+    5. REC-05: Add createdByUserId + title to TicketStatusChangedPayload.
+
+  SAFE TO DEFER:
+    6. REC-06: IdempotencyGuard extraction (pure refactor, no behavior change).
+    7. REC-07: Policy documentation.
+    8. REC-08/09: ticket.commented and leave namespace decisions.
+
+================================================================================
+SECTION 10 — FINAL ASSESSMENT TABLE
+================================================================================
+
+  Dimension                          │ Grade │ Notes
+  ───────────────────────────────────┼───────┼──────────────────────────────────
+  Overall architecture direction     │  B+   │ Sound approach, 2-3 open issues
+  Domain event design quality        │  B    │ 8/10 events well-designed; 2 are
+                                     │       │ category errors
+  Semantic overlap                   │  C+   │ dual-emit is an active problem;
+                                     │       │ notification type inconsistency
+  Event volume (too early/too many?) │  A-   │ 10 is appropriate; quality over
+                                     │       │ quantity is being honored
+  Naming convention                  │  B+   │ Mostly correct; leave.requested is
+                                     │       │ the one violation
+  Scalability                        │  B    │ 3 known risks (dual-emit, missing
+                                     │       │ events, in-memory dedup)
+  Listener ownership clarity         │  A-   │ Well-documented; the "god event"
+                                     │       │ branching in activity.ts is a smell
+  Bridge pattern execution           │  A    │ Well-designed; tracing fields,
+                                     │       │ idempotent registration, error isolation
+  Infrastructure/domain separation   │  C+   │ notification.created + workflow.executed
+                                     │       │ are category errors in the catalog
+  Readiness for next migration       │  B    │ Ready after 2 pre-flight checks
+
+  Overall: the architecture is good enough to continue migrating, but should
+  address the dual-emit issue and remove the category-error events before the
+  next ticket. Doing so now is cheap; doing so after 3 more migration tickets
+  will be significantly more expensive.
+
+================================================================================
+END OF REPORT
+================================================================================

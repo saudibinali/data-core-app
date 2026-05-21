@@ -1,0 +1,124 @@
+================================================================================
+WORKFLOW PHASE 20F REPORT — Workforce Operations Center & Control Tower
+================================================================================
+Date: 2026-05-19
+Phase: P20-F
+Status: DELIVERED (foundation)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Delivered an HR admin Workforce Operations Center UI and backend APIs for
+integration health, sync job operations, raw event inbox with replay/ignore,
+unresolved employee mapping resolution, import issue visibility, operational
+alerts/notifications, JSON operational reports via generated_reports, and
+ReplayService for non-destructive recovery.
+
+Built on P20-B/C/D/E without payroll redesign, biometric enrollment, mobile app,
+AI analytics, Redis, or destructive migrations.
+
+--------------------------------------------------------------------------------
+OPERATIONS CENTER STATUS — GO
+--------------------------------------------------------------------------------
+UI: /admin/hr/workforce-ops
+- Overview stats + alert banner
+- Tabs: integrations, raw events, sync jobs, mappings, import issues
+- 30s polling, status badges, replay/retry actions
+- Payload inspect dialog (masked)
+HR dashboard quick link added
+
+--------------------------------------------------------------------------------
+INTEGRATION MONITORING STATUS — GO
+--------------------------------------------------------------------------------
+- Per-integration health (last sync, success rate 7d, failures, stale, mappings)
+- GET integrations/health, stale-integrations
+- Integration table in UI
+
+--------------------------------------------------------------------------------
+REPLAY / RECOVERY STATUS — GO
+--------------------------------------------------------------------------------
+ReplayService:
+- replayRawEvent, retryNormalization, markRawEventIgnored
+- retrySyncJob, cancelSyncJob, replayDeadLetterJob, replaySyncBatch
+Non-destructive: original payload_json never modified
+
+--------------------------------------------------------------------------------
+MAPPING OPERATIONS STATUS — GO
+--------------------------------------------------------------------------------
+- List unresolved mappings
+- Bulk resolve + ignore APIs
+- UI map-to-employee selector
+
+--------------------------------------------------------------------------------
+REPORTING STATUS — GO
+--------------------------------------------------------------------------------
+Report definitions (JSON):
+- hr.workforce.integration.activity
+- hr.workforce.sync.failures
+- hr.workforce.unresolved.mappings
+- hr.workforce.attendance.warnings
+POST /hr/workforce/ops/reports/generate → export_jobs / generated_reports
+
+--------------------------------------------------------------------------------
+SECURITY / GOVERNANCE STATUS — GO
+--------------------------------------------------------------------------------
+- hr.manage on all operational routes
+- Payload masking (sensitive key redaction)
+- logAttendanceAccess on replay/sync/mapping mutations
+- Workspace-scoped queries throughout
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+Unit:
+- Payload masking: PASS
+- Alerts array shape: PASS
+
+Integration (DATABASE_URL):
+- Metrics aggregation: PASS when RUN_WORKFORCE_OPS_SMOKE enabled
+
+Run:
+  pnpm --filter @workspace/api-server test workforce-operations.smoke
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+Area                                      | Status
+------------------------------------------|----------
+Workforce operations center               | GO
+Integration observability                 | GO
+Replay / recovery                         | GO
+Operational governance                    | PARTIAL
+Enterprise workforce operations readiness | PARTIAL
+
+PARTIAL notes:
+- Access logs are structured logger only (no DB audit table yet)
+- Integration CRUD UI deferred (ops center links to attendance hub)
+- Alert deduplication is in-process (single API node)
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+1. Multi-instance deployments need shared alert/replay nonce store
+2. Optional: OpenAPI client codegen for ops endpoints in ops-platform
+3. Rate limits on replay endpoints (hooks documented, not middleware)
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P21-A — Payroll Foundation & Compensation Canonical Architecture
+(Do not start in this delivery.)
+
+--------------------------------------------------------------------------------
+CONSTRAINT CONFIRMATION
+--------------------------------------------------------------------------------
+- No payroll redesign
+- No biometric enrollment
+- No mobile app
+- No AI analytics engine
+- No destructive migration
+- No Redis redesign
+
+================================================================================
+END REPORT
+================================================================================

@@ -1,0 +1,282 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-7c-report.txt
+- workflow-phase-7d-report.txt
+- workflow-phase-8b-report.txt
+- workflow-phase-8c-report.txt
+خصوصًا:
+- runtimeWeightedComplexity
+- historical rollups
+- trend APIs
+- operational fragility index
+- chronic hotspot semantics
+- governance trend infrastructure
+
+ثم نفّذ فقط:
+P8-D — Predictive Trend Projection Foundations
+
+ولا تنفّذ:
+- ML models
+- neural forecasting
+- anomaly AI
+- automatic remediation
+- realtime prediction streams
+- distributed forecasting systems
+
+عنوان المهمة:
+WORKFLOW PHASE 8-D — Predictive Trend Projection & Operational Forecast Foundations
+
+المهمة الحالية:
+تحويل:
+historical operational intelligence
+
+إلى:
+deterministic forward-looking operational forecasting
+
+الهدف:
+تمكين:
+- operational trajectory estimation
+- fragility trend projection
+- future pressure estimation
+- degradation trend visibility
+- governance forecast readiness
+
+بطريقة:
+deterministic statistical projection engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ANALYTICS STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- governance_snapshot_rollups
+- historical trend APIs
+- runtimeWeightedComplexity
+- fragility index
+- hotspot history
+- operational trend dashboards
+
+حدّد:
+- أين الماضي غير مستغل للتوقع
+- أين الاتجاهات قابلة للإسقاط المستقبلي
+- أين historical continuity جاهزة للـ forecasting
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN FORECAST ENGINE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+WorkflowOperationalForecast
+
+ليحتوي:
+- projectedComplexity
+- projectedFragility
+- projectedBacklogPressure
+- projectedStormRisk
+- trendDirection
+- confidenceLevel
+- forecastWindowDays
+- projectionMethod
+
+مع:
+deterministic projection semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PROJECTION INPUT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعتمد على:
+- historical rollups
+- runtimeWeightedComplexity history
+- fragility history
+- hotspot recurrence
+- backlog pressure trends
+
+لكن:
+بدون live runtime state.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FORECASTING FORMULAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+نفّذ:
+simple deterministic statistical methods فقط.
+
+أمثلة مقبولة:
+- moving averages
+- weighted trend slope
+- bounded linear projection
+- volatility-aware confidence reduction
+
+ممنوع:
+- ML
+- neural networks
+- stochastic prediction
+- probabilistic black-box models
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TREND DIRECTION CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TrendDirection
+
+يحتوي:
+- improving
+- stable
+- degrading
+- critically_degrading
+
+اعتمد على:
+- slope magnitude
+- fragility acceleration
+- hotspot recurrence growth
+- storm-frequency increase
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — CONFIDENCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ForecastConfidence
+
+يعتمد على:
+- historical sample size
+- trend consistency
+- volatility
+- missing-data penalties
+- projection window size
+
+المستويات:
+- low
+- moderate
+- high
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FORECAST SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Forecast engine MUST:
+- remain READ-ONLY
+- never mutate governance history
+- never trigger alerts automatically
+- never invoke runtime execution
+- never claim certainty
+
+أي:
+assistive deterministic forecasting فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+forecast intelligence
+
+داخل:
+- historical dashboards
+- workflow operational APIs
+- governance analytics
+- operational intelligence panels
+
+لكن:
+بدون autonomous actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_forecast_computed
+
+B)
+workflow_degradation_projection_detected
+
+C)
+workflow_forecast_confidence_reduced
+
+D)
+workflow_hotspot_growth_detected
+
+كلها تحتوي:
+- workflowId
+- workspaceId
+- projectedComplexity
+- projectedFragility
+- confidenceLevel
+- trendDirection
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+moving-average projection deterministic
+
+T2:
+weighted trend slope stable
+
+T3:
+degrading trend classification
+
+T4:
+improving trend classification
+
+T5:
+confidence reduction on sparse history
+
+T6:
+volatility reduces confidence
+
+T7:
+forecast projection bounded safely
+
+T8:
+forecast serialization stable
+
+T9:
+no live runtime dependency required
+
+T10:
+forecast engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- AI forecasting
+- neural prediction
+- automatic remediation
+- realtime streaming forecasts
+- distributed prediction infra
+- autonomous governance actions
+
+خلك:
+minimal deterministic forecasting infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-8d-report.txt
+
+ويحتوي:
+- forecast engine architecture
+- projection formulas
+- confidence model
+- trend-direction semantics
+- governance integration points
+- observability additions
+- tests results
+- remaining forecasting limitations
+- readiness assessment قبل advanced predictive intelligence

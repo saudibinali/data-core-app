@@ -1,0 +1,911 @@
+WORKFLOW PHASE 9-B REPORT
+Workload Partitioning & Execution Containment Foundations
+=========================================================
+
+Date:        2026-05-15
+Phase:       P9-B (follows P9-A Tenant Isolation Foundations)
+Status:      COMPLETE — all tests green, typecheck clean
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-B converts the platform from a shared-execution model (where all tenants
+compete for the same scheduler resources without visibility into relative
+workload pressure) into a tenant-contained workload governance architecture
+(where each workspace's execution pressure is formally modeled, scored,
+classified, and made observable — without any automatic throttling).
+
+Before P9-B:
+  • All tenants share a single scheduler BATCH_SIZE=10 cycle equally.
+  • No per-tenant execution pressure measurement.
+  • No noisy-tenant detection — one workspace can hold a disproportionate
+    fraction of the scheduler queue with no visibility or advisory signal.
+  • P3-B MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE=100 is a hard global cap
+    but provides no graduated pressure intelligence.
+  • P8-E comparative intelligence measures workflow risk within a workspace
+    but doesn't expose inter-tenant scheduler fairness implications.
+  • Governance signals (P8-F) detect per-workflow governance issues but
+    have no concept of execution backlog concentration across the platform.
+
+After P9-B:
+  • TenantWorkloadPartition — formal typed containment model per workspace.
+  • PartitionPressureScore — 5-component normalized 0–100 pressure score.
+  • evaluateWorkloadContainment() — pure deterministic containment evaluation.
+  • detectNoisyBehavior() — 4-category noisy-tenant detection.
+  • computeSchedulerWeight() — advisory fairness weight with starvation floor.
+  • classifyAdvisoryPressure() — P8-F governance advisory → pressure mapping.
+  • 4 structured observability events for partition intelligence.
+  • All advisory-only: zero throttling, zero scheduler mutations, zero pauses.
+
+Explicitly excluded:
+  • Distributed schedulers or Kubernetes orchestration
+  • Autoscaling infrastructure or dynamic queue migration
+  • Tenant sharding or shard migration systems
+  • Automatic throttling engines
+  • Multi-region workload partitioning
+  • Distributed workload balancing
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/workload-partition.ts  (~430 lines)
+  Pure deterministic workload containment advisory engine.
+  No DB, no async, no throttling, no scheduler mutations.
+  Six public entry points:
+    evaluateWorkloadContainment(input, context?)      → TenantWorkloadPartition
+    computePartitionPressureScore(input)              → PartitionPressureScore
+    classifyExecutionPressure(totalScore)             → ExecutionPressureLevel
+    computeContainmentStatus(level)                   → ContainmentStatus
+    computeSchedulerWeight(status)                    → number (0.25–1.00)
+    classifyAdvisoryPressure(level?)                  → AdvisoryPressureLevel
+    detectNoisyBehavior(input)                        → NoisyBehaviorResult
+    makePartitionId(workspaceId)                      → string
+
+  Exported types (11):
+    TenantWorkloadPartition, PartitionPressureScore, WorkloadContainmentInput,
+    WorkloadContainmentContext, ExecutionPressureLevel, ContainmentStatus,
+    AdvisoryPressureLevel, NoisyBehaviorCategory, GovernanceAdvisoryLevel
+
+artifacts/api-server/src/lib/workflows/__tests__/workload-partition.test.ts
+  T1–T10 test groups, 51 individual assertions, all passing.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. WORKLOAD PARTITION ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1 Conceptual position in the stack
+
+  Execution Layer (P4-A → P6-A):
+    workflow_executions rows: status = running | waiting_delay | waiting_approval | …
+    Scheduler (P6-A) polls every 15s, BATCH_SIZE=10 — shared across all tenants.
+
+  Rate Limit Layer (P3-B):
+    MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100 — hard execution cap per workspace.
+    Global cap, not pressure-aware. Triggers a 429 before the execution reaches the DB.
+
+  Intelligence Layer (P8-A → P8-F):
+    P8-A: workflow topology + structural complexity
+    P8-B: dependency risk + critical path
+    P8-C: runtimeWeightedComplexity (operational state pressure per workflow)
+    P8-D: trend forecasting (projected complexity trajectory)
+    P8-E: comparative intelligence + hotspotConcentration
+    P8-F: governance signals + advisoryLevel
+
+  Isolation Layer (P9-A):
+    TenantIsolationContext: formal typed boundary per request.
+    enforceTenantIsolation(), validateAnalyticsScope() — fail-closed enforcement.
+
+  Workload Containment Layer (P9-B):  ← NEW
+    TenantWorkloadPartition: per-workspace execution pressure model.
+    evaluateWorkloadContainment(): aggregates execution metrics + P8 intelligence.
+    Advisory-only: output is consumed by governance dashboards and operational
+    consoles. No scheduler mutations.
+
+3.2 Data flow into evaluateWorkloadContainment()
+
+  Source                    Field                           P9-B Use
+  ──────────────────────────────────────────────────────────────────────────────
+  DB (live query)           activeExecutionCount            activeExecutionScore
+  DB (live query)           delayedExecutionCount           delayedBacklogScore +
+                                                            SCHEDULER_BACKLOG_FLOOD
+  P8-E comparative          hotspotConcentrationRatio       hotspotDensityScore +
+                                                            CHRONIC_HOTSPOT_FLOOD
+  P8-E comparative          urgentOrCriticalWorkflowCount   CHRONIC_HOTSPOT_FLOOD
+  P8-C correlation          maxRuntimeWeightedComplexity    complexityScore
+  P8-F governance           advisoryLevel                   advisoryScore +
+                                                            ADVISORY_STORM
+  P8-F governance           totalActiveSignals              ADVISORY_STORM
+  Scheduler (P6-A)          schedulerBatchSize (=10)        SCHEDULER_BACKLOG_FLOOD
+  Platform aggregate        platformActiveExecutions        EXECUTION_MONOPOLY
+
+  All inputs are optional except workspaceId, activeExecutionCount,
+  delayedExecutionCount. Missing fields degrade gracefully (score component = 0).
+
+3.3 Output model: TenantWorkloadPartition
+
+  workspaceId             number       — workspace DB PK
+  partitionId             string       — "part:<workspaceId>"
+  pressureScore           object       — 5-component score (see Section 4)
+  executionPressureLevel  enum         — normal/elevated/high/critical
+  activeExecutionCount    number       — sanitized (negative → 0)
+  delayedExecutionCount   number       — sanitized (negative → 0)
+  advisoryPressureLevel   enum         — none/low/medium/high/critical
+  schedulerWeight         number       — 0.25–1.00 advisory fairness weight
+  containmentStatus       enum         — contained/at_risk/pressured/saturated
+  noisyBehaviorDetected   boolean      — true if ≥1 noisy category detected
+  noisyBehaviorReasons    string[]     — human-readable reason per category
+  noisyBehaviorCodes      enum[]       — NoisyBehaviorCategory codes
+  evaluatedAt             string       — ISO 8601 timestamp
+
+  The full output is JSON-serializable (no class instances, no circular refs,
+  no Promises). Safe for HTTP response bodies, governance logs, and DB storage.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. PARTITION PRESSURE SCORING FORMULAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Score components
+
+  total = activeExecutionScore + delayedBacklogScore + hotspotDensityScore
+        + complexityScore + advisoryScore
+  total = min(total, 100)   [clamped — sum cannot exceed 100]
+
+  ┌─────────────────────────────┬────────┬────────────────────────────────────────┐
+  │ Component                   │ Range  │ Formula                                │
+  ├─────────────────────────────┼────────┼────────────────────────────────────────┤
+  │ activeExecutionScore        │  0–40  │ floor(min(active / 50, 1.0) × 40)     │
+  │ delayedBacklogScore         │  0–25  │ floor(min(delayed / 30, 1.0) × 25)    │
+  │ hotspotDensityScore         │  0–20  │ floor(clamp(ratio, 0, 1) × 20)        │
+  │ complexityScore             │  0–10  │ floor(clamp(maxRWC, 0, 100) / 100×10) │
+  │ advisoryScore               │  0–5   │ see advisory mapping below             │
+  └─────────────────────────────┴────────┴────────────────────────────────────────┘
+
+4.2 Advisory score mapping (P8-F GovernanceAdvisoryLevel → integer)
+
+  informational → 1   (slight baseline signal)
+  advisory      → 2
+  elevated      → 3
+  urgent        → 4
+  critical      → 5   (maximum advisory contribution)
+  undefined     → 0   (no governance data = no advisory signal)
+
+4.3 Weight rationale
+
+  activeExecutionScore (40%) dominates because running executions consume
+  real DB connections, Node.js event loop slots, and locking contention now.
+  High active count is the most immediate operational pressure signal.
+
+  delayedBacklogScore (25%) is secondary: delayed executions don't consume
+  resources now but will flood the scheduler when their wake_at arrives.
+  Deep backlogs indicate future pressure spikes.
+
+  hotspotDensityScore (20%) from P8-E: a high concentration ratio means
+  a large fraction of the workspace's workflows are at dominant risk.
+  This amplifies the relevance of active/delayed counts — high pressure
+  on already-critical workflows is more dangerous than on healthy ones.
+
+  complexityScore (10%) from P8-C: runtimeWeightedComplexity reflects
+  operational state complexity. A workspace with 5 running executions at
+  maxRWC=100 is materially more pressured than one with 5 at maxRWC=10.
+
+  advisoryScore (5%) from P8-F: the governance advisory level is already
+  a derived signal (downstream of errors, escalations, SLA violations).
+  It contributes a small but non-zero weight to ensure advisory escalations
+  are surfaced in the partition score even when execution counts are low.
+
+4.4 Saturation point (score = 100)
+
+  Minimum inputs needed to reach total = 100:
+    active = 50   → activeScore = 40
+    delayed = 30  → delayedScore = 25
+    hotspot = 1.0 → hotspotScore = 20
+    maxRWC = 100  → complexityScore = 10
+    critical      → advisoryScore = 5
+    total = 100 ✓
+
+  In practice, total = 100 requires ALL 5 components at maximum simultaneously.
+  A workspace with 50 active executions + no backlog + no hotspot pressure
+  scores only 40 (elevated), not critical. This prevents false-positive
+  critical classifications for healthy workspaces with temporary spikes.
+
+4.5 Floor behavior and NaN safety
+
+  All component formulas use Math.floor() → always integer outputs.
+  Input sanitization: Math.max(0, Math.floor(count || 0)) applied to
+  activeExecutionCount and delayedExecutionCount.
+  Negative inputs → treated as 0. NaN inputs → treated as 0.
+  hotspotConcentrationRatio and maxRuntimeWeightedComplexity are clamped
+  to their valid ranges before scoring.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. CONTAINMENT SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1 executionPressureLevel classification
+
+  ┌─────────────────┬──────────┬────────────────────────────────────────────────┐
+  │ Level           │ Score    │ Interpretation                                 │
+  ├─────────────────┼──────────┼────────────────────────────────────────────────┤
+  │ normal          │   0–25   │ Workspace execution load is well within bounds │
+  │ elevated        │  26–50   │ Pressure is building; monitor for growth       │
+  │ high            │  51–75   │ Significant pressure; governance attention due  │
+  │ critical        │  76–100  │ Near-saturated; scheduler fairness at risk      │
+  └─────────────────┴──────────┴────────────────────────────────────────────────┘
+
+5.2 containmentStatus (derived from executionPressureLevel)
+
+  ┌─────────────────┬──────────────────┬────────────────────────────────────────┐
+  │ pressureLevel   │ containmentStatus│ Governance implication                 │
+  ├─────────────────┼──────────────────┼────────────────────────────────────────┤
+  │ normal          │ contained        │ Normal operations, no intervention      │
+  │ elevated        │ at_risk          │ Watch list — pressure trending up       │
+  │ high            │ pressured        │ Advisory: scheduler fairness at risk    │
+  │ critical        │ saturated        │ Advisory: immediate attention needed    │
+  └─────────────────┴──────────────────┴────────────────────────────────────────┘
+
+  Note: "saturated" does NOT mean the scheduler is blocked. It is an advisory
+  signal that this workspace is consuming a disproportionate fraction of
+  scheduler capacity relative to the platform's configured limits.
+
+5.3 advisoryPressureLevel (derived from P8-F advisoryLevel)
+
+  Maps the P8-F governance advisory system into the workload containment model:
+
+  ┌────────────────────┬──────────────────┬──────────────────────────────────────┐
+  │ P8-F advisoryLevel │ P9-B advisory    │ Meaning                              │
+  ├────────────────────┼──────────────────┼──────────────────────────────────────┤
+  │ informational      │ none             │ No advisory pressure                 │
+  │ advisory           │ low              │ Governance attention warranted        │
+  │ elevated           │ medium           │ Governance intervention recommended   │
+  │ urgent             │ high             │ Governance urgency — escalate         │
+  │ critical           │ critical         │ Governance crisis — immediate action  │
+  │ (absent)           │ none             │ No governance data available          │
+  └────────────────────┴──────────────────┴──────────────────────────────────────┘
+
+  advisoryPressureLevel and executionPressureLevel are independent dimensions.
+  A workspace can have:
+    executionPressureLevel = "normal" + advisoryPressureLevel = "critical"
+    (few active executions, but governance signals are at critical severity)
+  or:
+    executionPressureLevel = "critical" + advisoryPressureLevel = "none"
+    (many active executions, but no governance anomalies detected)
+
+  The combined partition model lets governance consoles show both dimensions
+  separately in the workspace health panel.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. SCHEDULER FAIRNESS FOUNDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1 Advisory scheduler weight model
+
+  computeSchedulerWeight(containmentStatus) → number
+
+  ┌─────────────────┬───────────────┬────────────────────────────────────────────┐
+  │ containment     │ weight        │ Advisory interpretation                    │
+  ├─────────────────┼───────────────┼────────────────────────────────────────────┤
+  │ contained       │ 1.00          │ Full scheduler share — no adjustment       │
+  │ at_risk         │ 0.75          │ Slightly reduced share advisory             │
+  │ pressured       │ 0.50          │ Half share recommended by governance        │
+  │ saturated       │ 0.25          │ Minimum share — no starvation floor         │
+  └─────────────────┴───────────────┴────────────────────────────────────────────┘
+
+  NO STARVATION GUARANTEE:
+    schedulerWeight is NEVER below 0.25.
+    Even under critical saturation, a workspace retains an advisory minimum
+    scheduler share. A governance console or future scheduler integration
+    that respects these weights MUST NOT reduce any tenant's actual slot
+    allocation below the minimum starvation floor.
+
+  ADVISORY-ONLY NOTE:
+    This weight is returned as part of TenantWorkloadPartition for
+    governance dashboards and future scheduler fairness infrastructure.
+    It does NOT currently modify the P6-A scheduler's behavior.
+    The P6-A scheduler processes executions in wake_at order, BATCH_SIZE=10
+    per cycle, with no per-tenant weighting. schedulerWeight is the formal
+    advisory recommendation for when a weighted-fair-queue scheduler is built.
+
+6.2 Fairness properties expressed in the model
+
+  NO INFINITE NOISY-TENANT DOMINANCE:
+    Even a workspace detected as EXECUTION_MONOPOLY receives schedulerWeight
+    based on its containmentStatus, not on the monopoly detection alone.
+    The monopoly is surfaced as noisyBehaviorCode + observability event.
+    A future fair scheduler consuming these weights would automatically
+    reduce the noisy tenant's slot allocation without removing it entirely.
+
+  NO TENANT STARVATION BY DESIGN:
+    The weight floor of 0.25 is a first-class design constraint.
+    Any future scheduler that reads TenantWorkloadPartition.schedulerWeight
+    must respect this floor. The P9-B engine never returns weight < 0.25.
+
+  PROPORTIONAL REDUCTION:
+    Weights are steps (1.00, 0.75, 0.50, 0.25) rather than continuous.
+    This is intentional: fair-queue schedulers that read advisory weights
+    should apply them in discrete priority tiers, not attempt continuous
+    interpolation which would require more DB reads to be meaningful.
+
+6.3 Relationship to P3-B rate limit
+
+  P3-B (MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE=100) is a hard cap.
+    • Enforced in engine.ts before execution begins.
+    • Returns HTTP 429 if exceeded.
+    • Not pressure-aware — does not graduate.
+
+  P9-B schedulerWeight is an advisory governance signal.
+    • Evaluated after executions are already running.
+    • Used for observability and future fair-queue scheduling.
+    • Never triggers a 429 or execution rejection.
+
+  Together they form a two-layer workload governance model:
+    Layer 1 (P3-B): hard rate cap prevents burst floods per tenant.
+    Layer 2 (P9-B): soft advisory weight surfaces sustained pressure patterns
+                    for governance intervention and future scheduler fairness.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. NOISY TENANT DETECTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1 The 4 detection categories
+
+  EXECUTION_MONOPOLY
+    Condition:  active > 0 AND platformActiveExecutions > 0 AND
+                active / platformActiveExecutions > 0.50
+    Threshold:  tenant holds more than 50% of platform active executions.
+    Requires:   platformActiveExecutions to be provided in input.
+                If absent, detection is skipped (not falsely triggered).
+    Signal:     tenant is consuming a dominant fraction of the shared
+                execution pipeline, leaving less than 50% for all other tenants.
+    Advisory:   scheduler fairness at risk for all other workspaces.
+
+  SCHEDULER_BACKLOG_FLOOD
+    Condition:  delayedExecutionCount > schedulerBatchSize × 5
+    Default:    schedulerBatchSize = 10 (from P6-A scheduler.ts)
+    Threshold:  delayed > 50 with default batch size.
+    Rationale:  At BATCH_SIZE=10, a workspace with 50 delayed executions
+                requires 5 full scheduler cycles just to clear its own queue.
+                During those cycles, other workspaces' delayed executions
+                are delayed further — indirect starvation via queue saturation.
+    Advisory:   shows estimated minimum cycle count to clear (ceil(delayed/batchSize)).
+
+  ADVISORY_STORM
+    Condition:  totalActiveSignals > 10 AND advisoryLevel ∈ {urgent, critical}
+    Threshold:  11+ active governance signals with high-severity advisory.
+    Rationale:  A governance advisory storm indicates the workspace is
+                generating unresolvable signal volume. In combination with
+                urgent/critical advisory level, this means operational teams
+                are overwhelmed and cannot respond to governance alerts faster
+                than they're generated.
+    Note:       High signal count alone (with advisory = "advisory" or "elevated")
+                is NOT a noisy behavior — it may just reflect complex operations.
+                The critical signal requires BOTH high count AND high severity.
+
+  CHRONIC_HOTSPOT_FLOOD
+    Condition:  urgentOrCriticalWorkflowCount ≥ 3 AND concentrationRatio > 0.50
+    Threshold:  3+ workflows at urgent/critical + >50% of workspace at dominant risk.
+    Source:     P8-E hotspotConcentration (concentrationRatio, urgentOrCriticalCount).
+    Rationale:  When >50% of a workspace's workflows are at dominant risk AND
+                3+ individual workflows are confirmed at urgent/critical priority,
+                it indicates systemic governance degradation — not isolated
+                workflow issues but workspace-wide operational failure concentration.
+    Advisory:   distinguishes from temporary spikes (1–2 workflows briefly critical).
+
+7.2 Multi-category noisy detection
+
+  All 4 categories are evaluated independently in each evaluateWorkloadContainment()
+  call. A workspace can have 0 to 4 categories detected simultaneously.
+
+  noisyBehaviorCodes:   all detected category codes (array, order = detection order)
+  noisyBehaviorReasons: one human-readable string per detected category
+  noisyBehaviorDetected: true if codes.length > 0
+
+  Example: a workspace can simultaneously be:
+    EXECUTION_MONOPOLY (holds 70% of platform active executions)
+    SCHEDULER_BACKLOG_FLOOD (200 delayed executions)
+    ADVISORY_STORM (15 critical signals)
+    CHRONIC_HOTSPOT_FLOOD (5 urgent workflows, 80% concentration)
+  → noisyBehaviorCodes = ["EXECUTION_MONOPOLY", "SCHEDULER_BACKLOG_FLOOD",
+                          "ADVISORY_STORM", "CHRONIC_HOTSPOT_FLOOD"]
+  → noisyBehaviorDetected = true
+  → schedulerWeight = 0.25 (based on containmentStatus = "saturated")
+
+7.3 Detection without platformActiveExecutions
+
+  EXECUTION_MONOPOLY requires platformActiveExecutions to be provided.
+  This is a deliberate design choice: it is wrong to infer monopoly behavior
+  from a single workspace's count alone (100 active executions is not a
+  monopoly on a platform with 10,000 active executions).
+
+  platformActiveExecutions must be fetched by the route handler with:
+    SELECT COUNT(*) FROM workflow_executions WHERE status = 'running'
+    (no workspace filter — platform-wide aggregate)
+
+  If this query is too expensive, it can be omitted and EXECUTION_MONOPOLY
+  detection simply does not fire. All other noisy categories function without it.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1 The 4 structured observability events
+
+  All events are emitted via logger.info() with prefix "[workload] P9-B:".
+  All 4 events carry the required fields:
+    workspaceId, partitionId, executionPressureLevel, schedulerWeight,
+    containmentStatus, action.
+
+  A) tenant_partition_pressure_evaluated  (always emitted)
+    When:   every evaluateWorkloadContainment() call — regardless of pressure level.
+    Fields: workspaceId, partitionId, executionPressureLevel, schedulerWeight,
+            containmentStatus, pressureTotal, activeExecutionScore,
+            delayedBacklogScore, hotspotDensityScore, complexityScore,
+            advisoryScore, activeExecutionCount, delayedExecutionCount,
+            action="evaluated", evaluatedAt
+    Use:    per-request partition pressure audit trail.
+            Enables time-series pressure trend analysis per workspace.
+
+  B) tenant_noisy_behavior_detected  (conditional — only when detected)
+    When:   noisyBehaviorDetected = true (≥1 noisy category found).
+    Fields: workspaceId, partitionId, executionPressureLevel, schedulerWeight,
+            containmentStatus, noisyBehaviorCodes, noisyBehaviorReasonCount,
+            noisyBehaviorReasons, action="advisory"
+    Use:    noisy-tenant alerting. Search for this event to identify workspaces
+            generating disproportionate scheduler pressure.
+            Group by: workspaceId, noisyBehaviorCodes.
+
+  C) scheduler_fairness_risk_detected  (conditional — containment != "contained")
+    When:   containmentStatus ∈ {at_risk, pressured, saturated}.
+    Fields: workspaceId, partitionId, executionPressureLevel, schedulerWeight,
+            containmentStatus, fairnessRisk (moderate/high/critical),
+            platformActiveExecutions, platformDelayedBacklog,
+            schedulerBatchSize, action="advisory"
+    Use:    scheduler fairness monitoring. When multiple workspaces are
+            at at_risk or above simultaneously, the platform's scheduler is
+            at systemic fairness risk (not just one noisy tenant).
+            fairnessRisk mapping:
+              at_risk    → "moderate"
+              pressured  → "high"
+              saturated  → "critical"
+
+  D) tenant_execution_containment_assessed  (always emitted)
+    When:   every evaluateWorkloadContainment() call — summary event.
+    Fields: workspaceId, partitionId, executionPressureLevel, schedulerWeight,
+            containmentStatus, noisyBehaviorDetected, noisyBehaviorCodeCount,
+            advisoryPressureLevel, totalActiveSignals, hotspotConcentrationRatio,
+            action="advisory", evaluatedAt
+    Use:    per-workspace containment health summary.
+            Combines execution pressure + advisory pressure + noisy detection
+            in a single event for governance dashboard ingestion.
+
+8.2 Event emission conditions summary
+
+  Pressure level   A (pressure) B (noisy) C (fairness) D (containment)
+  ─────────────────────────────────────────────────────────────────────
+  normal           ✓            if any    ✗            ✓
+  elevated         ✓            if any    ✓ (moderate) ✓
+  high             ✓            if any    ✓ (high)     ✓
+  critical         ✓            if any    ✓ (critical) ✓
+
+  Events A and D are always emitted — they form the mandatory audit pair.
+  Event B fires only when noisy behavior is detected.
+  Event C fires whenever containmentStatus leaves "contained".
+
+8.3 Monitoring queries (structured log filtering)
+
+  Find all noisy tenants in last hour:
+    event = "tenant_noisy_behavior_detected"
+    Filter by: workspaceId, noisyBehaviorCodes
+
+  Find scheduler fairness risk across platform:
+    event = "scheduler_fairness_risk_detected"
+    fairnessRisk = "critical"
+    Group by: workspaceId, containmentStatus
+
+  Track pressure score trend for a workspace:
+    event = "tenant_partition_pressure_evaluated"
+    workspaceId = <id>
+    Select: pressureTotal, evaluatedAt (time series)
+
+  Find workspaces at critical containment:
+    event = "tenant_execution_containment_assessed"
+    containmentStatus = "saturated"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1 Current integration status
+
+  evaluateWorkloadContainment() is a pure engine function.
+  It is NOT yet called from any route handler.
+  P9-B delivers the engine layer; route integration is the next step.
+
+9.2 Planned route integrations
+
+  A) GET /workflows/comparative (P8-E)
+    Current: returns comparative risk rankings, hotspotConcentration.
+    Addition: call evaluateWorkloadContainment() with the hotspot data
+              already available in the comparative response.
+    New response field: workloadPartition (TenantWorkloadPartition)
+    DB queries needed:
+      - COUNT active executions for this workspace
+      - COUNT delayed executions for this workspace
+      (These are cheap indexed queries: WHERE workspaceId=? AND status=?)
+
+  B) GET /workflows/governance/signals (P8-F)
+    Current: returns governance signals + advisoryLevel.
+    Addition: call evaluateWorkloadContainment() with advisoryLevel +
+              totalSignals already available in the response.
+    New response field: workloadPartition (TenantWorkloadPartition)
+
+  C) GET /platform/workload (new, super_admin only)
+    Proposed: returns TenantWorkloadPartition[] for all workspaces.
+    DB query: aggregate active + delayed counts per workspaceId.
+    Enables: platform-wide scheduler fairness dashboard.
+    Requires: EXECUTION_MONOPOLY detection (needs platformActiveExecutions).
+    Note: super_admin route — bypasses workspace isolation (by design).
+
+9.3 Comparative intelligence integration
+
+  P8-E already provides:
+    hotspotConcentration.concentrationRatio → hotspotConcentrationRatio input
+    hotspotConcentration.urgentOrCriticalCount → urgentOrCriticalWorkflowCount
+    ranked workflows' runtimeWeightedComplexity → compute max for complexityScore
+
+  These values are already in the P8-E route response. No additional DB queries
+  needed for the hotspot, complexity, and advisory components of the pressure score.
+
+9.4 Governance signals integration
+
+  P8-F already provides:
+    governanceResult.advisoryLevel → advisoryLevel input
+    governanceResult.totalSignals → totalActiveSignals input
+
+  These are already computed in the P8-F governance route. The partition engine
+  can be called immediately after the governance engine call with these values.
+
+9.5 Advisory system output format
+
+  TenantWorkloadPartition is designed to be embedded directly in existing
+  route responses as a governance enrichment field:
+
+  GET /workflows/governance/signals response + workloadPartition:
+  {
+    workspaceId: 7,
+    signals: [...],
+    advisoryLevel: "elevated",
+    workloadPartition: {
+      partitionId: "part:7",
+      executionPressureLevel: "high",
+      containmentStatus: "pressured",
+      schedulerWeight: 0.50,
+      noisyBehaviorDetected: false,
+      pressureScore: { total: 58, ... },
+      ...
+    }
+  }
+
+9.6 Super-admin workload dashboard
+
+  The P9-B model supports a planned GET /platform/workload endpoint that
+  the super-admin workspace detail page can call to show:
+    - Per-workspace execution pressure levels
+    - Scheduler weight distribution across workspaces
+    - Noisy tenant flags
+    - Platform-wide fairness risk summary
+
+  Input data for this endpoint:
+    SELECT workspaceId, COUNT(*) FILTER (WHERE status='running')  AS active,
+           COUNT(*) FILTER (WHERE status='waiting_delay') AS delayed
+    FROM   workflow_executions
+    GROUP  BY workspaceId;
+
+  Then call evaluateWorkloadContainment() for each workspace row,
+  passing platformActiveExecutions = SUM(active) for monopoly detection.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. SAFETY RULES VERIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Invariant                         Status   Verification
+──────────────────────────────────────────────────────────────────────────────
+Advisory-only (no throttling)     ✅ PASS  Engine returns pure data object.
+                                           No HTTP 429, no DB UPDATE, no state.
+
+Never pauses executions           ✅ PASS  Engine contains zero DB writes.
+                                           No status transitions triggered.
+
+Never mutates scheduler           ✅ PASS  scheduler.ts not imported or called.
+                                           schedulerWeight is advisory metadata.
+
+No starvation (weight ≥ 0.25)     ✅ PASS  computeSchedulerWeight() enforced by
+                                           exhaustive switch — "saturated" → 0.25.
+                                           Tested in T8 (4 assertions).
+
+No NaN propagation                ✅ PASS  Input sanitized: Math.max(0, floor(n||0)).
+                                           Tested in T10 (negative input → 0).
+
+Deterministic output              ✅ PASS  Same input + same time → same JSON.
+                                           Tested in T7 (5 assertions).
+
+Read-only (input not mutated)     ✅ PASS  Input snapshot comparison in T10.
+                                           Engine uses only reads on input fields.
+
+JSON-serializable output          ✅ PASS  No class instances, no circular refs.
+                                           Tested in T7 + T10.
+
+No async / no side effects        ✅ PASS  No Promise, no setTimeout, no DB calls.
+                                           Tested in T9 (Promise check).
+
+Missing optional fields safe      ✅ PASS  All optional fields default to 0/none.
+                                           Empty partition evaluates to score=0.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-B test groups (26th test file in suite):
+
+  T1   partition pressure scoring deterministic        (6 assertions)
+       - zero input yields zero total pressure score
+       - active execution score saturates at 40 for count ≥ 50
+       - delayed backlog score saturates at 25 for count ≥ 30
+       - hotspot density score = floor(ratio × 20) for 0.5 and 1.0
+       - advisory score maps all 5 governance advisory levels correctly
+       - total score clamped to maximum 100
+
+  T2   noisy tenant detection stable                   (5 assertions)
+       - clean workspace produces detected=false, empty codes
+       - EXECUTION_MONOPOLY triggered when tenant holds >50% of platform active
+       - EXECUTION_MONOPOLY skipped when platformActiveExecutions absent
+       - ADVISORY_STORM triggered with 15 signals + urgent advisory
+       - ADVISORY_STORM not triggered with high count + low advisory
+
+  T3   scheduler fairness semantics valid              (5 assertions)
+       - schedulerWeight = 1.00 for contained workspace
+       - schedulerWeight = 0.75 for at_risk workspace
+       - schedulerWeight = 0.50 for pressured workspace
+       - schedulerWeight = 0.25 for saturated workspace — never zero
+       - classifyAdvisoryPressure maps all 5 levels + undefined correctly
+
+  T4   high execution pressure classified correctly    (6 assertions)
+       - classifyExecutionPressure: 0–25 → normal
+       - classifyExecutionPressure: 26–50 → elevated
+       - classifyExecutionPressure: 51–75 → high
+       - classifyExecutionPressure: 76–100 → critical
+       - active=50 + delayed=15 → high or critical pressure
+       - active=50+delayed=30+hotspot=1.0+maxRWC=100+critical → total=100
+
+  T5   chronic backlog tenant detection                (5 assertions)
+       - SCHEDULER_BACKLOG_FLOOD triggered when delayed > 50 (10×5)
+       - SCHEDULER_BACKLOG_FLOOD not triggered at exactly 50 (boundary)
+       - CHRONIC_HOTSPOT_FLOOD triggered with 4 urgent + 65% concentration
+       - CHRONIC_HOTSPOT_FLOOD not triggered with 5 urgent but low concentration
+       - delayed=30 saturates delayedBacklogScore at 25
+
+  T6   advisory concentration scoring stable           (6 assertions)
+       - concentration = 1.0 → hotspotDensityScore = 20
+       - concentration = 0.25 → hotspotDensityScore = 5
+       - concentration ratio clamped above 1.0 and below 0.0
+       - complexityScore = floor(maxRWC/100 × 10) verified at 80, 50, 100
+       - critical advisory adds exactly 5 to pressure score
+
+  T7   partition serialization deterministic           (5 assertions)
+       - full JSON round-trip preserves all fields
+       - no undefined values in serialized output
+       - evaluatedAt is valid ISO 8601
+       - partitionId format "part:<workspaceId>" for workspaceIds 1, 7, 99
+       - same input + same time → identical JSON output
+
+  T8   no tenant starvation semantics                  (4 assertions)
+       - extreme pressure input yields schedulerWeight = 0.25 (not < 0.25)
+       - minimum floor 0.25 holds regardless of noisy behavior count
+       - noisy tenant detected but weight still ≥ 0.25
+       - clean workspace always gets weight 1.0
+
+  T9   no runtime throttling occurs                    (4 assertions)
+       - result is advisory data object (no blocked/throttled/paused fields)
+       - EXECUTION_MONOPOLY detection does not mutate input execution counts
+       - critical pressure: 5 idempotent calls produce identical output
+       - partition result has no async capabilities (no .then())
+
+  T10  partition engine remains read-only              (5 assertions)
+       - input object not mutated after evaluation
+       - component scores sum correctly (no phantom contribution)
+       - noisyBehaviorReasons arrays independent between calls
+       - negative execution counts sanitized to zero — no NaN
+       - result is JSON-serializable with no class instances
+
+Full test suite result (26 test files):
+  Tests:      1498 passed (1498)
+  Test Files: 26 passed (26)
+  Duration:   ~12.3s
+  TypeScript: clean (zero errors in api-server, typecheck:libs clean)
+
+Cumulative test counts by phase:
+  P8-A (topology)              +45  →  ~1140
+  P8-B (dependency)            +50  →   1186
+  P8-C (correlation)           +52  →   1238
+  P8-D (forecast)              +56  →   1294
+  P8-E (comparative)           +51  →   1345
+  P8-F (governance signals)    +50  →   1395
+  P9-A (tenant isolation)      +52  →   1447
+  P9-B (workload partition)    +51  →   TOTAL: 1498
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. REMAINING WORKLOAD-SCALING GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) Route integration not yet done
+   evaluateWorkloadContainment() is built and tested but not yet called
+   from any route handler. P9-B delivers the engine layer only.
+   Next step: integrate into GET /workflows/comparative and
+   GET /workflows/governance/signals as a partition enrichment field.
+
+B) No GET /platform/workload endpoint
+   Platform-wide partition intelligence requires a super_admin endpoint
+   that aggregates active/delayed counts per workspace and calls the
+   partition engine for each. Not yet implemented.
+   Proposed: GET /platform/workload → WorkloadPartitionSummary[]
+   Requires: platform-aggregate DB query (COUNT GROUP BY workspaceId).
+
+C) No OpenAPI spec for partition fields
+   TenantWorkloadPartition is not yet defined in openapi.yaml.
+   Adding it to the spec and running codegen will generate the Zod schema
+   and React Query hooks for the governance console frontend.
+
+D) No DB persistence for partition history
+   Partition evaluations are emitted to pino logs only.
+   A tenant_workload_snapshots table (workspaceId, pressureTotal,
+   executionPressureLevel, containmentStatus, noisyBehaviorDetected,
+   evaluatedAt) would enable:
+     - Historical pressure trend analysis per workspace
+     - Chronic noisy-tenant detection (sustained detection over time)
+     - Scheduler fairness health score over rolling windows
+
+E) No integration with P9-A TenantIsolationContext
+   evaluateWorkloadContainment() takes workspaceId directly.
+   It should be called AFTER buildTenantIsolationContext() in route handlers,
+   passing isoCtx.workspaceId as the workspaceId input.
+   This ensures workload partition intelligence always operates within a
+   formally validated tenant isolation context.
+
+F) schedulerWeight not yet consumed by P6-A scheduler
+   The P6-A scheduler processes executions in wake_at order with no
+   per-tenant weighting. schedulerWeight is advisory only.
+   A weighted-fair-queue extension to the P6-A scheduler would:
+     - Fetch partition weights at the start of each poll cycle
+     - Apply weighted selection across tenant backlog queues
+     - Respect the 0.25 starvation floor
+   This is explicitly out of scope for P9-B (advisory foundations only).
+
+G) EXECUTION_MONOPOLY detection requires a platform-wide aggregate query
+   This is a cross-workspace query (no wsCond) — can only be issued by
+   super_admin routes or a scheduler-internal metric collector.
+   Regular workspace route handlers should NOT issue this query.
+   A periodic scheduled metric (separate from the main scheduler cycle)
+   could cache the platform aggregate every 60s for use in partition scoring.
+
+H) No formal partition budget model
+   TenantWorkloadPartition describes current state but has no concept of
+   allocated budget vs. consumed budget.
+   A future TenantWorkloadBudget model would define:
+     - maxActiveExecutions (per-workspace soft ceiling)
+     - maxDelayedBacklog (per-workspace backlog soft ceiling)
+     - budgetUtilizationRatio (current / max)
+   This would replace the current normalized scoring with budget-relative scoring.
+
+I) No cross-phase temporal correlation
+   Current scoring treats all inputs as a point-in-time snapshot.
+   A temporal model could detect:
+     - Rapidly growing backlog (delta over 15s cycles)
+     - Pressure spikes vs. sustained pressure (instantaneous vs. rolling average)
+     - Advisory level escalation velocity
+   This requires time-series data (not yet in the DB schema).
+
+J) Governance console not yet updated
+   The ops-platform frontend does not yet have a workload partition panel.
+   The existing governance signals page (P8-F) and comparative intelligence
+   page (P8-E) would both benefit from workload partition enrichment cards
+   showing: execution pressure level, scheduler weight, noisy behavior badges.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. READINESS ASSESSMENT BEFORE SCALING ORCHESTRATION PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is now in place (P8-A through P9-B):
+
+  ✅ 7-engine intelligence pipeline: topology → dependency → correlation →
+     forecast → comparative → governance signals → tenant isolation
+  ✅ TenantIsolationContext: formal workspace boundary validation (P9-A)
+  ✅ TenantWorkloadPartition: formal per-workspace execution pressure model
+  ✅ PartitionPressureScore: 5-component normalized scoring (0–100)
+  ✅ Execution pressure classification: normal/elevated/high/critical
+  ✅ Containment status: contained/at_risk/pressured/saturated
+  ✅ Advisory scheduler fairness weights: 1.00/0.75/0.50/0.25
+  ✅ No-starvation floor: weight never below 0.25
+  ✅ 4-category noisy-tenant detection: MONOPOLY/FLOOD/STORM/HOTSPOT
+  ✅ P8-F + P8-E + P8-C feed into partition scoring (already computed)
+  ✅ 4 structured observability events with all required fields
+  ✅ 51 workload partition tests (T1–T10), all passing
+  ✅ 1498 total tests across 26 files — all green
+
+What P9-B enables for scaling orchestration:
+
+  A) Weighted Fair Queue Scheduler (P10-A)
+    All semantic prerequisites now in place:
+      - TenantWorkloadPartition.schedulerWeight (advisory weight per workspace)
+      - ContainmentStatus (4 priority tiers for queue selection)
+      - No-starvation guarantee (0.25 floor by design)
+    The P6-A scheduler's inner loop can be extended to:
+      1. Group wake_at-due executions by workspaceId
+      2. Sort workspace groups by schedulerWeight (desc) for cycle priority
+      3. Allocate BATCH_SIZE slots proportionally to weights
+    This extends P6-A without replacing it — backward-compatible evolution.
+
+  B) Adaptive BATCH_SIZE per workspace (P10-B)
+    schedulerBatchSize is currently a global constant (10).
+    With TenantWorkloadPartition available, BATCH_SIZE could become
+    per-workspace: contained=3, at_risk=3, pressured=2, saturated=1
+    (out of a global BATCH_SIZE=10) — proportional slot allocation.
+    P9-B already passes schedulerBatchSize into SCHEDULER_BACKLOG_FLOOD
+    detection, making this a small extension of existing logic.
+
+  C) Partition-enriched governance routes (P9-C)
+    Both GET /workflows/comparative and GET /workflows/governance/signals
+    have all the data needed to call evaluateWorkloadContainment() in-flight.
+    No new DB queries required beyond what these routes already issue.
+    One route integration PR adds workloadPartition to both responses.
+
+  D) Platform workload dashboard (P9-D, super_admin)
+    The GET /platform/workload endpoint provides:
+      - Per-workspace TenantWorkloadPartition summaries
+      - Platform-wide fairness health (distribution of containment statuses)
+      - Noisy tenant identification
+    Prerequisite: platform-aggregate active/delayed count query (one SQL line).
+
+  E) Governance console frontend enrichment (P9-E)
+    The ops-platform governance page can display workload partition cards
+    once the route integration is done (P9-C).
+    Fields already in TenantWorkloadPartition: all needed for UI badges,
+    pressure bars, scheduler weight indicators.
+
+Key workload containment questions that P9-B resolves:
+
+  Q: Does the platform have visibility into which workspace is generating
+     the most scheduler pressure?
+  A: Yes. evaluateWorkloadContainment() + EXECUTION_MONOPOLY detection +
+     scheduler_fairness_risk_detected events provide full visibility.
+
+  Q: Can one workspace permanently degrade other workspaces' execution latency?
+  A: Currently yes (scheduler is shared, BATCH_SIZE applies globally).
+     P9-B provides the advisory intelligence layer needed to detect and
+     surface this. A future weighted scheduler (P10-A) would then enforce
+     proportional fairness at the execution level.
+
+  Q: Is the starvation guarantee formal and tested?
+  A: Yes. computeSchedulerWeight() enforces minimum 0.25. Tested in T8
+     (4 assertions including extreme pressure input).
+
+  Q: Does detecting a noisy tenant cause any disruption to that tenant?
+  A: No. Detection is advisory-only. Zero effect on execution behavior.
+     The tenant's executions continue to run unchanged.
+
+  Q: Can the partition engine be safely called on every governance request?
+  A: Yes. It is pure, sub-millisecond, deterministic. No DB calls, no async.
+     Adds negligible latency to any route that calls it.

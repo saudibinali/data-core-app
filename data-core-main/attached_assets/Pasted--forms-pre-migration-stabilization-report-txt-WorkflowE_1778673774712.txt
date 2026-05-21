@@ -1,0 +1,118 @@
+راجع forms-pre-migration-stabilization-report.txt ثم نفّذ فقط تحديث WorkflowEngine المطلوب لدعم forms migration بدون أي refactor واسع أو تغيير معماري إضافي.
+
+عنوان المهمة:
+WORKFLOWENGINE SECONDARY HINT MATCHING — Forms Migration Blocker
+
+المهمة الحالية:
+إضافة دعم secondary trigger matching داخل WorkflowEngine باستخدام:
+workflowEventHint
+
+حتى تصبح forms migration ممكنة بدون كسر workflows الحالية.
+
+المشكلة الحالية:
+WorkflowEngine يطابق فقط:
+payload.event
+
+لكن بعد forms migration:
+كل الفورمز ستطلق:
+EVENT_TYPES.FORM_SUBMITTED
+
+وسيتم تمرير:
+workflowEventHint
+
+داخل payload/metadata للحفاظ على workflow routing الحالي.
+
+بدون هذا التحديث:
+أي workflow يعتمد على:
+- hr.form.submitted
+- approvals.form.submitted
+- hr.{slug}.submitted
+سيتوقف بعد forms migration.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- engine.ts
+- handleEvent()
+- EventPayload structure
+- forms-pre-migration-stabilization-report.txt
+- workflow_definitions.trigger_event usage
+- bridge.ts
+
+2- أضف secondary matching logic داخل:
+WorkflowEngine.handleEvent()
+
+المطلوب:
+
+المرحلة الأولى:
+- match على payload.event كالمعتاد
+
+المرحلة الثانية:
+إذا:
+payload.event === "form.submitted"
+
+قم أيضًا بمحاولة match على:
+workflowEventHint
+
+القادم من:
+- payload.data.workflowEventHint
+أو
+- metadata equivalent
+حسب التصميم الحالي.
+
+3- يجب أن يكون:
+- backward compatible بالكامل
+- بدون تغيير behavior الحالي للأحداث الأخرى
+- بدون breaking changes
+
+4- إذا وُجدت workflows matching على:
+- form.submitted
+- workflowEventHint
+
+بنفس الوقت:
+قم بعمل deduplication حسب workflow id.
+
+5- لا تغيّر:
+- WorkflowEngine execution logic
+- queueing
+- retry behavior
+- workflow schema
+- workflow DSL
+- bridge behavior
+
+6- لا تضف:
+- new workflow concepts
+- dynamic routing systems
+- event transformations
+
+7- أضف comments واضحة تشرح:
+- primary event matching
+- secondary hint matching
+- لماذا تم إضافة workflowEventHint
+- الفرق بين canonical event type و workflow routing hint
+
+8- أضف lightweight logging إذا كان مفيد لتتبع:
+- primary matches
+- hint matches
+- deduplicated workflows
+
+بدون noisy logs.
+
+9- تأكد من:
+- no duplicate workflow execution
+- no regression للأحداث الحالية
+- forms workflows تبقى متوافقة
+- hr dynamic services تبقى تعمل
+
+10- في النهاية:
+أنشئ ملف TXT باسم:
+
+workflowengine-hint-matching-report.txt
+
+ويحتوي:
+- جميع التعديلات المنفذة
+- كيف أصبح matching يعمل
+- أي workflows أصبحت مدعومة
+- deduplication behavior
+- أي risks متبقية
+- readiness assessment قبل forms migration

@@ -1,0 +1,153 @@
+================================================================================
+WORKFLOW PHASE 16-G — Tenant Subscription Visibility
+================================================================================
+Status: COMPLETE
+Date: 2026-05-18
+Scope: Tenant-facing read-only visibility only (no mutations, payments, or enforcement)
+
+--------------------------------------------------------------------------------
+1) TENANT-FACING READ-ONLY APIs
+--------------------------------------------------------------------------------
+
+Router: artifacts/api-server/src/routes/tenant-subscription.ts
+
+GET /tenant/subscription/summary
+  Permission: tenant.subscription.read
+  Returns (tenant-safe):
+    subscriptionStatus, planName, startDate, endDate, renewalDate,
+    gracePeriodEndsAt, accessMode, readOnlyMode, readOnlyReason,
+    daysUntilEnd, daysPastEnd, recommendedStatus (advisory label only),
+    supportContact (billing contact name/email/phone/role when configured)
+
+GET /tenant/subscription/entitlements
+  Permission: tenant.subscription.entitlements.read OR tenant.subscription.read
+  Returns modules with enabled status and feature flags (no source/internal IDs)
+
+GET /tenant/subscription/quotas
+  Permission: tenant.subscription.quotas.read OR tenant.subscription.read
+  Returns quotaKey, label, limitValue, currentUsage, usagePercent, status,
+  warningThresholdPercent, unit (no quotaLimitId, source, or audit fields)
+
+Builders: artifacts/api-server/src/lib/tenant-subscription-visibility.ts
+  - Reuses P16-A/B/C/E resolvers (subscription, entitlements, quotas, access, policy eval)
+  - No mutations, no audit on read, no internalNotes/risk/collection exposure
+
+Config: artifacts/api-server/src/lib/tenant-subscription-config.ts
+
+--------------------------------------------------------------------------------
+2) PERMISSIONS
+--------------------------------------------------------------------------------
+
+New tenant permissions (workspace role registry + seed module):
+  - tenant.subscription.read
+  - tenant.subscription.entitlements.read
+  - tenant.subscription.quotas.read
+
+No tenant update permissions added.
+Workspace admin/manager bypass unchanged (requirePermission pattern).
+
+--------------------------------------------------------------------------------
+3) TENANT WORKSPACE UI
+--------------------------------------------------------------------------------
+
+Page: artifacts/ops-platform/src/pages/subscription-status.tsx
+Route: /subscription/status
+Module key: subscription (seeded in modules.ts)
+
+Sections:
+  A) Overview — status badge, plan, dates, access mode, days until/past end,
+     advisory recommended status, support contact
+  B) Available Modules — enabled modules/features; disabled shown dashed (no upgrade CTA)
+  C) Usage & Limits — progress bars, warning/exceeded badges, "Not measured yet" for unknown
+  D) Billing Documents — link to /billing/invoices when tenant.billing.invoices.read
+
+Hooks: artifacts/ops-platform/src/hooks/use-tenant-subscription-visibility.ts
+  Keys: ["tenant","subscription","summary|entitlements|quotas"]
+
+Safety config: artifacts/ops-platform/src/lib/tenant-subscription-visibility-config.ts
+
+--------------------------------------------------------------------------------
+4) READ-ONLY MODE UX
+--------------------------------------------------------------------------------
+
+Page banner (data-testid=tenant-subscription-read-only-banner) when readOnlyMode:
+  "Workspace is in read-only mode due to subscription status."
+  Explains view-only vs blocked create/update/delete.
+
+Global WorkspaceReadOnlyBanner (P16-E) remains on AppLayout — unchanged.
+
+Internal collection/risk reasons filtered server-side (sanitizeTenantReadOnlyReason).
+
+--------------------------------------------------------------------------------
+5) NAVIGATION
+--------------------------------------------------------------------------------
+
+Sidebar module (via platform_modules seed):
+  Subscription Status → /subscription/status
+  permissionKey: tenant.subscription.read
+  icon: CreditCard
+
+Appears only when user has permission and module enabled (existing module gating).
+
+--------------------------------------------------------------------------------
+6) DATA EXPOSURE BOUNDARIES
+--------------------------------------------------------------------------------
+
+Excluded from tenant APIs/UI:
+  - internalNotes, appliedBy, audit metadata, policy enforcement internals
+  - commercial risk scores, collection signals, payment/ledger/ZATCA fields
+  - entitlement/quota source, effective dates, limit row IDs
+
+Included when safe:
+  - Primary billing contact (name, email, phone, role)
+  - Advisory recommendedStatus label (not raw policy reasons array)
+  - Invoice PDF path remains on billing page (P15-D) — not duplicated here
+
+--------------------------------------------------------------------------------
+7) SAFETY GUARANTEES
+--------------------------------------------------------------------------------
+
+TENANT_SUBSCRIPTION_VISIBILITY_SAFETY_CONTRACT — all flags true:
+  tenantSubscriptionVisibilityOnly, tenantReadOnlySubscription,
+  noTenant*Update (subscription/entitlement/quota/policy/workspace access),
+  noSelfServiceUpgrade, noPayment/Stripe/Checkout/gateway,
+  noInvoiceGenerationEngine, noTaxCalculation, noZatcaIntegration,
+  noAccountingLedger, noEmailSending, noUploadInvoice, noUploadContract,
+  noInternalCommercialRiskExposed, noInternalCollectionDetailsExposed,
+  noSensitiveAuditMetadataExposed, invoicePdfDownloadStillAccessible,
+  permissionGated
+
+No POST/PATCH/PUT/DELETE tenant subscription routes.
+No new enforcement middleware or automatic actions.
+
+--------------------------------------------------------------------------------
+8) TESTS
+--------------------------------------------------------------------------------
+
+api-server:
+  src/routes/__tests__/tenant-subscription.test.ts (6 tests)
+  src/lib/__tests__/tenant-subscription-visibility.test.ts (4 tests)
+
+ops-platform:
+  src/lib/__tests__/phase-16g-tenant-subscription-visibility.test.ts (9 tests)
+
+Result: 19 tests passed (api-server 10 + ops-platform 9)
+
+--------------------------------------------------------------------------------
+9) LIMITATIONS LEFT FOR P16-H
+--------------------------------------------------------------------------------
+
+NOT started in this phase:
+
+  P16-H — Final Subscription & Entitlement Control Closure
+    - End-to-end closure of subscription/entitlement control flows
+    - Cross-role operational sign-off and any remaining platform gaps
+    - Consolidated enforcement boundaries if required by closure spec
+
+Also out of scope (unchanged):
+  - Self-service upgrade/downgrade, payments, uploads, email, automated enforcement
+  - Role matrix redesign, custom permissions
+
+================================================================================
+END OF REPORT — P16-G COMPLETE — DO NOT START P16-H IN THIS WORKFLOW
+================================================================================

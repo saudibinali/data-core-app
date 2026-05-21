@@ -1,0 +1,194 @@
+================================================================================
+SYSTEM INFRASTRUCTURE AUDIT — ENTERPRISE STATE REPORT
+Generated: 2026-05-20
+Type: Discovery + Reporting ONLY (no features, no new phases)
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+data-core is a multi-tenant workspace platform with a mature workflow/automation
+core, solid collaboration modules (tickets, messaging), and incremental HCM+ERP
+capabilities delivered through phased foundations (P18–P25). The codebase
+contains ~192 database tables, 67 API route modules, 74 domain *-service files,
+and ~92 frontend pages — but strict operational readiness for a full HCM suite
+or ERP is approximately 50% overall.
+
+What is REAL today: workspace tenancy, auth, RBAC, module governance, workflow
+engine, employee HR foundation, attendance/payroll/inventory/procurement runtimes
+(with legacy bridges), reporting export infrastructure, document registry,
+procurement & inventory workspace UIs (partial ops), platform super-admin.
+
+What is NOT real today: ATS, LMS, performance, succession, analytics product,
+GL accounting posting, AP/payments, barcode/WMS, unified leave cutover, finance
+as a workspace module, full ERP operational wizards.
+
+CURRENT PLATFORM DIRECTION
+----------------------------
+Documented intent (P18-A): HCM-first, workspace_id boundary, employees as person
+SoT, controlled ERP expansion. Actual execution: strong platform/workflow
+investment; canonical schemas for payroll/attendance/finance/procurement/inventory;
+parallel legacy HR paths; recent velocity on ERP modules (P24–P25) ahead of
+talent management modules.
+
+ACTUAL RUNTIME STATE
+--------------------
+Platform core:           PARTIAL (65–75%) — usable for tenant ops
+Collaboration:           GO/PARTIAL — tickets strong
+HCM core:                PARTIAL (~42%) — employees yes; talent modules no
+Workforce (attendance):  PARTIAL (~55%)
+Payroll:                 PARTIAL (~50%)
+Finance:                 FOUNDATION ONLY (~35% runtime) — prepare, no post
+Procurement:             PARTIAL (~50%)
+Inventory:               PARTIAL (~45%)
+Workflow/automation:     Engine GO; product PARTIAL
+
+HCM MATURITY STATUS
+-------------------
+Architecture alignment (P18 principles):  ~60% — mostly followed
+Feature completeness (suite parity):       ~40% — major gaps (ATS, LMS, etc.)
+Data model maturity:                       ~55% — canonical + legacy dual models
+Operational HR readiness:                  ~55% — directory, services, self-service
+
+ERP EXPANSION STATUS
+--------------------
+Finance:      Schema mature; runtime prepare-only; UI minimal
+Procurement:  Schema + APIs + UI; no AP/invoices/payments
+Inventory:    Movement ledger GO; UI partial; module disabled by default
+Discipline:   Phase docs enforce boundaries (no GL, no MRP) — ADHERED
+Risk:         ERP surface area in navigation/engineering exceeds finance closure
+
+GOVERNANCE MATURITY
+-------------------
+Workspace RBAC:              PARTIAL (~60%)
+Workspace isolation:         PARTIAL (~75%)
+Module governance:           GO within schema (~70%)
+Platform governance (P23):   PARTIAL (~50%)
+Document confidential:       PARTIAL (~55%)
+Audit trails:                PARTIAL (~60%)
+Enterprise IAM/SoD:          BLOCKED/low (~35%)
+
+WORKFLOW MATURITY
+-----------------
+Engine (executor, steps, tests):     GO (~80%)
+Tenant workflow product:             PARTIAL (~65%)
+Cross-domain orchestration:          PARTIAL (~50%)
+SLA/escalation product:              BLOCKED
+Unified approvals model:             PARTIAL — 3 patterns coexist
+
+REPORTING MATURITY
+------------------
+Infrastructure (jobs, generated_reports):  GO foundation (~75%)
+Domain report content (JSON-heavy):          PARTIAL (~50%)
+PDF/Excel enterprise catalog:                PARTIAL (~35–40%)
+Interactive analytics:                       BLOCKED
+
+SECURITY MATURITY
+-----------------
+AuthN/session:               GO
+AuthZ/RBAC:                  PARTIAL
+Tenant isolation:            PARTIAL-GO
+Break-glass permissions:     Declared; ops process not productized
+Notification security:       PARTIAL
+Export authorization:        PARTIAL (some hr.manage fallbacks)
+
+MAJOR ARCHITECTURAL RISKS
+-------------------------
+1. Legacy/canonical dual models (payroll, attendance, leave) — wrong-route data risk
+2. hr.ts route monolith — maintenance and consistency risk
+3. Dual event pipeline (appEventBus vs dispatcher) — incomplete audit/notification
+4. Drizzle meta snapshot lag (only 0000) — migration drift on fresh deploys
+5. ERP modules enabled before HCM cutover complete
+6. Finance hidden from module catalog — governance confusion
+7. departments vs hr_org_units — RBAC/org drift
+
+MAJOR ARCHITECTURAL STRENGTHS
+-----------------------------
+1. Clear workspace_id tenancy model
+2. Workflow engine depth (tests, step types, governance intelligence)
+3. Additive migration discipline (0000–0019)
+4. Domain service layers for newer modules (inventory, procurement, finance, payroll)
+5. ModuleGovernanceService dependency graph
+6. Explicit phase documentation and constraints (no destructive migration)
+7. Reporting/export pipeline reusable across domains
+8. Event catalog (@workspace/core-events) with promotion policy
+
+CANONICAL ALIGNMENT STATUS
+--------------------------
+P18-A decisions:     PARTIAL — principles held; departments/leave not fully cut over
+P19 infra:           PARTIAL — notifications, documents, reports runtime
+P20 attendance:      PARTIAL — canonical path live
+P21 payroll:         PARTIAL — calc + ops; legacy coexistence
+P22 finance:         FOUNDATION — prepare only (by design)
+P23 platform gov:    PARTIAL
+P24 procurement:     PARTIAL
+P25 inventory:       PARTIAL
+
+RECOMMENDED STRATEGIC DIRECTION
+-------------------------------
+1. STABILIZE before expanding: complete leave canonical cutover; reduce legacy HR
+   route surface; align org model (departments → hr_org_units plan).
+2. HCM closure track: onboarding + leave production + employee-user linking before
+   new ERP domains.
+3. ERP discipline: finish procurement/inventory operational UI gaps; add finance
+   workspace module OR document finance as admin-only forever.
+4. Platform: resolve migration meta; promote remaining EVENTS to appEventBus;
+   consolidate approval patterns.
+5. Do NOT treat schema migrations as feature completion in planning.
+
+RECOMMENDED NEXT PHASES (audit opinion only — NOT started)
+---------------------------------------------------------
+Priority A — Technical debt / HCM integrity:
+  - Leave canonical cutover (P18-B style)
+  - Legacy payroll/attendance route deprecation plan
+  - departments → hr_org_units mapping
+
+Priority B — ERP operational closure:
+  - Inventory UI wizards + module default policy
+  - Procurement AP readiness (if in roadmap) OR explicit out-of-scope
+  - Finance posting phase (only if product commits to GL)
+
+Priority C — Platform:
+  - P23-B Identity/SSO (per P23 report recommendation)
+  - Migration snapshot hygiene
+  - Analytics/reporting UX beyond export jobs
+
+Priority D — HCM expansion (if product is HCM-first):
+  - P26-A Sales/Quotations (user prior mention) — ONLY if strategy confirms CRM
+  - ATS/Performance/LMS — currently BLOCKED; require architecture phases first
+
+CRITICAL BLOCKERS (for claiming "enterprise production")
+------------------------------------------------------
+[ ] Unified leave runtime (no dual hr_employee_leaves vs leave_requests)
+[ ] Legacy payroll/attendance write path disabled or funneled
+[ ] Finance posting policy decided (prepare-only is current truth)
+[ ] inventory + procurement create/edit UIs for daily ops
+[ ] Full cross-tenant security test suite
+[ ] Drizzle migration meta aligned with 0019
+[ ] Talent modules (if HCM parity required): ATS, performance, LMS
+
+AUDIT DELIVERABLES (this task)
+------------------------------
+system-canonical-inventory-audit.md
+system-frontend-runtime-audit.md
+system-backend-runtime-audit.md
+system-db-schema-audit.md
+system-governance-audit.md
+system-workflow-automation-audit.md
+system-reporting-documents-audit.md
+system-hcm-alignment-audit.md
+system-runtime-readiness-matrix.md
+system-enterprise-state-report.txt (this file)
+
+CONFIRMATIONS
+-------------
+- No features implemented in this audit
+- No new phases started
+- No new architecture created
+- Assessments are strict: foundation ≠ runtime; APIs ≠ complete; tables ≠ module
+
+OVERALL ENTERPRISE READINESS: PARTIAL (~50%)
+HCM READINESS:               PARTIAL (~42%)
+ERP READINESS:                 PARTIAL (~43%)
+PLATFORM/AUTOMATION:           PARTIAL (~62%)
+
+================================================================================

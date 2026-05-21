@@ -1,0 +1,166 @@
+================================================================================
+WORKFLOW PHASE 21A REPORT — Payroll Foundation & Compensation Canonical Architecture
+================================================================================
+Date: 2026-05-19
+Phase: P21-A
+Status: COMPLETE (architecture & discovery only — no code, no migrations)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+P21-A audited the existing legacy payroll stack (hr_salary_*, hr_payroll_runs,
+hr_payslips, process endpoint in hr.ts) and designed a canonical Payroll &
+Compensation architecture atop the P20 Workforce Event Platform. Eleven
+architecture documents define models, compensation layers, calculation pipeline,
+attendance/leave integration, policies, payslips, accounting export readiness,
+and security—without payroll execution rollout, bank/accounting integrations,
+or destructive migration.
+
+Recommended next: P21-B — Canonical Payroll DB & Compensation Engine Foundation.
+
+--------------------------------------------------------------------------------
+FILES CREATED
+--------------------------------------------------------------------------------
+1.  p21-a-current-payroll-audit.md
+2.  p21-a-canonical-payroll-models.md
+3.  p21-a-compensation-architecture.md
+4.  p21-a-payroll-calculation-pipeline.md
+5.  p21-a-payroll-attendance-leave-integration.md
+6.  p21-a-payroll-policy-strategy.md
+7.  p21-a-payslip-reporting-strategy.md
+8.  p21-a-payroll-accounting-export-readiness.md
+9.  p21-a-payroll-security-compliance.md
+10. p21-a-payroll-readiness-decision.md
+11. workflow-phase-21a-report.txt (this file)
+
+--------------------------------------------------------------------------------
+PAYROLL AUDIT SUMMARY
+--------------------------------------------------------------------------------
+EXISTING TABLES:
+- hr_salary_components, hr_salary_structures, hr_salary_structure_components
+- hr_salary_bands, hr_employee_compensations, hr_employee_compensation_items
+- hr_payroll_runs (unique workspace+year+month), hr_payslips, hr_payslip_lines
+- hr_overtime_records (payroll_run_id / payslip_id FKs — not populated by process)
+
+MONEY: stored as TEXT; process uses parseFloat (precision risk).
+
+PROCESS (POST /hr/payroll/runs/:id/process):
+- Compensation + structure only; skips employees without active compensation
+- Auto-sets run status to APPROVED
+- Does NOT read attendance_daily_summaries, leave, or approved OT
+- working_days / absent_days on payslip UNUSED
+
+UI: hr-payroll.tsx, hr-payroll-run.tsx, hr-me-payslips (self-service read)
+
+WORKFORCE (P20):
+- attendance_daily_summaries: canonical facts (not consumed by payroll)
+- leave_requests: no attendance overlay
+- No payroll period lock
+
+REPORTS: hr.attendance.period exists; NO hr.payroll.* report keys
+
+--------------------------------------------------------------------------------
+CANONICAL ARCHITECTURE SUMMARY
+--------------------------------------------------------------------------------
+11 target models (design only, no migrations):
+  payroll_cycles, payroll_periods, payroll_runs, payroll_run_employees,
+  payroll_components, payroll_component_values, compensation_packages,
+  compensation_adjustments, payroll_payslips, payroll_policies, payroll_locks
+
+Principles:
+- Workspace isolation on all entities
+- Immutable component values after lock
+- Preview / final / correction run types
+- Decimal money in P21-B (not text)
+- Legacy hr_* tables coexist until adapter migration
+
+--------------------------------------------------------------------------------
+COMPENSATION STRATEGY
+--------------------------------------------------------------------------------
+- Layered: catalog → structure template → employee package → adjustments
+- Fixed vs variable (OT, bonuses) with source reference_ids
+- Proration by paid_days / scheduled_days
+- Anti double-count for OT
+- Supersede pattern for package history (no overwrite)
+
+--------------------------------------------------------------------------------
+CALCULATION PIPELINE
+--------------------------------------------------------------------------------
+Flow: attendance + leave + OT + compensation + adjustments
+      → policies → calculate → review → lock → payslip → export
+
+Idempotency key on runs; correction runs for retro; attendance lock before final.
+
+Legacy /process mapped to non-production; replaced by staged workflow in P21-B+.
+
+--------------------------------------------------------------------------------
+ATTENDANCE / LEAVE INTEGRATION
+--------------------------------------------------------------------------------
+- Primary input: attendance_daily_summaries (not hr_attendance long-term)
+- OT: summary minutes → approved hr_overtime_records → component line
+- Leave: BLOCKED until leave_overlay writes summary on_leave status
+- Holidays: hr_calendar_holidays → summary holiday status
+- Cutoffs on payroll_periods; enforce at lock
+- P20-F replay blocked when period locked (P21-B)
+
+--------------------------------------------------------------------------------
+SECURITY / COMPLIANCE
+--------------------------------------------------------------------------------
+- Proposed hr.payroll.* permission split
+- Salary confidentiality: mask lists, no pay in logs
+- Lock + break-glass audit
+- Retention via document registry + policy
+- Export restricted to hr.payroll.export
+
+--------------------------------------------------------------------------------
+RISKS
+--------------------------------------------------------------------------------
+1. CRITICAL: Payroll disconnected from workforce data — incorrect pay if used as-is
+2. CRITICAL: No period lock — post-close edits possible
+3. HIGH: Auto-approve on process — no review gate
+4. HIGH: Text money + float math
+5. MEDIUM: Duplicate salary on employees.salary vs compensation
+6. MEDIUM: OT schema unused in calculation
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+Capability                      | Status
+--------------------------------|----------
+Canonical payroll DB            | PARTIAL
+Compensation engine             | PARTIAL
+Payroll calculations            | BLOCKED
+Payslip generation              | PARTIAL
+Accounting readiness            | PARTIAL
+Payroll operations readiness    | PARTIAL
+
+Overall architecture docs: GO
+Production payroll execution: BLOCKED
+
+--------------------------------------------------------------------------------
+SMOKE TESTS
+--------------------------------------------------------------------------------
+N/A — P21-A is documentation-only (no code changes).
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P21-B — Canonical Payroll DB & Compensation Engine Foundation
+- Migrations (non-destructive, alongside hr_*)
+- Decimal types, payroll_locks, payroll_periods
+- CompensationPackageService, attendance read adapter
+- NO bank disbursement, NO ERP posting, NO full calc production rollout
+
+--------------------------------------------------------------------------------
+CONSTRAINT CONFIRMATION
+--------------------------------------------------------------------------------
+- No payroll execution production rollout
+- No bank integrations
+- No accounting integrations
+- No government integrations
+- No destructive migration
+- Architecture only — P21-B not started
+
+================================================================================
+END REPORT
+================================================================================

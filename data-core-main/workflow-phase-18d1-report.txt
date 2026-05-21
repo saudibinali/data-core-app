@@ -1,0 +1,153 @@
+================================================================================
+WORKFLOW PHASE 18D1 — LEAVE DB MIGRATION & STAGING VERIFICATION
+================================================================================
+Report file: workflow-phase-18d1-report.txt
+Date: 2026-05-19
+Status: COMPLETE
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-D1 delivered migration 0001_leave_canonical (leave_requests,
+leave_approval_steps), journal registration, staging checks A–H, and six
+canonical leave smoke tests plus legacy compatibility. Production UI remains
+on legacy leave APIs. No hr.ts / frontend / permissions changes.
+
+================================================================================
+FILES CREATED
+================================================================================
+lib/db/drizzle/0001_leave_canonical.sql
+lib/db/drizzle/meta/_journal.json                    (updated: idx 1)
+lib/db/package.json                                  (updated: migrate script)
+artifacts/api-server/src/routes/__tests__/leave-canonical.smoke.test.ts
+p18-d1-staging-verification-checklist.md
+workflow-phase-18d1-report.txt
+scripts/verify-leave-staging.cjs
+scripts/stamp-leave-migration-0001.cjs
+scripts/check-leave-migration.cjs
+
+================================================================================
+MIGRATION CREATED
+================================================================================
+Tag:     0001_leave_canonical
+File:    lib/db/drizzle/0001_leave_canonical.sql
+Apply:   cd lib/db && DATABASE_URL=... pnpm run migrate
+Scope:   leave_requests, leave_approval_steps ONLY
+
+================================================================================
+TABLES ADDED
+================================================================================
+leave_requests       — canonical leave lifecycle (workspace-scoped)
+leave_approval_steps — approval chain (Phase 1 single-step capable)
+
+NOT modified: hr_employee_leaves, hr_leave_balances, employees, users,
+              hr_leave_policies, or any other HR tables
+
+================================================================================
+CONSTRAINTS / INDEXES ADDED
+================================================================================
+Foreign keys (per p18-c-leave-migration-sql-plan.md):
+  leave_requests → workspaces, employees, users (RESTRICT on requester),
+                   hr_leave_policies, approver user refs (SET NULL)
+  leave_approval_steps → leave_requests (CASCADE), users (RESTRICT)
+
+Unique:
+  uq_leave_request_number (workspace_id, request_number)
+  uq_leave_approval_step (leave_request_id, step_order)
+
+Indexes:
+  idx_leave_requests_workspace, _employee, _status, _dates
+  idx_leave_approval_steps_request, _approver, _status
+
+================================================================================
+SMOKE TEST RESULTS
+================================================================================
+File:    leave-canonical.smoke.test.ts
+Command: DATABASE_URL=... pnpm --filter @workspace/api-server test leave-canonical.smoke
+
+| Test                      | Result |
+|---------------------------|--------|
+| Submit request            | PASS   |
+| Overlapping conflict 409  | PASS   |
+| Insufficient balance 422  | PASS   |
+| Approve                   | PASS   |
+| Reject                    | PASS   |
+| Withdraw                  | PASS   |
+| Legacy POST /hr/me/...    | PASS   |
+
+Total: 8/8 passed (includes prerequisite + legacy H)
+
+================================================================================
+RUNTIME FIXES APPLIED (IF ANY)
+================================================================================
+Production code (leave.ts, hr.ts): NONE
+
+Test-only: smoke fixture uses raw SQL INSERT into users when optional
+platform profile columns exist in schema but not in DB (P18-B drift).
+
+================================================================================
+REMAINING BLOCKERS
+================================================================================
+- Frontend still uses legacy leave endpoints (hr-me-leave, hr-attendance)
+- Self-service list API permission mismatch (GET /hr/attendance/leaves)
+- No legacy → canonical data backfill yet
+- No legacy write freeze (by design for P18-D1)
+- users table partial drift on some environments (non-blocking for leave API)
+
+================================================================================
+LEGACY COMPATIBILITY STATUS
+================================================================================
+hr_employee_leaves:     PRESENT, unchanged
+POST /hr/me/leave-requests:     WORKING (legacy table)
+GET/PATCH legacy attendance leaves: UNCHANGED
+Dual-write:             NOT implemented
+Legacy removal:         NOT performed
+
+================================================================================
+READINESS FOR FRONTEND BRIDGE
+================================================================================
+Canonical DB and API are ready for backend testing; UI cutover blocked until
+P18-D2 (API list permissions, frontend switch, no dual-write).
+
+================================================================================
+READINESS VERDICT (GO / PARTIAL / BLOCKED)
+================================================================================
+canonical DB:                 GO
+canonical API:                GO
+frontend bridge readiness:      BLOCKED
+data migration readiness:     PARTIAL
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P18-D2 — Canonical Leave API & Frontend Bridge Preparation
+
+================================================================================
+STAGING VERIFICATION SUMMARY (A–H)
+================================================================================
+A  leave_requests full schema          PASS
+B  leave_approval_steps full schema    PASS
+C  FKs                                 PASS
+D  unique request_number               PASS
+E  POST /hr/leave-requests             PASS
+F  approve / reject / withdraw         PASS
+G  balance updates transactional       PASS
+H  legacy hr_employee_leaves           PASS
+
+Detail: p18-d1-staging-verification-checklist.md
+
+================================================================================
+FINAL CONFIRMATION (prompt)
+================================================================================
+[x] No legacy tables removed
+[x] No frontend migration performed
+[x] No dual-write implemented
+[x] No permissions redesign
+[x] No hr.ts refactor
+[x] No payroll changes
+[x] No attendance redesign
+[x] P18-D2 not started
+
+================================================================================
+END OF workflow-phase-18d1-report.txt
+================================================================================

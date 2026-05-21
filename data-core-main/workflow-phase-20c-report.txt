@@ -1,0 +1,161 @@
+================================================================================
+WORKFLOW PHASE 20-C REPORT
+Attendance Import Center & Workforce Normalization Expansion
+================================================================================
+Date: 2026-05-19
+Scope: P20-C (no P20-D)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+P20-C delivers the Enterprise Attendance Import Center: canonical template
+registry, dynamic XLSX generation, server-side import pipeline on import_jobs,
+dry-run validation, confirm flow through canonical ingestion, reconciliation
+reports, soft revert metadata, notifications, and Import Center UI wiring—
+without GPS, vendor SDKs, payroll changes, or destructive migrations.
+
+--------------------------------------------------------------------------------
+IMPORT CENTER STATUS
+--------------------------------------------------------------------------------
+UI: HR Attendance Import Center dialog (hr-attendance.tsx)
+APIs: /hr/workforce/imports/* (upload, dry-run, confirm, history, status, revert)
+Legacy preview/confirm routes: retained for compatibility
+
+Status: GO
+
+--------------------------------------------------------------------------------
+TEMPLATE SYSTEM STATUS
+--------------------------------------------------------------------------------
+ImportTemplateRegistry: attendance.period.default.v1
+Dynamic XLSX: columns, instructions, status values, optional employee/shift sheets
+Metadata API: GET templates + GET templates/:key
+
+Status: GO
+
+--------------------------------------------------------------------------------
+DRY-RUN VALIDATION STATUS
+--------------------------------------------------------------------------------
+Server-side parse + validateImportRows
+Outputs: valid/invalid, warnings, duplicates, unknown employees, shift warnings,
+         normalization warnings (missing punch, night shift, sequence)
+No production writes on dry-run
+Notification: attendance_import_dry_run_ready
+
+Status: GO
+
+--------------------------------------------------------------------------------
+IMPORT PIPELINE STATUS
+--------------------------------------------------------------------------------
+Flow: file → import_jobs → attendance_import_batches → attendance_import_rows
+Confirm: legacy hr_attendance + ingestExcelRowWithMeta → normalization → summaries
+Audit: documents (optional), local artifact storage, import_jobs.summary_json
+
+Status: GO (sync in-process; no Redis worker)
+
+--------------------------------------------------------------------------------
+NORMALIZATION EXPANSION STATUS
+--------------------------------------------------------------------------------
+Added: missing punch pairing, night shift detection, source conflict suppression,
+       invalid sequence validation, timezone helpers
+Canonical supersede: is_superseded on lower-priority duplicate events
+
+Status: PARTIAL (advanced payroll/leave cross-rules deferred)
+
+--------------------------------------------------------------------------------
+RECONCILIATION STATUS
+--------------------------------------------------------------------------------
+Post-import ReconciliationSummary → generated_reports
+Definition key: hr.attendance.import.reconciliation
+API: GET /hr/workforce/imports/:batchId/reconciliation
+
+Status: GO
+
+--------------------------------------------------------------------------------
+ROLLBACK FOUNDATION STATUS
+--------------------------------------------------------------------------------
+attendance_adjustments + revertToken on batch
+POST /hr/workforce/imports/:batchId/revert (soft legacy mark, no deletes)
+No full rollback UI
+
+Status: PARTIAL (foundation only)
+
+--------------------------------------------------------------------------------
+NOTIFICATION INTEGRATION STATUS
+--------------------------------------------------------------------------------
+attendance_import_dry_run_ready
+attendance_import_completed
+attendance_import_failed
+Via dispatchUserNotification (in-app, no email enqueue)
+
+Status: GO
+
+--------------------------------------------------------------------------------
+DATABASE (migration 0007)
+--------------------------------------------------------------------------------
+- attendance_import_batches
+- attendance_import_rows
+- attendance_adjustments
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+File: routes/__tests__/workforce-attendance-import.smoke.test.ts
+
+Coverage:
+- Template generation
+- Dry-run validation
+- Import confirm flow
+- Normalization rules (night shift, source conflict)
+- Workspace isolation
+
+Run: DATABASE_URL=... pnpm --filter @workspace/api-server vitest run workforce-attendance-import.smoke
+(Skips without DATABASE_URL + migration 0007)
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+| Area                         | Status   |
+|------------------------------|----------|
+| Import center                | GO       |
+| Template registry            | GO       |
+| Dry-run validation           | GO       |
+| Normalization expansion      | PARTIAL  |
+| Reconciliation               | GO       |
+| Enterprise attendance imports| PARTIAL  |
+
+PARTIAL notes:
+- Normalization: vendor dedup, payroll hooks, full supersede UI not done
+- Enterprise: mapping profiles, async workers, error XLSX export, GPS/vendor paths
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+1. Migration 0007 required in target environments
+2. Confirm uses sync processing (large files may timeout)
+3. Document Registry upload path optional; primary path is multipart upload
+4. Legacy import routes still exist; gradual deprecation recommended
+
+--------------------------------------------------------------------------------
+CONFIRMED EXCLUSIONS
+--------------------------------------------------------------------------------
+- No GPS enforcement
+- No vendor SDK integrations
+- No payroll redesign
+- No destructive migration
+- No mobile app
+- No Redis/BullMQ redesign
+- No full attendance UI rewrite
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P20-D — Workforce Self-Service Clocking & Geofence Foundation
+
+--------------------------------------------------------------------------------
+DOCUMENTATION
+--------------------------------------------------------------------------------
+- p20-c-attendance-import-center-implementation.md
+
+================================================================================
+END OF REPORT
+================================================================================

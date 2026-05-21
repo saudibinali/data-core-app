@@ -1,0 +1,9 @@
+P-PAY-MIG WORKFLOW PHASE REPORT
+===============================
+Date: 2026-05-20
+Status: COMPLETE
+
+DELIVERABLES: payroll-migration-service, hr-payroll-migration routes,
+stabilization payroll card, docs, smoke tests.
+
+EXIT: idempotent legacy→canonical payroll runs + run employees import.

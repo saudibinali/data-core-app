@@ -1,0 +1,230 @@
+================================================================================
+WORKFLOW PHASE 15-C — Invoice Records & Uploaded Invoice PDFs
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Platform Administration — enterprise invoice metadata + official PDF upload.
+Out of scope: invoice generation, tax, payment, tenant billing portal (P15-D).
+
+================================================================================
+1) INVOICE RECORDS MODEL
+================================================================================
+
+Table: commercial_invoices
+Schema: lib/db/src/schema/commercial-invoices.ts
+
+Fields:
+  - id, workspaceId, commercialAccountId, contractTermId (optional)
+  - invoiceNumber (required, unique per workspace)
+  - invoiceTitle, invoiceDate, dueDate
+  - invoiceAmount, currency
+  - billingPeriodStart, billingPeriodEnd
+  - status: draft | issued | shared | paid | overdue | cancelled
+  - externalAccountingSystemName, externalAccountingReference (optional)
+  - notes
+  - createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - Multiple invoices per tenant allowed.
+  - invoiceNumber unique per workspace (DB unique index).
+  - No tax fields, no payment fields, no PDF binary in this table.
+  - Cancelled status used instead of hard delete.
+
+================================================================================
+2) INVOICE DOCUMENTS MODEL
+================================================================================
+
+Table: commercial_invoice_documents
+Schema: lib/db/src/schema/commercial-invoice-documents.ts
+
+Fields:
+  - id, invoiceId (unique — one primary PDF per invoice in P15-C)
+  - fileName, originalFileName, fileSize, mimeType
+  - storageKey (opaque private path)
+  - checksum (optional SHA-256)
+  - uploadedBy, uploadedAt, createdAt
+
+Rules:
+  - Re-upload replaces prior PDF (file deleted from storage, row updated).
+  - No DELETE document API (by design).
+  - application/pdf only.
+
+================================================================================
+3) FILE STORAGE APPROACH
+================================================================================
+
+Module: artifacts/api-server/src/lib/invoice-document-storage.ts
+
+Private filesystem storage (not public URLs):
+  - Root: INVOICE_PDF_STORAGE_DIR env or data/invoice-documents/
+  - buildStorageKey(workspaceId, invoiceId) → tenants/{ws}/invoices/{id}/{uuid}.pdf
+  - saveInvoicePdf(storageKey, buffer)
+  - getInvoicePdfStream(storageKey) / getInvoicePdfBuffer
+  - deleteInvoicePdfIfExists on replace
+
+Upload parsing: artifacts/api-server/src/lib/parse-invoice-pdf-upload.ts (busboy)
+  - Field name: file
+  - PDF only, max 10MB, .pdf extension required
+
+Download: GET .../document streams via protected API with
+commercial.invoiceDocuments.read — no direct public URL.
+
+Note: General object-storage presigned URLs (GCS) exist for forms but were not
+used for invoices to keep all PDF access behind platform auth + audit.
+
+================================================================================
+4) PERMISSIONS ADDED
+================================================================================
+
+New codes (total platform permissions: 28):
+  - commercial.invoices.read
+  - commercial.invoices.update
+  - commercial.invoiceDocuments.read
+  - commercial.invoiceDocuments.upload
+
+Role matrix (additive only):
+  root_platform_owner / platform_admin / finance_admin:
+    all four invoice permissions
+  sales_admin:
+    commercial.invoices.read + commercial.invoiceDocuments.read (no upload/update)
+  auditor:
+    all four read permissions for invoices + documents (read-only; no upload/update)
+  support_admin / read_only_operator:
+    commercial.invoices.read only (no document read — sensitive PDF)
+  workspace_support:
+    none
+
+Backend: artifacts/api-server/src/lib/platform-permissions.ts
+Frontend: artifacts/ops-platform/src/lib/platform-permissions-config.ts
+         artifacts/ops-platform/src/lib/commercial-config.ts
+
+================================================================================
+5) BACKEND APIs
+================================================================================
+
+Router: artifacts/api-server/src/routes/commercial-invoices.ts
+Registered: artifacts/api-server/src/routes/index.ts
+
+GET    /platform/tenants/:tenantId/commercial-invoices
+       ?status=&contractTermId=  — commercial.invoices.read
+GET    /platform/tenants/:tenantId/commercial-invoices/:invoiceId
+       — commercial.invoices.read; document metadata only if
+         commercial.invoiceDocuments.read
+POST   /platform/tenants/:tenantId/commercial-invoices
+       — commercial.invoices.update (metadata only, no PDF)
+PATCH  /platform/tenants/:tenantId/commercial-invoices/:invoiceId
+       — commercial.invoices.update
+PATCH  /platform/tenants/:tenantId/commercial-invoices/:invoiceId/status
+       — commercial.invoices.update + reason (min 10 chars)
+POST   /platform/tenants/:tenantId/commercial-invoices/:invoiceId/document
+       — commercial.invoiceDocuments.upload (multipart PDF)
+GET    /platform/tenants/:tenantId/commercial-invoices/:invoiceId/document
+       — commercial.invoiceDocuments.read (protected download)
+
+No DELETE routes. Forbidden payload keys (tax, payment, stripe, etc.) rejected.
+
+================================================================================
+6) FRONTEND — COMMERCIAL TAB
+================================================================================
+
+Component: artifacts/ops-platform/src/components/commercial/InvoicesSection.tsx
+Hooks: artifacts/ops-platform/src/hooks/use-commercial-invoices.ts
+Wired in: super-admin-tenants.tsx CommercialPanel
+
+Section: Invoices & Documents — الفواتير والمستندات
+Visible with: commercial.invoices.read
+
+Actions:
+  - Add / Edit / Change Status — commercial.invoices.update
+  - Upload PDF — commercial.invoiceDocuments.upload
+  - Download PDF — commercial.invoiceDocuments.read (when document uploaded)
+
+React Query keys:
+  ["platform", "tenants", tenantId, "commercial-invoices"]
+  ["platform", "tenants", tenantId, "commercial-invoices", invoiceId]
+
+================================================================================
+7) VALIDATION
+================================================================================
+
+  - Tenant + commercial account required
+  - contractTermId must belong to same tenant/account
+  - invoiceNumber required; unique per workspace
+  - invoiceDate <= dueDate; billingPeriodStart <= billingPeriodEnd
+  - invoiceAmount >= 0; currency whitelist
+  - status enum; status change requires reason
+  - PDF: application/pdf, .pdf, max 10MB
+  - Rejects tax/payment/card/stripe fields in JSON body
+
+================================================================================
+8) AUDIT EVENTS
+================================================================================
+
+  - commercial_invoice_created
+  - commercial_invoice_updated
+  - commercial_invoice_status_changed
+  - commercial_invoice_status_change_blocked
+  - commercial_invoice_document_uploaded
+  - commercial_invoice_document_downloaded
+  - commercial_invoice_document_upload_blocked
+
+Metadata: actorId, tenantId, commercialAccountId, contractTermId, invoiceId,
+invoiceNumber, status fields, changedFields, reason, fileName, fileSize,
+mimeType — never file content or secrets.
+
+================================================================================
+9) SAFETY GUARANTEES
+================================================================================
+
+COMMERCIAL_SAFETY_CONTRACT updated (all true), including:
+  uploadedInvoicePdfOnly, noInvoiceGenerationEngine, noHardDeleteInvoice,
+  noDeleteDocument, protectedPdfDownload, pdfOnlyUpload,
+  noTenantSideBillingPortalFull, noCustomerPaymentPortal,
+  auditInvoiceChanges, auditInvoiceDocumentAccess, etc.
+
+Platform does NOT generate accounting invoices.
+Platform stores uploaded official PDFs from external accounting systems only.
+
+================================================================================
+10) TEST RESULTS
+================================================================================
+
+api-server: 61 files, 3492 tests — ALL PASSED (after P15-C updates)
+ops-platform: 26 files, 1248 tests — ALL PASSED
+
+Focused tests:
+  - routes/__tests__/commercial-invoices.test.ts
+  - lib/__tests__/commercial-permissions.test.ts (28 permissions)
+  - lib/__tests__/commercial-audit-events.test.ts
+  - ops-platform commercial-config, commercial-tab-invoices tests
+
+DB migration: pnpm --filter @workspace/db run push
+Dependency: busboy added to @workspace/api-server for multipart PDF upload.
+
+================================================================================
+11) LIMITATIONS INTENTIONALLY LEFT FOR P15-D
+================================================================================
+
+  - Full tenant-side billing portal (view/download for customer users)
+  - Electronic payment / Stripe / checkout
+  - Invoice generation engine / ZATCA / tax / accounting ledger
+  - Email delivery of invoices
+  - PO tracking, manual payment tracking, collection workflow
+  - Hard delete invoice or document
+  - Custom per-user permission overrides
+  - Multiple PDF versions per invoice (only replace in P15-C)
+
+================================================================================
+12) NEXT PHASE — P15-D: Tenant Billing Portal Visibility
+================================================================================
+
+P15-D will expose Tenant Billing Portal Visibility so customers can VIEW and
+DOWNLOAD uploaded invoice PDFs that finance uploaded in P15-C — still with NO
+electronic payment in the portal.
+
+The platform will continue NOT to generate invoices; it will only serve stored
+PDFs according to tenant-side permissions defined in P15-D.
+
+================================================================================
+END OF REPORT — PHASE 15-C COMPLETE
+================================================================================

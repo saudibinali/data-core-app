@@ -1,0 +1,616 @@
+راجع:
+- workflow-phase-14a-report.txt
+- workflow-phase-13j-final-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/lib/root-platform-owner-policy.ts
+- artifacts/api-server/src/routes/platform-users.ts
+- artifacts/api-server/src/middleware/requireSuperAdmin أو auth middleware الحالي
+- artifacts/api-server/src/routes/index.ts
+- artifacts/ops-platform/src/lib/platform-users-config.ts
+- artifacts/ops-platform/src/lib/platform-users-hooks.ts
+- artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+- artifacts/ops-platform/src/components/super-admin-layout.tsx
+- usersTable columns:
+  - platformRoleCode
+  - isRootOwner
+  - isProtected
+  - lastLoginAt
+- activity_logs audit pattern
+
+ثم نفّذ فقط:
+P14-B — Platform Roles & Permission Matrix
+
+ولا تنفّذ:
+- tenant user management
+- customer user management
+- HR employee users
+- billing/commercial modules
+- invoice/payment modules
+- SSO
+- MFA
+- password reset
+- email invite sending
+- delete user
+- break-glass recovery
+- external identity provider
+- tenant-side billing
+- HR modules
+
+عنوان المهمة:
+WORKFLOW PHASE 14-B — Platform Roles & Permission Matrix
+
+المهمة الحالية:
+بناء مصفوفة صلاحيات داخلية لمستخدمي إدارة المنصة، وربطها تدريجيًا بالـ APIs والواجهة بدون كسر requireSuperAdmin الحالي.
+
+الهدف:
+تحويل أدوار Platform Users من مجرد roleCode إلى صلاحيات فعلية قابلة للتحكم مثل:
+- platform.users.read — قراءة مستخدمي المنصة
+- platform.users.create — إنشاء مستخدمي المنصة
+- platform.users.status.update — تغيير حالة مستخدم منصة
+- platform.users.role.update — تغيير دور مستخدم منصة
+- tenants.read — قراءة المستأجرين
+- tenants.lifecycle.update — تحديث دورة حياة المستأجر
+- subscriptions.read — قراءة الاشتراكات
+- subscriptions.update — تحديث بيانات الاشتراك
+- entitlements.read — قراءة الصلاحيات والميزات
+- entitlements.override.update — تحديث الاستثناءات
+- usage.read — قراءة الاستخدام
+- renewal.read — قراءة التجديد
+- health.read — قراءة صحة المستأجر
+- evaluation.read — قراءة التقييم
+- audit.read — قراءة السجلات
+- platform.activity.read — قراءة نشاط المنصة
+
+بطريقة:
+permission matrix foundation
+مع الحفاظ على حماية Root
+وبدون بناء نظام IAM كامل أو SSO/MFA
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW P14-A FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- كيف platformRoleCode يُخزن
+- كيف root_platform_owner محمي
+- كيف privilege hierarchy تعمل
+- كيف APIs تستخدم requireSuperAdmin
+- كيف UI تعرض role/status/protected
+- كيف audit يسجل
+- كيف root role ممنوع من create/status
+
+وثق في التقرير:
+- P14-A readiness
+- أي limitations مهمة:
+  - lastLoginAt لا يحدث عند login
+  - isRootOwner/isProtected لم يتم تثبيتها صراحة للحساب القديم
+  - requireSuperAdmin ما زال gate العام
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PLATFORM PERMISSIONS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+platform-permissions.ts
+
+Permission codes مع ترجمة عربية مختصرة داخل descriptions:
+
+PlatformPermissionCode:
+- platform.users.read — قراءة مستخدمي المنصة
+- platform.users.create — إنشاء مستخدمي المنصة
+- platform.users.status.update — تحديث حالة مستخدم منصة
+- platform.users.role.update — تحديث دور مستخدم منصة
+- platform.roles.read — قراءة الأدوار والصلاحيات
+- tenants.read — قراءة المستأجرين
+- tenants.lifecycle.update — تحديث دورة حياة المستأجر
+- subscriptions.read — قراءة الاشتراكات
+- subscriptions.update — تحديث بيانات الاشتراك
+- entitlements.read — قراءة الصلاحيات والميزات
+- entitlements.override.update — تحديث استثناءات الصلاحيات
+- usage.read — قراءة الاستخدام
+- renewal.read — قراءة التجديد
+- health.read — قراءة صحة المستأجر
+- evaluation.read — قراءة تقييم دورة الحياة
+- audit.read — قراءة السجلات
+- platform.activity.read — قراءة نشاط المنصة
+- platform.settings.read — قراءة إعدادات المنصة
+
+PlatformRolePermissionMatrix:
+- root_platform_owner:
+  - all permissions
+  - not assignable from UI
+- platform_admin:
+  - all permissions except root-only/internal recovery
+- support_admin:
+  - tenants.read
+  - usage.read
+  - renewal.read
+  - health.read
+  - evaluation.read
+  - platform.activity.read
+- workspace_support:
+  - tenants.read
+  - usage.read
+  - health.read
+  - evaluation.read
+- sales_admin:
+  - tenants.read
+  - subscriptions.read
+  - renewal.read
+  - health.read
+- finance_admin:
+  - tenants.read
+  - subscriptions.read
+  - renewal.read
+  - audit.read لاحقًا حسب الحاجة
+- auditor:
+  - tenants.read
+  - subscriptions.read
+  - entitlements.read
+  - usage.read
+  - renewal.read
+  - health.read
+  - evaluation.read
+  - audit.read
+  - platform.activity.read
+- read_only_operator:
+  - tenants.read
+  - usage.read
+  - renewal.read
+  - health.read
+  - evaluation.read
+
+Exports:
+- PLATFORM_PERMISSION_CONFIG
+- PLATFORM_ROLE_PERMISSION_MATRIX
+- getPlatformUserRoleCode(user)
+- getPlatformPermissionsForRole(roleCode)
+- hasPlatformPermission(user, permissionCode)
+- hasAnyPlatformPermission(user, permissionCodes)
+- hasAllPlatformPermissions(user, permissionCodes)
+- assertPlatformPermission(user, permissionCode)
+- isRootOnlyPermission(permissionCode)
+- buildPermissionDeniedAuditEvent(actor, permissionCode, resource)
+
+Rules:
+- root_platform_owner يحصل على كل الصلاحيات
+- legacy root user بدون platformRoleCode يعتبر root_platform_owner
+- unknown role = no permissions
+- لا يوجد wildcard string عشوائي؛ استخدم config ثابت
+- كل permission له label + labelAr + description
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PERMISSION MIDDLEWARE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف middleware:
+
+requirePlatformPermission(permissionCode)
+
+Behavior:
+- requireAuth أولًا
+- يقرأ user من req
+- يستخرج platformRoleCode أو legacy root
+- إذا user ليس platform user → 403
+- إذا لا يملك permission → 403
+- يسجل log/audit مناسب:
+  - platform_permission_denied
+- إذا يملك permission → next()
+
+مهم:
+لا تكسر requireSuperAdmin.
+خليه موجود للتوافق.
+لكن ابدأ باستخدام requirePlatformPermission في routes الجديدة أو المعدلة.
+
+أضف helper:
+requireAnyPlatformPermission([...])
+
+اختياري إذا احتجته.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ROLE UPDATE API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+PATCH /platform/users/:userId/role
+
+Purpose:
+تغيير roleCode لمستخدم منصة غير Root.
+
+Payload:
+- roleCode — الدور الجديد
+- reason — السبب
+- confirmation — تأكيد
+
+Rules:
+- requirePlatformPermission("platform.users.role.update")
+- يمنع roleCode = root_platform_owner
+- يمنع تغيير Root/protected account
+- يمنع actor يغير دوره هو
+- يمنع actor يدير equal/higher privilege
+- يمنع actor يعطي دور أعلى أو مساوي له
+- reason مطلوب ≥ 10 chars
+- confirmation true
+- audit:
+  - platform_user_role_changed
+  - platform_user_role_change_blocked
+
+مهم:
+لا تضف permission editor.
+لا تضف custom role builder.
+لا تضف root assignment.
+لا تضف delete/password/email.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — APPLY PERMISSION MIDDLEWARE TO PLATFORM USER ROUTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث:
+GET /platform/users
+- requirePlatformPermission("platform.users.read")
+
+GET /platform/users/:userId
+- requirePlatformPermission("platform.users.read")
+
+POST /platform/users
+- requirePlatformPermission("platform.users.create")
+
+PATCH /platform/users/:userId/status
+- requirePlatformPermission("platform.users.status.update")
+
+PATCH /platform/users/:userId/role
+- requirePlatformPermission("platform.users.role.update")
+
+مع الحفاظ على:
+- root protection policy
+- audit
+- validation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OPTIONAL SAFE APPLICATION TO TENANT READ ROUTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا آمن وما يكسر الاختبارات، طبّق permission middleware على read-only tenant routes:
+
+GET /platform/tenants
+- tenants.read
+
+GET /platform/tenants/:tenantId
+- tenants.read
+
+GET /platform/tenants/:tenantId/summary
+- tenants.read
+
+GET /platform/tenants/:tenantId/subscription
+- subscriptions.read
+
+GET /platform/tenants/:tenantId/entitlements
+- entitlements.read
+
+GET /platform/tenants/:tenantId/usage
+- usage.read
+
+GET /platform/tenants/:tenantId/renewal-intelligence
+- renewal.read
+
+GET /platform/tenants/:tenantId/health
+- health.read
+
+GET /platform/tenants/:tenantId/lifecycle-evaluation
+- evaluation.read
+
+لا تطبق على mutation tenant routes إلا إذا واثق:
+- lifecycle update
+- subscription update
+- entitlement override update
+
+إذا طبقتها:
+- tenants.lifecycle.update
+- subscriptions.update
+- entitlements.override.update
+
+لكن الأفضل في P14-B:
+ابدأ بالـ platform users routes + read-only tenant routes فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND CONFIG UPDATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث/أضف:
+
+platform-permissions-config.ts
+
+يحتوي:
+- PLATFORM_PERMISSION_CONFIG
+- PLATFORM_ROLE_PERMISSION_MATRIX_CONFIG
+- PLATFORM_ROLE_PERMISSION_SUMMARY
+- PLATFORM_PERMISSION_GROUPS
+
+Groups:
+- Platform Users — مستخدمو المنصة
+- Tenants — المستأجرون
+- Subscriptions — الاشتراكات
+- Entitlements — الصلاحيات والميزات
+- Usage — الاستخدام
+- Renewal — التجديد
+- Health — صحة المستأجر
+- Evaluation — التقييم
+- Audit — السجلات
+- Settings — الإعدادات
+
+كل permission:
+- code
+- label
+- labelAr
+- description
+- group
+- riskLevel:
+  - read
+  - controlled_write
+  - sensitive_write
+  - root_only
+
+Safety contract:
+PLATFORM_PERMISSION_MATRIX_SAFETY_CONTRACT:
+- fixedRoleMatrix
+- noCustomRoles
+- noRootAssignmentFromUi
+- noPermissionEditor
+- noTenantUsers
+- noCustomerUsers
+- noHrUsers
+- noPasswordReset
+- noDeleteUser
+- noSso
+- noMfa
+- auditRoleChanges
+- auditPermissionDenied
+- preserveRootProtection
+
+كلها true.
+
+Import-time guard.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND HOOKS UPDATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useUpdatePlatformUserRole()
+
+PATCH /api/platform/users/:userId/role
+
+Input:
+- userId
+- roleCode
+- reason
+- confirmation
+
+Invalidate:
+- ["platform", "users"]
+- ["platform", "users", userId]
+
+لا تضف:
+- custom permission update
+- permission editor
+- root role assign
+- delete/password/email
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND UI UPDATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في صفحة Platform Users & Access:
+
+أضف:
+- Role/Permission Matrix section
+  - يعرض كل role
+  - permissions grouped
+  - read/write badges
+  - عربي مختصر بجانب المصطلحات
+
+في UserDetailPanel:
+- أضف Role Change Panel للمستخدمين غير root/protected فقط
+- role select يستبعد root_platform_owner
+- reason textarea
+- confirmation checkbox
+- Apply button
+- لا يظهر إذا:
+  - target is root/protected
+  - target has equal/higher privilege
+  - current actor is target
+  - current actor لا يملك platform.users.role.update إذا عندك current permissions متاحة بالواجهة
+
+مهم:
+إذا الواجهة ما تعرف صلاحيات actor بدقة، خله يعتمد على backend error.
+لكن لا تعرض root assignment أبدًا.
+
+Protected root notice يبقى.
+
+لا تضف:
+- permission editor
+- custom roles
+- password reset
+- delete
+- email change
+- invite send
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — AUDIT / OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Audit events:
+- platform_user_role_changed
+- platform_user_role_change_blocked
+- platform_permission_denied
+- platform_permission_matrix_read
+
+Fields:
+- actorId
+- targetUserId
+- targetEmail
+- previousRoleCode
+- nextRoleCode
+- permissionCode
+- resource
+- action
+- result
+- reason
+- blockedReason
+- timestamp
+
+بدون أسرار.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+platform permission config stable
+
+T2:
+role permission matrix stable
+
+T3:
+root gets all permissions
+
+T4:
+legacy root without platformRoleCode gets root permissions
+
+T5:
+platform_admin gets expected permissions
+
+T6:
+support_admin cannot update users role/status
+
+T7:
+finance_admin cannot manage platform users
+
+T8:
+auditor read-only permissions only
+
+T9:
+unknown role gets no permissions
+
+T10:
+hasPlatformPermission works
+
+T11:
+requirePlatformPermission allows authorized actor
+
+T12:
+requirePlatformPermission denies unauthorized actor
+
+T13:
+permission denied audit/log event created
+
+T14:
+role update API requires platform.users.role.update
+
+T15:
+role update cannot assign root_platform_owner
+
+T16:
+role update cannot change root/protected account
+
+T17:
+role update cannot self-change
+
+T18:
+role update cannot manage equal/higher privilege
+
+T19:
+role update requires reason + confirmation
+
+T20:
+role update success audit event created
+
+T21:
+platform user routes use permission middleware
+
+T22:
+frontend permission config stable
+
+T23:
+frontend role matrix renders grouped permissions
+
+T24:
+frontend role change excludes root
+
+T25:
+frontend root/protected has no role change controls
+
+T26:
+no custom roles/permission editor/password reset/delete/SSO/MFA exists
+
+T27:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P14-B MUST:
+- preserve root protection
+- use fixed role matrix
+- avoid custom roles
+- avoid permission editor
+- block root role assignment
+- block role change for root/protected
+- block self role change
+- block managing equal/higher privilege
+- audit role changes
+- audit denied permission attempts
+- keep tenant/customer/HR users out of scope
+- keep password reset/delete/email invite/SSO/MFA out of scope
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- custom role builder
+- permission editor
+- tenant users
+- customer users
+- HR employee users
+- password reset
+- delete user
+- email invite sending
+- SSO
+- MFA
+- break-glass recovery
+- billing/commercial
+- invoice/payment
+- tenant-side billing
+- HR modules
+
+خلك:
+fixed platform roles + permission matrix فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-14b-report.txt
+
+ويحتوي:
+- P14-A readiness review
+- platform permission model
+- role permission matrix
+- permission middleware
+- role update API
+- frontend permission matrix UI
+- role change UI
+- audit/observability behavior
+- safety guarantees
+- tests results
+- limitations intentionally left for P14-C
+- readiness assessment قبل Platform Access Boundary & Route Guards

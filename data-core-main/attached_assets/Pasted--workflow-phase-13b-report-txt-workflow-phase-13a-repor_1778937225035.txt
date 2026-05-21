@@ -1,0 +1,504 @@
+راجع:
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+- workflow-phase-12h-final-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/lib/tenant-registry.ts
+- artifacts/api-server/src/lib/workspace-lifecycle.ts
+- artifacts/api-server/src/routes/tenants.ts
+- artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+- artifacts/ops-platform/src/lib/tenant-registry-config.ts
+- artifacts/ops-platform/src/lib/workspace-lifecycle-config.ts
+- workspacesTable
+- activity_logs pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-C — Subscription Metadata, Trial Windows & Renewal Lifecycle Foundations
+
+ولا تنفّذ:
+- payment provider integration
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic plan enforcement
+- module entitlement engine
+- HR employee management
+- tenant self-service billing portal
+- external legal notices
+- email notifications
+
+عنوان المهمة:
+WORKFLOW PHASE 13-C — Subscription Metadata, Trial Windows & Renewal Lifecycle Foundations
+
+المهمة الحالية:
+تحويل subscription placeholders من P13-A إلى metadata حقيقية قابلة للإدارة والمراجعة.
+
+الهدف:
+تمكين السوبر أدمن من:
+- ضبط planCode
+- ضبط subscriptionStatus
+- ضبط billing period
+- ضبط trial window
+- ضبط grace period
+- رؤية renewal due / expired / grace states
+- تسجيل تغييرات الاشتراك في audit trail
+
+بطريقة:
+platform-managed subscription metadata only
+بدون أي payment provider أو billing automation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT SUBSCRIPTION PLACEHOLDERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- TenantPlanSummary
+- SubscriptionStatus
+- billingPeriodStart
+- billingPeriodEnd
+- trialEndsAt
+- gracePeriodEndsAt
+- planCode
+- subscriptionStatus
+- TenantRiskSignalSummary
+- Tenant Registry UI
+- Lifecycle controls من P13-B
+
+حدّد:
+- أين subscription fields حاليًا null
+- هل الأفضل إضافتها على workspacesTable أو جدول مستقل tenant_subscriptions
+- كيف نحافظ على backward compatibility
+- كيف نعرض البيانات في UI بدون كسر P13-A/B
+- كيف نسجل تغييرات الاشتراك
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DATA MODEL DECISION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+نفّذ أحد الخيارين حسب بنية المشروع:
+
+الخيار الأفضل:
+أضف جدول مستقل:
+
+tenant_subscriptions
+
+Fields:
+- id
+- workspaceId
+- planCode
+- subscriptionStatus
+- billingPeriodStart
+- billingPeriodEnd
+- renewalDueAt
+- trialStartedAt
+- trialEndsAt
+- gracePeriodStartedAt
+- gracePeriodEndsAt
+- cancelledAt
+- suspendedAt
+- metadataJson
+- createdAt
+- updatedAt
+
+مع unique workspaceId.
+
+أو إذا المشروع أبسط:
+أضف fields على workspacesTable.
+
+لكن القرار المفضل:
+tenant_subscriptions table
+لأن الاشتراك domain مستقل عن workspace identity.
+
+ممنوع:
+- payment provider customer id الآن
+- invoice id
+- card/payment fields
+- tax fields
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SUBSCRIPTION STATUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ثبّت SubscriptionStatus:
+
+- trialing
+- active
+- renewal_due
+- grace_period
+- expired
+- suspended
+- cancelled
+- unknown
+
+مع deterministic semantics:
+
+trialing:
+trialEndsAt في المستقبل
+
+active:
+billingPeriodEnd في المستقبل وليس قريب جدًا من renewalDueAt
+
+renewal_due:
+billingPeriodEnd قريب أو renewalDueAt وصل
+
+grace_period:
+billingPeriodEnd انتهى لكن gracePeriodEndsAt في المستقبل
+
+expired:
+billingPeriodEnd انتهى و gracePeriodEndsAt انتهى أو غير موجود
+
+suspended:
+subscription suspended إداريًا
+
+cancelled:
+cancelledAt موجود أو status cancelled
+
+unknown:
+لا توجد subscription metadata
+
+مهم:
+لا تعمل automatic workspace suspension في P13-C.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PLAN CODE FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف plan codes:
+
+- starter
+- growth
+- business
+- enterprise
+- custom
+
+مع:
+- planName
+- planTier
+- display order
+- default nullable limits لاحقًا
+
+لا تضف entitlements العميقة الآن.
+P13-D مسؤول عنها.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SUBSCRIPTION DERIVATION LIB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+subscription-lifecycle.ts
+
+Exports:
+- SubscriptionStatus
+- PlanCode
+- deriveSubscriptionStatus(subscription, now)
+- isRenewalApproaching(subscription, now)
+- isGracePeriodActive(subscription, now)
+- isSubscriptionExpired(subscription, now)
+- calculateDaysUntilEnd(subscription, now)
+- calculateDaysPastDue(subscription, now)
+- validateSubscriptionMetadataUpdate(input)
+- buildSubscriptionAuditPayload(...)
+
+Validation:
+- planCode valid
+- dates ISO valid
+- billingPeriodStart < billingPeriodEnd
+- trialStartedAt <= trialEndsAt
+- gracePeriodStartedAt <= gracePeriodEndsAt
+- cancelledAt cannot be before createdAt if available
+- status must be known
+- no impossible combinations مثل active مع cancelledAt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف endpoints:
+
+GET /platform/tenants/:tenantId/subscription
+
+PATCH /platform/tenants/:tenantId/subscription
+
+Body:
+{
+  "planCode": "starter|growth|business|enterprise|custom",
+  "subscriptionStatus": "...",
+  "billingPeriodStart": "...",
+  "billingPeriodEnd": "...",
+  "renewalDueAt": "...",
+  "trialStartedAt": "...",
+  "trialEndsAt": "...",
+  "gracePeriodStartedAt": "...",
+  "gracePeriodEndsAt": "...",
+  "cancelledAt": "...",
+  "suspendedAt": "...",
+  "metadataJson": {}
+}
+
+Rules:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- validate metadata
+- upsert subscription record
+- record audit log
+- return updated subscription + updated tenant profile summary
+
+مهم:
+- PATCH metadata فقط
+- لا billing action
+- لا payment
+- لا auto suspend
+- لا invoice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث PlatformTenantProfile ليقرأ subscription metadata:
+
+- planCode
+- planName
+- planTier
+- subscriptionStatus derived
+- billingPeriodStart
+- billingPeriodEnd
+- renewalDueAt
+- trialEndsAt
+- gracePeriodEndsAt
+
+Risk signals:
+- renewalApproaching
+- subscriptionExpired
+- gracePeriodActive
+
+لكن:
+- risk signals معلوماتية فقط
+- لا تغير workspace.status تلقائيًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+useTenantSubscription(tenantId)
+useUpdateTenantSubscription()
+
+مع:
+- GET hook read-only
+- PATCH mutation واحد فقط
+- invalidates tenant registry + tenant profile
+- loading/error/success states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Subscription Management
+
+يعرض:
+- planCode
+- subscriptionStatus
+- billingPeriodStart
+- billingPeriodEnd
+- renewalDueAt
+- trialEndsAt
+- gracePeriodEndsAt
+- derived days until end
+- grace status
+- expired status
+
+ويضيف:
+- Edit Subscription Metadata button
+- modal/form
+- plan select
+- status select
+- date inputs
+- metadata note optional
+- confirmation checkbox
+- reason required
+
+مهم:
+- النص واضح: metadata only, no payment processing
+- لا invoice
+- لا charge
+- لا payment method
+- لا tax
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SUBSCRIPTION INTELLIGENCE DISPLAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف badges/alerts:
+- Renewal approaching
+- Trial ending soon
+- Grace period active
+- Subscription expired
+- Cancelled
+- Suspended
+
+لكن:
+- لا تقفل workspace
+- لا تعرض تهديد قانوني
+- لا تقول تم التحصيل
+- لا payment wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — AUDIT / OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Audit event:
+subscription_metadata_updated
+
+يسجل:
+- tenantId
+- workspaceId
+- actorId
+- previousSubscriptionStatus
+- newSubscriptionStatus
+- previousPlanCode
+- newPlanCode
+- changedFields
+- reason
+- occurredAt
+
+Structured logs:
+- tenant_subscription_read
+- tenant_subscription_updated
+
+بدون تسجيل بيانات حساسة أو مالية.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Subscription Metadata MUST:
+- remain super-admin only
+- require reason
+- require confirmation
+- never process payments
+- never generate invoices
+- never charge customers
+- never auto-suspend workspace
+- never enforce module access
+- never send legal/email notices
+- never store card/payment data
+- fail closed on invalid dates
+
+أي:
+subscription lifecycle metadata فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+subscription status derivation stable
+
+T2:
+trialing derivation
+
+T3:
+renewal_due derivation
+
+T4:
+grace_period derivation
+
+T5:
+expired derivation
+
+T6:
+cancelled/suspended precedence
+
+T7:
+date validation rejects invalid periods
+
+T8:
+impossible combinations rejected
+
+T9:
+tenant subscription GET super-admin only
+
+T10:
+tenant subscription PATCH requires reason/confirmation
+
+T11:
+PATCH upserts subscription metadata
+
+T12:
+audit event emitted
+
+T13:
+tenant profile reflects subscription metadata
+
+T14:
+risk signals reflect renewal/grace/expired
+
+T15:
+frontend plan/status maps stable
+
+T16:
+subscription form validation stable
+
+T17:
+no payment/invoice/charge/tax/card/legal/email wording exists
+
+T18:
+mutation hook count limited
+
+T19:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- Stripe/Paddle/payment provider
+- invoices
+- charges
+- tax
+- payment methods
+- customer billing portal
+- automatic suspension
+- entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing
+- accounting exports
+
+خلك:
+subscription metadata + lifecycle intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13c-report.txt
+
+ويحتوي:
+- subscription data model decision
+- subscription status model
+- plan code foundation
+- subscription derivation library
+- backend API surface
+- tenant registry profile updates
+- frontend subscription management UI
+- subscription intelligence display
+- audit/observability behavior
+- safety guarantees
+- tests results
+- remaining subscription gaps
+- readiness assessment قبل Entitlements & Module Access

@@ -1,0 +1,526 @@
+راجع:
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+- workflow-phase-12h-final-report.txt
+
+خصوصًا:
+- tenant_subscriptions table
+- subscription-lifecycle.ts
+- tenant-registry.ts
+- tenants.ts routes
+- super-admin-tenants.tsx
+- subscription-lifecycle-config.ts
+- tenant-registry-hooks.ts
+- activity_logs audit pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-D — Entitlements, Module Access & Feature Limit Controls
+
+ولا تنفّذ:
+- HR employee management
+- payroll processing
+- recruitment workflows
+- attendance logic
+- LMS content
+- billing provider integration
+- payment collection
+- invoice generation
+- automatic workspace suspension
+- external legal/email notices
+- tenant self-service billing portal
+
+عنوان المهمة:
+WORKFLOW PHASE 13-D — Entitlements, Module Access & Feature Limit Controls
+
+المهمة الحالية:
+تأسيس نظام entitlements للمستأجرين يحدد:
+- الموديولات المفعلة
+- الموديولات المقفلة
+- حدود الخطة
+- custom overrides
+- feature access visibility
+
+الهدف:
+تمكين المنصة من معرفة:
+- ماذا يحق لكل Workspace استخدامه
+- ما هي حدود الخطة
+- ما الذي تم تفعيله أو تعطيله
+- ما الذي تم تخصيصه يدويًا
+- كيف تعرض هذه المعلومات للسوبر أدمن
+
+بطريقة:
+deterministic entitlement foundation
+بدون بناء وظائف HR نفسها
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT PLAN / SUBSCRIPTION FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- PLAN_CODE_MAP
+- tenant_subscriptions.planCode
+- PlatformTenantProfile.planCode / planName / planTier
+- TenantPlanSummary من P13-A
+- SubscriptionManagementPanel من P13-C
+- Tenant Registry UI
+- existing feature/module patterns إن وجدت
+- existing permissions/security patterns
+
+حدّد:
+- هل يوجد module registry حالي؟
+- هل يوجد feature flag system؟
+- هل يوجد limits model؟
+- هل الأفضل إضافة entitlement table مستقل؟
+- كيف نربط planCode بالـ entitlements بدون billing provider
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — MODULE REGISTRY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure config:
+
+platform-modules.ts
+
+PlatformModuleCode:
+- hr_core
+- employee_records
+- organization_structure
+- attendance
+- leave_management
+- payroll
+- recruitment
+- onboarding
+- performance
+- lms
+- documents
+- workflows
+- analytics
+- advanced_analytics
+- integrations
+- ai_automation
+- governance_console
+- audit_logs
+- self_service
+- manager_portal
+
+لكل module:
+- label
+- description
+- category
+- order
+- isCore
+- requiresHigherPlan?
+- safetyNotes?
+
+مهم:
+هذه registry فقط.
+لا تبني module implementation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — FEATURE LIMIT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ:
+
+FeatureLimitCode:
+- seats
+- storage_gb
+- monthly_api_calls
+- documents
+- workflows
+- custom_reports
+- integrations
+- ai_actions
+- audit_retention_days
+- workspaces
+
+لكل limit:
+- label
+- unit
+- description
+- order
+- nullableMeansUnlimited: boolean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PLAN ENTITLEMENT MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ:
+
+PLAN_ENTITLEMENT_MAP
+
+لكل plan:
+starter / growth / business / enterprise / custom
+
+يحدد:
+- enabledModules
+- disabledModules
+- defaultLimits
+- planTier
+- notes
+
+مثال منطقي:
+starter:
+- hr_core
+- employee_records
+- organization_structure
+- attendance
+- leave_management
+- documents
+- self_service
+
+growth:
+starter +
+- workflows
+- analytics
+- onboarding
+
+business:
+growth +
+- payroll
+- recruitment
+- performance
+- integrations
+- manager_portal
+
+enterprise:
+business +
+- lms
+- advanced_analytics
+- ai_automation
+- governance_console
+- audit_logs
+
+custom:
+يعتمد على overrides
+
+مهم:
+- governance_console غالبًا super-admin/platform فقط، لا تفتحه للـ tenant UI الآن
+- audit_logs ممكن tenant-scoped لاحقًا، لكن هنا entitlement فقط
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4.5 — IMPORTANT ARCHITECTURE NOTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تخلط بين:
+- Platform Governance Console للسوبر أدمن
+- Tenant Governance/Audit visibility للمستأجر لاحقًا
+
+في P13-D:
+governance_console module entitlement يعني:
+"هل هذا tenant مؤهل مستقبلاً لرؤية tenant-scoped governance/audit features"
+وليس:
+"فتح Super Admin Governance Console له"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — CUSTOM ENTITLEMENT OVERRIDES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف جدول أو model:
+
+tenant_entitlement_overrides
+
+Fields:
+- id
+- workspaceId
+- moduleCode
+- overrideType: enable | disable | limit_override
+- limitCode nullable
+- limitValue nullable
+- reason
+- createdBy
+- createdAt
+- updatedAt
+- metadataJson
+
+Rules:
+- unique per workspaceId + moduleCode + limitCode
+- reason required
+- super-admin only
+- no payment logic
+
+إذا إضافة table ثقيلة:
+ابدأ بـ JSON metadata في tenant_subscriptions.metadataJson
+لكن الأفضل table مستقل.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ENTITLEMENT DERIVATION LIB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+tenant-entitlements.ts
+
+Exports:
+- derivePlanEntitlements(planCode)
+- applyEntitlementOverrides(base, overrides)
+- deriveTenantEntitlementProfile(planCode, overrides)
+- isModuleEnabled(profile, moduleCode)
+- getFeatureLimit(profile, limitCode)
+- validateEntitlementOverride(input)
+- buildEntitlementAuditPayload(...)
+
+EntitlementProfile:
+- planCode
+- enabledModules
+- disabledModules
+- limits
+- overridesApplied
+- customEntitlementsCount
+- derivedAt
+
+Validation:
+- moduleCode valid
+- limitCode valid إذا override limit
+- reason min length 10
+- enable/disable cannot target unknown module
+- limit_override requires limitCode + limitValue
+- limitValue must be non-negative or null if unlimited allowed
+- cannot disable core safety module إذا قررت تمنعه
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف APIs:
+
+GET /platform/tenants/:tenantId/entitlements
+
+PATCH /platform/tenants/:tenantId/entitlements/overrides
+
+Body:
+{
+  "overrides": [
+    {
+      "moduleCode": "payroll",
+      "overrideType": "enable",
+      "limitCode": null,
+      "limitValue": null,
+      "reason": "..."
+    }
+  ],
+  "confirmation": true
+}
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- read subscription planCode
+- derive base entitlements
+- apply overrides
+- PATCH upserts overrides
+- audit log event:
+  tenant_entitlements_updated
+- return updated entitlement profile
+
+مهم:
+- لا enforce access فعليًا في كل النظام الآن إلا إذا عندك gate جاهز وآمن
+- هذه foundation + visibility + future gates
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث TenantPlanSummary ليستخدم entitlements:
+
+- enabledModules
+- disabledModules
+- restrictedModules
+- customEntitlementsCount
+- limitsSummary
+
+في Tenant Registry table:
+اعرض:
+- modules count
+- enabled key modules
+- custom overrides count
+- plan limit snapshot
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- MODULE_REGISTRY_CONFIG
+- FEATURE_LIMIT_CONFIG
+- PLAN_ENTITLEMENT_CONFIG
+- ENTITLEMENT_OVERRIDE_CONFIG
+- ENTITLEMENT_SAFETY_CONTRACT
+
+مع:
+- deterministic ordering
+- no payment/billing wording
+- no HR execution wording
+- no super-admin governance exposure wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantEntitlements(tenantId)
+- useUpdateTenantEntitlementOverrides()
+
+مع:
+- GET hook
+- PATCH mutation واحد فقط
+- invalidates tenant registry + entitlements
+- loading/error/success states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Entitlements & Module Access
+
+يعرض:
+- planCode
+- enabled modules grid
+- disabled modules grid
+- feature limits table
+- custom overrides count
+- overrides list
+- derivedAt
+
+ويضيف:
+- Edit Overrides button
+- modal:
+  - select module
+  - select overrideType
+  - select limitCode إذا limit_override
+  - limitValue
+  - reason required
+  - confirmation checkbox
+  - submit disabled حتى valid
+
+مهم:
+- النص واضح: access foundation only
+- لا تعرض billing/payment
+- لا تقول "charged"
+- لا تفتح tenant HR screens
+- لا تفتح Super Admin Governance للـ tenant
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Entitlements MUST:
+- remain super-admin only
+- require reason
+- require confirmation
+- never process payments
+- never generate invoices
+- never implement HR modules
+- never expose super-admin governance to tenants
+- never auto-suspend workspaces
+- never send legal/email notices
+- fail closed on unknown modules/limits
+
+أي:
+module access foundation فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+module registry stable
+
+T2:
+feature limit registry stable
+
+T3:
+plan entitlement map stable
+
+T4:
+starter/growth/business/enterprise/custom derivation
+
+T5:
+override enable/disable applies correctly
+
+T6:
+limit override applies correctly
+
+T7:
+invalid module rejected
+
+T8:
+invalid limit rejected
+
+T9:
+reason/confirmation required
+
+T10:
+tenant entitlements GET super-admin only
+
+T11:
+PATCH overrides upserts and audits
+
+T12:
+tenant registry reflects customEntitlementsCount
+
+T13:
+frontend module config stable
+
+T14:
+frontend entitlement form validation stable
+
+T15:
+mutation hook count limited
+
+T16:
+no payment/billing/HR execution/legal/email/super-admin exposure wording exists
+
+T17:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- HR module pages
+- payroll execution
+- recruitment execution
+- attendance engine
+- LMS content
+- billing provider
+- payment/invoice/tax logic
+- tenant self-service billing
+- automatic suspension
+- global route enforcement across all modules
+- legal/email notices
+- super-admin governance exposure to tenants
+
+خلك:
+entitlement derivation + overrides + visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13d-report.txt
+
+ويحتوي:
+- module registry model
+- feature limit model
+- plan entitlement map
+- override model
+- entitlement derivation library
+- backend API surface
+- tenant registry profile updates
+- frontend entitlements UI
+- safety guarantees
+- tests results
+- remaining entitlement gaps
+- readiness assessment قبل Usage Limits & Capacity Intelligence

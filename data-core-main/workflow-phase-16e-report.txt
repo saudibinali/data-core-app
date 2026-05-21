@@ -1,0 +1,216 @@
+================================================================================
+WORKFLOW PHASE 16-E — COMMERCIAL-TO-WORKSPACE ENFORCEMENT
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P16-E only — do not start P16-F)
+
+================================================================================
+1. ENFORCEMENT MODEL
+================================================================================
+
+Table: workspace_access_enforcement
+Schema: lib/db/src/schema/workspace-access-enforcement.ts
+
+Fields:
+  id, workspaceId (unique), subscriptionId (optional),
+  enforcementStatus (normal | read_only | restricted | suspended_view_only | terminated_view_only),
+  enforcementReason, source, appliedBy, appliedAt, expiresAt (optional),
+  allowLogin, allowRead, allowCreate, allowUpdate, allowDelete, allowExport, allowAdminAccess,
+  internalNotes, createdAt, updatedAt
+
+Rules:
+  - normal: full operational access (subject to existing RBAC)
+  - read_only / suspended_view_only / terminated_view_only:
+      allowLogin=true, allowRead=true, allowCreate/Update/Delete=false
+  - No hard delete, no full login blocking by default in P16-E
+  - One enforcement row per workspace (upsert via PATCH)
+  - expiresAt past due falls back to normal when resolving
+
+Bootstrap: scripts/apply-p16-tables.cjs (workspace_access_enforcement)
+
+Config: artifacts/api-server/src/lib/workspace-access-enforcement-config.ts
+
+================================================================================
+2. READ-ONLY ACCESS BEHAVIOR
+================================================================================
+
+resolveWorkspaceAccessMode(workspaceId)
+  - Returns current flags, subscription status, reason, source, applied metadata
+
+assertWorkspaceCanWrite(workspaceId, action)
+  - Throws WorkspaceWriteBlockedError (code WORKSPACE_READ_ONLY) when create/update/delete blocked
+  - GET/read paths unaffected
+
+Tenant API: GET /tenant/workspace-access
+  - Workspace members fetch current mode for UI banner (no platform permission required)
+
+================================================================================
+3. EVALUATION RULES
+================================================================================
+
+evaluateCommercialWorkspaceEnforcement(tenantId)
+  - Links P16-A subscription status, P16-D policy evaluation, P15 contract endDate
+  - Returns recommendation + reasons; manualApplyOnly=true; isAutomaticAllowed=false
+
+Recommendations:
+  - active/trial (not expired) → normal
+  - grace_period → normal (default, no auto read-only)
+  - past_due → read_only (recommendation only)
+  - suspended → suspended_view_only
+  - terminated → terminated_view_only
+  - archived / no subscription → review_required
+
+No automatic apply in P16-E (manual_required via super admin PATCH only).
+
+================================================================================
+4. PERMISSIONS ADDED (45 total platform permissions)
+================================================================================
+
+  - platform.workspaceAccess.read
+  - platform.workspaceAccess.update
+  - platform.workspaceAccess.evaluate
+
+Role matrix:
+  - root_platform_owner / platform_admin: read + update + evaluate
+  - finance_admin: read + evaluate only (no update in P16-E)
+  - sales_admin / support_admin: read + evaluate
+  - auditor / read_only_operator: read only
+  - workspace_support: none
+
+================================================================================
+5. BACKEND APIs (platform)
+================================================================================
+
+Router: artifacts/api-server/src/routes/workspace-access.ts
+
+  GET   /platform/tenants/:tenantId/workspace-access → platform.workspaceAccess.read
+  GET   /platform/tenants/:tenantId/workspace-access/evaluation → platform.workspaceAccess.evaluate
+  PATCH /platform/tenants/:tenantId/workspace-access → platform.workspaceAccess.update
+
+Not implemented:
+  - DELETE enforcement
+  - Tenant-side PATCH
+  - Automatic enforcement endpoint
+  - Payment / email / login-block endpoints
+
+Validation on PATCH:
+  - reason required (min 10 chars)
+  - allowLogin=false rejected
+  - allowRead=false rejected
+  - enforcementStatus enum validated
+
+================================================================================
+6. MIDDLEWARE / GUARD COVERAGE
+================================================================================
+
+File: artifacts/api-server/src/middlewares/workspaceAccessWriteGuard.ts
+Mounted: artifacts/api-server/src/routes/index.ts (after requireDatabase, before operational routers)
+
+Behavior:
+  - Blocks POST/PUT/PATCH/DELETE for workspace users when read-only
+  - Allows GET/HEAD/OPTIONS
+  - Exempt: /platform/*, /auth/*, /setup*, /health*, /tenant/billing/*
+  - Exempt: super_admin role
+  - Returns 403 { code: WORKSPACE_READ_ONLY, error: "Workspace is in read-only mode..." }
+  - Audits workspace_write_blocked_read_only
+
+Covered route groups (write methods):
+  workspaces, invitations, admin, dashboard, departments, users, groups,
+  messages, tickets, comments, notifications, approvals, activity, calendar,
+  workspace-roles, modules, events, workflows, governance, forms, datasources,
+  hr, leave, storage, stream, tenants (tenant ops), commercial (platform only paths exempt)
+
+NOT covered (by design):
+  - /platform/* (platform administration)
+  - /auth/* (session)
+  - /tenant/billing/* (invoice read/download)
+
+================================================================================
+7. TENANT WORKSPACE UI BEHAVIOR
+================================================================================
+
+WorkspaceAccessProvider + WorkspaceReadOnlyBanner (App.tsx tenant routes)
+  - Banner: "Workspace is in read-only mode due to subscription status."
+  - body[data-workspace-read-only] set for global write-action styling
+  - useWorkspaceOperationalWrite() exposes canCreate/canUpdate/canDelete for components
+  - Billing invoices page unchanged (GET/download exempt at API layer)
+
+Write buttons: disable via hook/context in future pages; API enforcement is authoritative.
+
+================================================================================
+8. SUPER ADMIN — WORKSPACE ACCESS CONTROL
+================================================================================
+
+Location: Tenant Registry → Subscription & Entitlements
+Component: artifacts/ops-platform/src/components/subscription/WorkspaceAccessControlPanel.tsx
+
+Displays: enforcementStatus, access flags, reason, source, appliedAt, evaluation recommendation
+
+Actions (permission-gated):
+  - Evaluate Access → platform.workspaceAccess.evaluate
+  - Apply Read-Only / Suspended View-Only / Terminated View-Only / Restore Normal
+    → platform.workspaceAccess.update (reason required)
+
+Forbidden UI: Block Login, Delete Workspace, Purge Data, Pay Now, Stripe, Checkout,
+Send Email, Auto Charge, Auto Suspend
+
+Safety contract: artifacts/ops-platform/src/lib/workspace-access-enforcement-config.ts
+  WORKSPACE_ACCESS_ENFORCEMENT_SAFETY_CONTRACT (all flags true)
+
+================================================================================
+9. AUDIT EVENTS
+================================================================================
+
+  - workspace_access_evaluated
+  - workspace_access_mode_changed
+  - workspace_access_change_blocked
+  - workspace_write_blocked_read_only
+
+Metadata: actorId, workspaceId/tenantId, subscriptionId, previousMode, nextMode,
+reason, source, actionBlocked, route, timestamp (no secrets / full payloads)
+
+================================================================================
+10. SAFETY GUARANTEES
+================================================================================
+
+  - Read-only after subscription end (manual apply)
+  - Login allowed in read-only; read allowed; create/update/delete blocked
+  - No data deletion; no destructive workspace actions
+  - manualApplyOnly; noAutomaticEnforcement
+  - Platform routes exempt; tenant billing read/download still accessible
+  - No payment, Stripe, checkout, email, dunning, tax, ledger
+  - Permission-gated; audit on changes and blocked writes
+
+================================================================================
+11. TESTS RUN
+================================================================================
+
+api-server:
+  pnpm exec vitest run \
+    src/lib/__tests__/workspace-access-resolver.test.ts \
+    src/lib/__tests__/commercial-workspace-enforcement-evaluator.test.ts \
+    src/routes/__tests__/workspace-access.test.ts
+  Result: passed
+
+ops-platform:
+  pnpm exec vitest run src/lib/__tests__/phase-16e-workspace-access.test.ts
+  Result: 8 passed
+
+DB: node scripts/apply-p16-tables.cjs
+  Tables include workspace_access_enforcement
+
+================================================================================
+12. LIMITATIONS LEFT FOR P16-F
+================================================================================
+
+P16-F (NOT STARTED): Subscription Console Integration
+
+Intentionally deferred:
+  - Unified subscription console UX across all P16 models
+  - Automatic enforcement when policy enforcementMode allows
+  - Deeper write-button coverage on every tenant page via shared components
+  - Workspace admin partial access during suspension (allowAdminAccess toggles)
+
+================================================================================
+END OF REPORT — P16-E COMPLETE. DO NOT START P16-F.
+================================================================================

@@ -1,0 +1,281 @@
+راجع:
+- workflow-phase-5c-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- validation engine section
+- skipped dependency risks
+- recursion analysis notes
+- fanout safety concerns
+- branching governance gaps
+
+ثم نفّذ فقط:
+P5-D — Validation Engine Foundations
+
+ولا تنفّذ:
+- scheduler
+- retries
+- DAG merge execution
+- graph compiler الكامل
+- simulation engine
+- distributed orchestration
+
+عنوان المهمة:
+WORKFLOW PHASE 5-D — Validation Engine & Workflow Governance Safety
+
+المهمة الحالية:
+تحويل validation من:
+basic schema checks
+
+إلى:
+workflow governance safety analysis
+
+الهدف:
+كشف:
+- invalid workflow topology
+- unreachable paths
+- skipped dependency risks
+- unsafe routing
+- automation amplification risks
+
+قبل:
+workflow activation/publish
+
+بطريقة:
+deterministic pre-runtime governance model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT VALIDATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- validator.ts
+- P5-C routing validation
+- workflow activation flow
+- stepOutputs semantics
+- condition routing behavior
+
+حدّد:
+- ما الذي يتم التحقق منه حاليًا
+- ما الذي ما يزال runtime-risk فقط
+- أين توجد blind spots
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN VALIDATION ENGINE STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ValidationEngine
+
+كمجموعة passes مستقلة.
+
+المطلوب:
+- topology validation
+- dependency validation
+- governance validation
+- quota/fanout estimation
+- routing safety validation
+
+كل pass:
+- deterministic
+- isolated
+- independently testable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — TOPOLOGY ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف validation تغطي:
+
+A)
+unreachable steps
+
+B)
+orphaned branches
+
+C)
+dead-end routing
+
+D)
+duplicate route ambiguity
+
+E)
+branches that never converge
+(تحذير فقط حالياً)
+
+المطلوب:
+- graph traversal analysis
+- forward-only assumptions
+- no runtime execution
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — STEP OUTPUT DEPENDENCY VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+ctx.stepOutputs[index]
+
+داخل:
+templates / conditions / assignments
+
+واكتشف:
+خطوات تعتمد على outputs
+من steps قد يتم تخطيها بسبب routing.
+
+المطلوب:
+تحذير structured:
+"Step 5 depends on output from step 3 which may be skipped."
+
+لا تمنع activation حالياً.
+Warning فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FANOUT & AMPLIFICATION ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- notification fanout
+- recursive routing amplification
+- branch multiplication risk
+- assignment explosion
+
+المطلوب:
+تقدير تقريبي deterministic:
+- estimated max executed steps
+- estimated notification count
+- estimated branching expansion
+
+مع:
+warning thresholds.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ROUTING SAFETY EXPANSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وسّع validation الحالي ليشمل:
+- nested condition chains
+- long routing jumps
+- branch isolation analysis
+- repeated convergence patterns
+
+بدون:
+DAG merge semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — VALIDATION RESULT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ValidationResult
+
+بحيث يحتوي:
+- errors
+- warnings
+- governance notices
+- estimated execution metrics
+
+مع:
+stable error codes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured logs:
+- validation_pass_started
+- validation_pass_completed
+- validation_warning_emitted
+- validation_failed
+
+مع:
+- workflowId
+- workspaceId
+- validationPass
+- findingsCount
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — DIAGNOSTICS & ADMIN VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+validation output يظهر:
+- واضح للإدمن
+- قابل للفهم
+- actionable
+
+المطلوب:
+- step references
+- route references
+- human-readable warnings
+- stable governance codes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+unreachable step detection
+
+T2:
+orphaned branch detection
+
+T3:
+dead-end routing detection
+
+T4:
+stepOutputs skipped dependency warning
+
+T5:
+fanout estimation warnings
+
+T6:
+nested routing validation
+
+T7:
+validation remains deterministic
+
+T8:
+existing workflows still validate correctly
+
+T9:
+routing-safe workflows produce zero errors
+
+T10:
+warnings do not block activation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- runtime execution simulation
+- scheduler
+- retries
+- DAG execution engine
+- distributed graph traversal
+- async validation jobs
+
+خلك:
+static deterministic governance analysis.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5d-report.txt
+
+ويحتوي:
+- validation architecture
+- topology analysis model
+- dependency analysis behavior
+- fanout estimation model
+- routing governance behavior
+- warnings/errors model
+- observability additions
+- tests results
+- remaining governance gaps
+- readiness assessment قبل scheduling phase

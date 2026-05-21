@@ -1,0 +1,451 @@
+================================================================================
+ARCHITECTURE TICKET 06-B — ticket.updated + ticket.closed MIGRATION REPORT
+Date: 2026-05-13
+Status: COMPLETE
+================================================================================
+
+## Objective
+Migrate ticket.updated and ticket.closed flows from direct eventDispatcher.dispatch()
+calls and inline DB side-effects to appEventBus.emit() using the existing bridge
+architecture. This is the first "complex" migration: two events, two listener files,
+inline activity logging, inline notification insertion, inline SSE push, and one
+legacy listener removal — all changed in one atomic commit.
+
+================================================================================
+
+## Flow: BEFORE (pre-Ticket 06-B)
+
+  tickets.ts  PATCH /tickets/:id
+    │
+    ├─ [1] db.update(ticketsTable)                                        ← DB write
+    │
+    ├─ [2] IF status changed:                                             ← inline
+    │         await db.insert(activityLogsTable) { action: "status_changed" }
+    │
+    ├─ [3] IF assignee changed:                                           ← inline
+    │         await db.insert(activityLogsTable) { action: "assigned" }
+    │         await db.insert(notificationsTable) { type: "assigned" }
+    │         emitToUser(newAssigneeId, "notification")                   ← SSE push
+    │
+    ├─ [4] res.json(full)
+    │
+    └─ [5] if isClosed:
+    │         void eventDispatcher.dispatch(EVENTS.TICKET_CLOSED, { ticketId, resolution })
+    │                   │
+    │                   ├──▶ workspace_event_logs
+    │                   ├──▶ WorkflowEngine
+    │                   └──▶ notifications.ts: TICKET_CLOSED listener
+    │                              └──▶ db.select(ticket) → notifyUsers(creator)
+    │                                     (no SSE push — notifyUsers() lacks emitToUser)
+    │
+       else:
+               void eventDispatcher.dispatch(EVENTS.TICKET_UPDATED, { ticketId, changes })
+                         │
+                         ├──▶ workspace_event_logs
+                         └──▶ WorkflowEngine
+
+  appEventBus.subscribe(EVENT_TYPES.TICKET_UPDATED, ...)     in activity.ts          — IDLE
+  appEventBus.subscribe(EVENT_TYPES.TICKET_UPDATED, ...)     in notifications-bus.ts — IDLE
+  No ticket.status_changed listener existed.
+
+================================================================================
+
+## Flow: AFTER (post-Ticket 06-B)
+
+  tickets.ts  PATCH /tickets/:id
+    │
+    ├─ [1] db.update(ticketsTable)                                        ← DB write
+    │
+    ├─ [2] Build normalized changes/previousValues maps:                  ← NEW
+    │         { status, assigneeId, title, priority, description, departmentId }
+    │         (only fields that actually changed are included)
+    │
+    ├─ [3] res.json(full)                                                 ← unblocked
+    │         (inline activityLogsTable inserts REMOVED)
+    │         (inline notificationsTable insert + emitToUser REMOVED)
+    │
+    ├─ [4] void appEventBus.emit(EVENT_TYPES.TICKET_UPDATED)              ← ALWAYS
+    │         │
+    │         │  [concurrent fan-out via Promise.allSettled]
+    │         │
+    │         ├──▶ activity.ts listener (TICKET_UPDATED)       ✅ ACTIVE
+    │         │       • changes.status     → action = "status_changed", metadata = "old -> new"
+    │         │       • changes.assigneeId → action = "assigned"
+    │         │       • other changes      → action = "ticket_updated"
+    │         │       └──▶ db.insert(activityLogsTable)
+    │         │
+    │         ├──▶ notifications-bus.ts listener (TICKET_UPDATED)  ✅ ACTIVE
+    │         │       • only when changes.assigneeId is a number
+    │         │       • self-assignment guard (newAssigneeId !== updatedByUserId)
+    │         │       • same-assignee guard (previousValues.assigneeId !== newAssigneeId)
+    │         │       └──▶ db.insert(notificationsTable) { type: "assigned" }
+    │         │             + emitToUser(newAssigneeId, "notification")    ← SSE push ✅
+    │         │
+    │         └──▶ bridge.ts (subscribeToAll)
+    │                   └──▶ eventDispatcher.dispatch()
+    │                               ├──▶ workspace_event_logs              ✅
+    │                               └──▶ WorkflowEngine                    ✅
+    │
+    └─ [5] IF status changed:
+               void appEventBus.emit(EVENT_TYPES.TICKET_STATUS_CHANGED)   ← NEW EVENT
+                 │
+                 │  [concurrent fan-out]
+                 │
+                 ├──▶ notifications-bus.ts listener (TICKET_STATUS_CHANGED)  ✅ NEW
+                 │       • only on toStatus = "closed" or "resolved"
+                 │       • fetches ticket.createdByUserId + title from DB
+                 │       • self-close guard (changedByUserId !== createdByUserId)
+                 │       └──▶ db.insert(notificationsTable) { type: "ticket_closed" }
+                 │             + emitToUser(creatorId, "notification")     ← SSE push ✅ NEW
+                 │
+                 └──▶ bridge.ts (subscribeToAll)
+                           └──▶ eventDispatcher.dispatch()
+                                       ├──▶ workspace_event_logs           ✅
+                                       └──▶ WorkflowEngine                 ✅
+
+================================================================================
+
+## Listeners Activated (Ticket 06-B)
+
+  Listener             │ File                │ Status    │ Writes to
+  ─────────────────────┼─────────────────────┼───────────┼──────────────────────────────
+  ticket.updated       │ activity.ts         │ ✅ ACTIVE │ activity_logs
+  ticket.updated       │ notifications-bus.ts│ ✅ ACTIVE │ notifications (assigned) + SSE
+  ticket.status_changed│ notifications-bus.ts│ ✅ NEW    │ notifications (ticket_closed) + SSE
+
+================================================================================
+
+## Normalized Changes Map
+
+  The PATCH handler now builds an explicit changes/previousValues pair instead of
+  passing raw `parsed.data` to the event. Only fields that actually changed are included.
+
+  Tracked fields:
+    status        → changes.status / previousValues.status
+    assigneeUserId→ changes.assigneeId / previousValues.assigneeId   (renamed to assigneeId)
+    title         → changes.title / previousValues.title
+    priority      → changes.priority / previousValues.priority
+    description   → changes.description / previousValues.description
+    departmentId  → changes.departmentId / previousValues.departmentId
+
+  If no fields changed (unlikely in a real PATCH call), `changes` is an empty object.
+  The TICKET_UPDATED event is still emitted — the activity listener will write
+  action = "ticket_updated" (the "other" branch in activity.ts).
+
+  idempotencyKey strategy:
+    TICKET_UPDATED:      "ticket-updated-<ticketId>"
+    TICKET_STATUS_CHANGED: "ticket-status-<ticketId>-<newStatus>"
+  Both are informational only — the IdempotencyGuard in each listener uses event.id
+  (UUID generated at emit time), which is globally unique.
+
+================================================================================
+
+## Inline Side-Effects Removed from tickets.ts
+
+  1. Status-change activity log (was synchronous, before res.json):
+       await db.insert(activityLogsTable).values({
+         action: "status_changed",
+         metadata: `${oldTicket.status} -> ${parsed.data.status}`
+       });
+     Now handled by: activity.ts ticket.updated listener (async, after res.json).
+
+  2. Assignee-change activity log (was synchronous, before res.json):
+       await db.insert(activityLogsTable).values({ action: "assigned" });
+     Now handled by: activity.ts ticket.updated listener (async, after res.json).
+
+  3. Assignee notification insert (was synchronous, before res.json):
+       await db.insert(notificationsTable).values({
+         userId: newAssigneeId, type: "assigned", title: "Ticket Assigned to You",
+         message: `You have been assigned to: ${ticket!.title}`, ticketId
+       });
+     Now handled by: notifications-bus.ts ticket.updated listener (async, after res.json).
+     Note: message changed from "You have been assigned to: <title>" to
+           "You have been assigned to ticket #<ticketId>" (title not in payload).
+           TODO(future): add optional `entityLabel` to TicketUpdatedPayload.
+
+  4. Assignee SSE push (was synchronous, before res.json):
+       emitToUser(newAssigneeId, "notification");
+     Now handled by: notifications-bus.ts ticket.updated listener via insertNotification().
+
+  Net timing change: all side-effects moved from synchronous (before HTTP response)
+  to asynchronous (after HTTP response). This is intentional — these are background
+  side-effects. The HTTP 200 response is now faster.
+
+================================================================================
+
+## Legacy Listener Removed
+
+  File:             notifications.ts
+  Listener:         eventDispatcher.on(EVENTS.TICKET_CLOSED, ...)
+  Behavior:         Notified ticket creator when status changed to closed/resolved.
+                    Fetched ticket from DB for createdByUserId + title.
+                    Self-close guard: skipped if triggeredBy === createdByUserId.
+                    Used notifyUsers() which only does DB insert (no SSE push).
+  Replaced by:      notifications-bus.ts ticket.status_changed listener.
+
+  Behavior differences between legacy and new listener:
+    SSE push:      ADDED — old listener used notifyUsers() (DB only), new listener
+                   uses insertNotification() which calls emitToUser() after DB insert.
+    Self-close:    PRESERVED — same guard, different field name:
+                   legacy: payload.triggeredBy === ticket.createdBy
+                   new:    event.data.changedByUserId === ticket.createdBy
+    Arabic fields: REMOVED — legacy called notifyUsers(titleAr, messageAr) which wrote
+                   fields not in notificationsTable schema (silently ignored by Drizzle).
+                   New listener uses insertNotification() with 5 valid columns only.
+
+================================================================================
+
+## Imports Removed from tickets.ts
+
+  Removed:  eventDispatcher  (from ../lib/events)
+  Removed:  EVENTS           (from ../lib/events)
+  Removed:  notificationsTable (from @workspace/db)
+  Removed:  emitToUser       (from ../lib/sse)
+
+  After migration, tickets.ts no longer directly writes notifications or SSE.
+  All such side-effects are owned by the listener layer.
+
+================================================================================
+
+## New Listener Added: ticket.status_changed (notifications-bus.ts)
+
+  This listener did not previously exist. It was added in Ticket 06-B to replace
+  the legacy notifications.ts TICKET_CLOSED eventDispatcher listener.
+
+  Behavior:
+    - Subscribes to EVENT_TYPES.TICKET_STATUS_CHANGED
+    - Fires only when toStatus === "closed" || toStatus === "resolved"
+    - Fetches ticket from DB to get createdByUserId and title
+    - Self-close guard: returns early if changedByUserId === ticket.createdBy
+    - Inserts notification { type: "ticket_closed", ... }
+    - SSE push: included (via insertNotification() → emitToUser())
+    - Dedup: IdempotencyGuard (in-process, keyed on event.id UUID)
+
+  The listener handles both "closed" and "resolved" terminal statuses.
+  The legacy listener only fired on EVENTS.TICKET_CLOSED (which the route
+  dispatched for both — the data.resolution field carried the actual status).
+
+================================================================================
+
+## Duplicate Risk Analysis
+
+  Risk 1: Duplicate activity_logs for status_changed
+    Before: inline insert + no bus listener = 1 row
+    After: no inline insert + activity.ts listener = 1 row
+    Status: ZERO RISK
+
+  Risk 2: Duplicate activity_logs for assigned
+    Before: inline insert + no bus listener = 1 row
+    After: no inline insert + activity.ts listener = 1 row
+    Status: ZERO RISK
+
+  Risk 3: Duplicate "assigned" notification
+    Before: inline notificationsTable insert + no bus listener = 1 notification
+    After: no inline insert + notifications-bus.ts listener = 1 notification
+    Status: ZERO RISK
+
+  Risk 4: Duplicate "ticket_closed" notification
+    Before: eventDispatcher → notifications.ts TICKET_CLOSED listener = 1 notification
+    After: appEventBus → bridge → eventDispatcher → (no TICKET_CLOSED listener left)
+           appEventBus → notifications-bus.ts TICKET_STATUS_CHANGED listener = 1 notification
+    Status: ZERO RISK (legacy listener removed in same commit)
+
+  Risk 5: TICKET_UPDATED still in bridge → eventDispatcher
+    The bridge forwards ALL appEventBus events to eventDispatcher.
+    There is no remaining TICKET_UPDATED listener in notifications.ts.
+    WorkflowEngine listens to all events via "*" — receives TICKET_UPDATED.
+    workspace_event_logs receives TICKET_UPDATED via eventDispatcher.
+    Status: ZERO RISK (no duplicate behavior)
+
+  Risk 6: Circular event loop
+    appEventBus → bridge → eventDispatcher → notifications.ts (EMPLOYEE_CREATED only)
+    None of those listeners emit back to appEventBus.
+    Status: ZERO RISK
+
+  Risk 7: Double TICKET_UPDATED + TICKET_STATUS_CHANGED both forwarded by bridge
+    Both events are now forwarded to eventDispatcher and WorkflowEngine.
+    WorkflowEngine receives both. If a workflow template conditions on TICKET_UPDATED,
+    it fires once. If it conditions on TICKET_STATUS_CHANGED, it fires once.
+    No WorkflowEngine listener produces side-effects that overlap with bus listeners.
+    Status: ACCEPTABLE (intentional — two distinct events for different trigger needs)
+
+================================================================================
+
+## Edge Cases Discovered
+
+  EDGE CASE 1: Empty changes map
+    If a PATCH request sends fields with values identical to the current DB values,
+    the normalized changes map will be empty ({}). The TICKET_UPDATED event is still
+    emitted with an empty changes map. activity.ts will write action = "ticket_updated"
+    (the generic fallback). No notification is sent.
+    RISK: low — the DB is still updated, log is written, no duplicate behavior.
+    TODO(future): Skip emitting TICKET_UPDATED if changes is empty (no-op PATCH).
+
+  EDGE CASE 2: assigneeUserId = null (unassign)
+    If parsed.data.assigneeUserId === null && oldTicket.assigneeUserId !== null:
+    changes.assigneeId = null → typeof newAssigneeId !== "number" → listener returns.
+    No notification is sent to the old assignee (unassignment is silent).
+    RISK: none — same behavior as before (no notification was sent for unassignment).
+    TODO(future): Add an "unassigned" notification type if required.
+
+  EDGE CASE 3: req.userId may be undefined (should not happen after requireAuth)
+    actor.userId: req.userId may be undefined theoretically.
+    updatedByUserId: req.userId! is asserted non-null.
+    The PATCH handler already returns 401 if req.userId is not set (via requireAuth).
+    RISK: none in practice — type assertion is safe given middleware order.
+
+  EDGE CASE 4: Status changes to "open" or "in_progress" or "pending"
+    TICKET_UPDATED is emitted with changes.status = newStatus.
+    activity.ts writes action = "status_changed" with metadata "old -> new" ✅
+    TICKET_STATUS_CHANGED is emitted but the listener immediately returns
+    (toStatus is not "closed" or "resolved"). No notification is sent.
+    WorkflowEngine and workspace_event_logs still receive the event.
+    RISK: none — correct behavior.
+
+  EDGE CASE 5: Multiple fields changed in a single PATCH
+    E.g. both status and assigneeUserId change in one request.
+    TICKET_UPDATED changes map will have BOTH status and assigneeId keys.
+    activity.ts derives action from the FIRST matching key in priority order:
+      "status" check comes before "assigneeId" check → action = "status_changed".
+      The "assigned" activity log is NOT written for this request.
+    RISK: moderate — if both status and assigneeId change together, only one activity
+    log is written. The assignee still receives a notification (notifications-bus.ts
+    checks changes.assigneeId independently). Creator notification fires if status
+    is terminal.
+    TODO(future): Emit one TICKET_UPDATED per distinct change category, or emit
+    multiple activities inside the listener for multi-key changes maps.
+
+  EDGE CASE 6: ticket is null after db.update (should not happen)
+    db.update(...).returning() returns an empty array if no row matched.
+    The PATCH handler guards `if (req.workspaceId && ticket)` before emitting.
+    If ticket is undefined (e.g. concurrent delete), no events are emitted.
+    RISK: none — safe guard preserves the same behavior as the legacy code.
+
+================================================================================
+
+## WorkflowEngine Impact
+
+  The WorkflowEngine subscribes to all events via eventDispatcher "*" listener.
+  After migration:
+    - TICKET_UPDATED is now forwarded from appEventBus → bridge → eventDispatcher.
+    - TICKET_STATUS_CHANGED is now forwarded as a new event name.
+    - TICKET_CLOSED is no longer dispatched (replaced by TICKET_STATUS_CHANGED).
+
+  If any workflow template conditions on EVENTS.TICKET_CLOSED event name:
+    → It will no longer trigger. WorkflowEngine now receives TICKET_STATUS_CHANGED.
+    → Workflow templates should be updated to listen for "ticket.status_changed"
+      and filter on triggerData.toStatus === "closed".
+    TODO: Audit WorkflowEngine templates for TICKET_CLOSED triggers.
+
+  TICKET_UPDATED is now also dispatched on EVERY status change (because TICKET_UPDATED
+  is always emitted alongside TICKET_STATUS_CHANGED). WorkflowEngine receives both.
+  This is additive — any workflow trigger on TICKET_UPDATED that previously fired
+  (when status did NOT change) will continue to fire.
+
+================================================================================
+
+## Remaining Coupling in tickets.ts
+
+  After Ticket 06-B, tickets.ts no longer:
+    - imports eventDispatcher or EVENTS
+    - imports notificationsTable
+    - imports emitToUser
+    - directly writes to notificationsTable
+    - directly calls emitToUser() for ticket events
+
+  tickets.ts still directly:
+    - imports activityLogsTable (used in CC handlers)
+    - imports emitToUser is NO LONGER imported
+
+  Remaining inline side-effects in tickets.ts (NOT migrated in this ticket):
+    1. CC handlers (POST /tickets/:id/cc, DELETE /tickets/:id/cc)
+       → inline emitToUser() calls for SSE
+       → inline activityLogsTable inserts for cc_added / cc_removed
+       Scope: outside Ticket 06-B. To be addressed in a future CC migration.
+
+    2. Comments route (comments.ts) — separate file, untouched.
+
+  tickets.ts is now fully decoupled from the notification layer for create/update/close.
+  All ticket notification logic lives in notifications-bus.ts.
+  All ticket activity logging lives in activity.ts.
+
+================================================================================
+
+## Files Modified
+
+  MODIFIED:
+    artifacts/api-server/src/routes/tickets.ts
+      • imports: removed eventDispatcher, EVENTS, notificationsTable, emitToUser
+      • removed: inline activityLogsTable insert for status_changed (before res.json)
+      • removed: inline activityLogsTable insert for assigned (before res.json)
+      • removed: inline notificationsTable insert for assigned (before res.json)
+      • removed: inline emitToUser() for assignee SSE (before res.json)
+      • removed: eventDispatcher.dispatch(EVENTS.TICKET_CLOSED) block
+      • removed: eventDispatcher.dispatch(EVENTS.TICKET_UPDATED) block
+      • added: normalized changes/previousValues map computation
+      • added: void appEventBus.emit(EVENT_TYPES.TICKET_UPDATED) — always
+      • added: void appEventBus.emit(EVENT_TYPES.TICKET_STATUS_CHANGED) — when status changes
+
+    artifacts/api-server/src/lib/events/listeners/activity.ts
+      • migration status table: ticket.updated → ✅ MIGRATED (T06-B)
+      • per-listener comment: updated to ✅ ACTIVE with source/trigger/legacy details
+
+    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+      • db imports: added ticketsTable (needed by ticket.status_changed listener)
+      • migration status table: ticket.updated and ticket.status_changed → ✅ MIGRATED
+      • ticket.updated per-listener comment: updated to ✅ ACTIVE, stale TODOs removed
+      • NEW listener: appEventBus.subscribe(EVENT_TYPES.TICKET_STATUS_CHANGED, ...)
+        — notifies creator on close/resolve with SSE push
+
+    artifacts/api-server/src/lib/events/listeners/notifications.ts
+      • removed: eventDispatcher.on(EVENTS.TICKET_CLOSED, ...) listener block
+      • added: comment explaining removal + replacement reference
+
+  NOT MODIFIED (per task scope):
+    artifacts/api-server/src/lib/events/bridge.ts     — bridge unchanged
+    artifacts/api-server/src/lib/events/index.ts      — registration unchanged
+    artifacts/api-server/src/lib/events/app-bus.ts    — unchanged
+    artifacts/api-server/src/routes/comments.ts       — untouched
+    artifacts/api-server/src/routes/calendar.ts       — untouched
+    artifacts/api-server/src/routes/messages.ts       — untouched
+    artifacts/api-server/src/routes/forms.ts          — untouched
+    lib/db/src/schema/tickets.ts                       — DB schema unchanged
+
+================================================================================
+
+## Typecheck Result
+
+  pnpm --filter @workspace/api-server run typecheck → 0 errors (confirmed)
+
+================================================================================
+
+## Server Startup Log (post-migration)
+
+  [10:08:26.239] INFO: [bridge] appEventBus → eventDispatcher bridge registered
+  [10:08:26.333] INFO: Server listening port: 8080
+  [10:08:26.364] INFO: Workflow Engine started — listening for events
+
+  Clean startup — no errors, no warnings.
+
+================================================================================
+
+## Readiness for Ticket 06-C (or next migration)
+
+  Remaining eventDispatcher.dispatch() direct calls in the codebase:
+    - admin.ts:  EMPLOYEE_CREATED  → not yet migrated
+    - forms.ts:  dynamic event name → complex, requires arch review
+
+  The notifications-bus.ts employee.created listener is ⏳ READY.
+  Legacy notifications.ts EMPLOYEE_CREATED listener is still active.
+  Migration precondition: remove legacy listener simultaneously with route emit.
+
+  Ticket 06-C scope (proposed):
+    - Migrate EMPLOYEE_CREATED in admin.ts to appEventBus.emit(EVENT_TYPES.EMPLOYEE_CREATED)
+    - Remove legacy notifications.ts EMPLOYEE_CREATED listener
+    - Activate notifications-bus.ts employee.created listener
+    - Remove eventDispatcher + EVENTS import from admin.ts (if no longer needed)
+
+  After 06-C, eventDispatcher.dispatch() would only remain in forms.ts (dynamic
+  event — complex case requiring architecture decision first).
+
+================================================================================

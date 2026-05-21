@@ -1,0 +1,279 @@
+راجع:
+- workflow-phase-6c-report.txt
+- workflow-phase-7a-report.txt
+- workflow-phase-7c-report.txt
+- workflow-phase-8a-report.txt
+- workflow-phase-8b-report.txt
+خصوصًا:
+- governance_snapshots
+- rollup aggregation
+- bottleneck scoring
+- operationalComplexityScore
+- execution pressure estimation
+- remaining dependency intelligence gaps
+
+ثم نفّذ فقط:
+P8-C — Runtime-Weighted Operational Intelligence Foundations
+
+ولا تنفّذ:
+- AI recommendations
+- predictive ML
+- anomaly prediction
+- automatic remediation
+- distributed analytics engines
+- workflow self-optimization
+
+عنوان المهمة:
+WORKFLOW PHASE 8-C — Runtime-Weighted Operational Intelligence & Historical Correlation Foundations
+
+المهمة الحالية:
+تحويل:
+static workflow intelligence
+
+إلى:
+historically correlated operational intelligence
+
+الهدف:
+تمكين:
+- runtime-weighted bottleneck scoring
+- structural vs operational comparison
+- chronic execution hotspot detection
+- workflow fragility analytics
+- operational behavior correlation
+
+بطريقة:
+deterministic analytics correlation engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ANALYTICS & INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- dependency.ts
+- topology.ts
+- governance_snapshots
+- rollup models
+- historical trend APIs
+- operational metrics
+
+حدّد:
+- أين static analysis غير كافٍ
+- أين runtime behavior غير مستغل
+- أين historical pressure غير مربوط بالبنية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN CORRELATION ENGINE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+WorkflowOperationalCorrelation
+
+ليحتوي:
+- structuralComplexity
+- historicalErrorPressure
+- historicalBacklogPressure
+- approvalLatencyPressure
+- delayDurationPressure
+- executionFailurePressure
+- chronicOperationalHotspots
+- runtimeWeightedComplexity
+
+مع:
+deterministic correlation semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — RUNTIME-WEIGHTED BOTTLENECK SCORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طوّر:
+bottleneck scoring
+
+بحيث:
+structural bottlenecks
+تُعدّل باستخدام:
+historical operational signals.
+
+أمثلة:
+- approval node historically slow
+- delay-heavy path historically overloaded
+- repeated execution failures downstream
+- chronic backlog accumulation
+
+لكن:
+بدون live runtime coupling.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — STRUCTURAL VS OPERATIONAL CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+comparison model
+يعرف:
+- structurally complex but operationally stable
+- structurally simple but operationally fragile
+- chronic operational hotspots
+- misleading structural risk
+
+المطلوب:
+deterministic classification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — HOTSPOT DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اكتشف:
+- repeatedly overloaded approvals
+- chronic delay concentration
+- recurring failure corridors
+- execution pressure concentration zones
+
+اعتمد فقط على:
+historical governance data
++ dependency graph.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OPERATIONAL FRAGILITY INDEX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+OperationalFragilityIndex
+
+يحتوي:
+- low / moderate / high / critical
+- structural fragility
+- runtime fragility
+- chronicity indicators
+- operational confidence level
+
+مع:
+stable deterministic scoring.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+runtime-weighted intelligence
+
+داخل:
+- governance dashboards
+- historical analytics
+- workflow detail APIs
+- dependency analytics
+
+لكن:
+بدون mutation لأي workflow.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_operational_correlation_computed
+
+B)
+workflow_runtime_bottleneck_detected
+
+C)
+workflow_chronic_hotspot_detected
+
+D)
+workflow_fragility_index_computed
+
+كلها تحتوي:
+- workflowId
+- workflowVersion
+- workspaceId
+- runtimeWeightedComplexity
+- fragilityLevel
+- hotspotCount
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Correlation engine MUST:
+- remain READ-ONLY
+- never mutate governance history
+- never trigger workflow execution
+- never invoke scheduler
+- never depend on live runtime state
+
+أي:
+historical-correlation intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+runtime-weighted bottleneck scoring deterministic
+
+T2:
+historical hotspot detection stable
+
+T3:
+structural vs operational comparison classification
+
+T4:
+approval latency pressure calculation
+
+T5:
+delay duration pressure calculation
+
+T6:
+runtimeWeightedComplexity normalization
+
+T7:
+fragility index deterministic
+
+T8:
+historical correlation serialization stable
+
+T9:
+no live runtime dependency required
+
+T10:
+correlation engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- predictive AI
+- anomaly ML
+- auto-remediation
+- runtime execution tracing
+- distributed analytics infra
+- automatic workflow mutation
+
+خلك:
+minimal deterministic operational intelligence engine.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-8c-report.txt
+
+ويحتوي:
+- operational correlation architecture
+- runtime-weighted bottleneck formulas
+- hotspot detection semantics
+- structural vs operational comparison model
+- operational fragility index model
+- governance integration points
+- observability additions
+- tests results
+- remaining operational intelligence gaps
+- readiness assessment قبل advanced enterprise intelligence phase

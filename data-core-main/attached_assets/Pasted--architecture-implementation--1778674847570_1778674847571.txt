@@ -1,0 +1,146 @@
+راجع الـ architecture الحالية بالكامل ثم نفّذ فقط هذه المهمة التحليلية بدون أي implementation فعلي حتى الآن.
+
+عنوان المهمة:
+LEAVE DOMAIN ARCHITECTURE REVIEW — Dedicated HR Leave Lifecycle Design
+
+المهمة الحالية:
+تصميم وتحليل الـ Leave Domain الحقيقي قبل بدء أي implementation.
+
+الهدف:
+الانتقال من:
+generic HR leave forms
+
+إلى:
+real dedicated Leave Management domain
+مبني فوق الـ EventBus architecture الحالية.
+
+المشكلة الحالية:
+النظام يحتوي:
+- forms
+- workflows
+- approvals
+- canonical leave.requested event
+لكن لا يوجد:
+- leave_requests domain model
+- leave lifecycle
+- leave balances
+- leave policies
+- dedicated leave routes
+- structured leave approvals
+
+الهدف من هذه المرحلة:
+تحديد التصميم الصحيح للـ Leave Domain قبل بدء البناء.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- hr.ts
+- forms.ts
+- approvals.ts
+- EVENT_TYPES
+- LeaveRequestedPayload
+- WorkflowEngine
+- activity.ts
+- notifications-bus.ts
+- employee models
+- calendar/attendance integrations إن وجدت
+
+2- حلّل:
+كيف يتم التعامل مع طلبات الإجازات حاليًا:
+- forms
+- workflows
+- approvals
+- HR services
+- notifications
+- activity logs
+
+3- صمّم:
+الـ canonical Leave Domain Model.
+
+المطلوب تحليل:
+- leave_requests table
+- leave balances
+- leave policies
+- leave status lifecycle
+- leave approval chain
+- leave types
+- leave accruals
+- leave conflicts
+- leave attachments
+- leave audit trail
+
+4- حدّد:
+ما الذي يجب أن يكون:
+- generic workflow behavior
+وما الذي يجب أن يكون:
+- dedicated leave business logic
+
+5- صمّم:
+الـ canonical leave events.
+
+مثل:
+- leave.requested
+- leave.approved
+- leave.rejected
+- leave.cancelled
+- leave.balance_adjusted
+- leave.status_changed
+
+مع ownership boundaries واضحة.
+
+6- حلّل:
+كيف يجب أن يتكامل الـ Leave Domain مع:
+- approvals
+- workflows
+- notifications
+- calendar
+- attendance
+- payroll
+- HR policies
+
+7- حدّد:
+ما الذي يجب أن يكون:
+- synchronous validation
+وما الذي يمكن أن يكون:
+- async workflows/events
+
+8- حلّل:
+هل Leave Requests يجب أن تمر عبر approvals module
+أو تملك approval lifecycle خاص بها.
+
+9- صمّم:
+الـ route architecture المستقبلية.
+
+مثل:
+- POST /hr/leave-requests
+- PATCH /hr/leave-requests/:id
+- GET /hr/leave-balances
+الخ...
+
+10- لا تنفذ:
+- tables
+- routes
+- migrations
+- schema changes
+- business logic
+
+11- إذا وجدت مشاكل معمارية حالية:
+وثّقها فقط بدون إصلاح.
+
+12- في النهاية:
+أنشئ ملف TXT باسم:
+
+leave-domain-architecture-review.txt
+
+ويحتوي:
+- التحليل الكامل
+- proposed leave domain model
+- lifecycle proposal
+- event taxonomy
+- approvals integration strategy
+- workflow integration strategy
+- HR integration analysis
+- scalability considerations
+- implementation phases المقترحة
+- risks إذا تم بناء الـ Leave Domain بشكل خاطئ
+- recommendation النهائية قبل implementation

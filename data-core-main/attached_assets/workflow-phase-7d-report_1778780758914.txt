@@ -1,0 +1,798 @@
+═══════════════════════════════════════════════════════════════════════════════
+WORKFLOW PHASE 7-D REPORT
+Governance Trend APIs & Historical Analytics Surface
+Generated: 2026-05-14
+═══════════════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Convert the internal historical analytics infrastructure built in P7-A/B/C into
+a safe, read-only API surface that enables:
+
+  • Trend dashboards consuming governance health over time
+  • Historical governance analysis (error rate, backlog, storm trends)
+  • Operational history visualization (severity timeline, alerts storm)
+  • Long-term tenant health insights (up to 365 days)
+
+Prior to P7-D:
+  • querySnapshotsByRange, queryRollupsByRange, selectQueryLayer existed
+    internally in governance-history.ts and governance-rollup.ts but were
+    not reachable via HTTP.
+  • The only historical APIs were GET /governance/snapshots (range: 1h–30d raw)
+    and GET /governance/snapshots/chronic-alerts (same raw-only range).
+  • No API consumer could access rollup tiers (hourly/daily) for long-term data.
+  • No stable DTO contract existed for trend chart consumption.
+
+After P7-D:
+  • Four new GET endpoints expose the cascade through a stable, versioned API.
+  • All endpoints automatically route to raw / hourly / daily storage tier
+    based on the requested range — transparent to the consumer.
+  • Consistent TrendEnvelope<T> response shape across all tiers and endpoints.
+  • MAX_TREND_POINTS cap prevents payload bloat for dense raw queries.
+  • Full observability (4 structured log events per request).
+  • 111 new pure model tests; 0 typecheck errors.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANALYTICS API ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New module: artifacts/api-server/src/lib/workflows/governance-trends.ts
+
+Purpose: Pure model and serialization layer for the four trend API surfaces.
+Contains zero DB access — all query functions are imported from governance-
+history.ts (raw) and governance-rollup.ts (rollup).  This makes every
+function in this module synchronous, injectable, and testable in isolation.
+
+── Layer architecture ────────────────────────────────────────────────────────
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  HTTP Layer: governance.ts routes (Express GET handlers)              │
+  │  • validateTrendRange → range validation and cascade routing          │
+  │  • serveTrendRoute<T> (shared helper, 4 callers)                      │
+  └────────────────────────────────┬──────────────────────────────────────┘
+                                   │
+  ┌────────────────────────────────▼──────────────────────────────────────┐
+  │  Pure Model: governance-trends.ts                                     │
+  │  • Range parsing / validation (validateTrendRange)                    │
+  │  • Cascade routing (selectTrendQueryLayer)                            │
+  │  • Serializers: raw snapshots → DTO, rollup rows → DTO               │
+  │  • Truncation (truncateTrendPoints, MAX_TREND_POINTS = 1000)          │
+  │  • Envelope building (buildTrendEnvelope)                             │
+  │  • Safety validators (isFutureWindow, isRangeTooLarge, willTruncate)  │
+  └────────────────────────────────┬──────────────────────────────────────┘
+                                   │
+       ┌───────────────────────────┴────────────────────────────┐
+       │                                                         │
+  ┌────▼────────────────────┐                  ┌────────────────▼────────┐
+  │  governance-history.ts  │                  │  governance-rollup.ts   │
+  │  querySnapshotsInBucket │                  │  queryRollupsByRange    │
+  │  (raw tier, 0–30d)      │                  │  (hourly/daily, 31–365d)│
+  └─────────────────────────┘                  └─────────────────────────┘
+
+── Query cascade routing ─────────────────────────────────────────────────────
+
+  selectTrendQueryLayer(rangeDays: number): QueryLayer
+
+  Range parameter   │ Days    │ Storage tier │ Resolution
+  ──────────────────┼─────────┼──────────────┼──────────────────────────
+  "1h"              │ 0.042   │ raw          │ 5-min (1 point per snap)
+  "24h"             │ 1       │ raw          │ 5-min
+  "7d"              │ 7       │ raw          │ 5-min
+  "30d"             │ 30      │ raw          │ 5-min (up to 8,640 pts)
+  "90d"             │ 90      │ hourly       │ 1-hour (90 pts max)
+  "180d"            │ 180     │ daily        │ 1-day  (180 pts max)
+  "365d"            │ 365     │ daily        │ 1-day  (365 pts max)
+
+  Cascade boundary alignment:
+    RAW / HOURLY boundary: rangeDays ≤ 30 → raw, > 30 → hourly
+    HOURLY / DAILY boundary: rangeDays ≤ 90 → hourly, > 90 → daily
+
+  These boundaries are derived from the same constants used by the rollup
+  scheduler (RETENTION_RAW_DAYS = 30, ROLLUP_HOURLY_RETENTION_DAYS = 90).
+  If retention constants change, the cascade boundaries move automatically.
+
+── Request lifecycle ─────────────────────────────────────────────────────────
+
+  For every trend request:
+
+  1. requireAuth + requireWorkspaceAdmin → workspaceId attached to request
+  2. Parse ?range= query param (default "30d")
+  3. validateTrendRange(rawRange, now):
+     a. Check range is in EXTENDED_TREND_RANGES → 400 if not
+     b. Compute since = now - hours, until = now
+     c. Compute rangeDays, layer → return TrendQueryContext
+  4. Emit governance_trend_api_requested (INFO)
+  5. Dispatch by layer:
+     a. "raw"    → querySnapshotsInBucket(workspaceId, since, until, db)
+     b. "hourly" → queryRollupsByRange(workspaceId, "hourly", since, until, db)
+     c. "daily"  → queryRollupsByRange(workspaceId, "daily",  since, until, db)
+  6. Serialize raw rows to DTO array (pure, type-specific serializer)
+  7. truncateTrendPoints(points) → apply MAX_TREND_POINTS cap
+  8. If truncated → emit governance_trend_payload_truncated (WARN)
+  9. buildTrendEnvelope(ctx, points, truncated) → consistent response shape
+  10. Emit governance_trend_api_resolved (INFO)
+  11. res.json(envelope)
+
+── Safety invariants ─────────────────────────────────────────────────────────
+
+  INVARIANT 1 — Read-only:
+    governance-trends.ts exports zero write functions (INSERT/UPDATE/DELETE/capture).
+    Route handlers import only read query functions from history/rollup modules.
+    Verified: T10 test group checks that no prune*, insert*, delete*, capture*
+    symbols are exported from governance-trends.ts.
+
+  INVARIANT 2 — No rollup triggers:
+    The four trend endpoints NEVER call buildWorkspaceRollups(), the rollup
+    scheduler, or any write path in governance-rollup.ts.
+    They only import queryRollupsByRange (SELECT-only).
+
+  INVARIANT 3 — No pruning:
+    The four trend endpoints NEVER call pruneSnapshotsOlderThan() or any
+    delete operation.
+
+  INVARIANT 4 — No runtime execution effect:
+    governance-trends.ts imports ZERO symbols from workflow_executions,
+    approval_requests, or any runtime operational table.
+
+  INVARIANT 5 — Workspace isolation:
+    workspaceId is always sourced from req.workspaceId (attached by requireAuth
+    from the authenticated JWT).  It is NEVER read from query params or body.
+    No cross-workspace data can be returned.
+
+  INVARIANT 6 — Tenant data not leaked into response:
+    All serializers strip workspaceId, id, schemaVersion, alertCodes,
+    alertSummary, indicators, and all other internal DB fields.
+    Each DTO contains only the analytics signal fields.
+    Verified: T9 test group checks no id, workspaceId, schemaVersion,
+    alertCodes fields appear in any trend point.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+API ENDPOINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All four endpoints share the same request/response contract structure:
+
+  Method:  GET
+  Auth:    requireAuth + requireWorkspaceAdmin
+  Scope:   workspace-scoped (no workspaceId in URL/query — inferred from JWT)
+  Param:   ?range= (optional, default "30d")
+           Enum: "1h" | "24h" | "7d" | "30d" | "90d" | "180d" | "365d"
+  Success: 200 with TrendEnvelope<T>
+  Errors:  400 invalid range, 403 no workspace / insufficient role
+
+── GET /governance/trends/severity ──────────────────────────────────────────
+
+  operationId: getGovernanceTrendsSeverity
+  Response DTO: SeverityTrendResponse (TrendEnvelope<SeverityTrendPoint>)
+
+  Each SeverityTrendPoint:
+    timestamp:   ISO 8601 (capturedAt for raw, bucketStart for rollups)
+    severity:    "healthy" | "warning" | "degraded" | "critical"
+    sourceLayer: "raw" | "hourly" | "daily"
+
+  Semantic by tier:
+    raw:    exact workspace severity at snapshot capture time
+    hourly: dominantSeverity = worst severity in the hour's snapshots
+    daily:  dominantSeverity = worst severity in the day's hourly rollups
+
+  Use case: severity timeline chart showing workspace health degradation
+  and recovery patterns over time.
+
+── GET /governance/trends/error-rate ────────────────────────────────────────
+
+  operationId: getGovernanceTrendsErrorRate
+  Response DTO: NumericTrendResponse (TrendEnvelope<NumericTrendPoint>)
+
+  Each NumericTrendPoint:
+    timestamp:   ISO 8601
+    value:       workflowErrorRate [0–1] (raw) or avgErrorRate (rollup)
+    sourceLayer: "raw" | "hourly" | "daily"
+
+  Semantic:
+    raw:    exact workflowErrorRate at capture time (= failedExecutions / totalExecutions)
+    hourly: arithmetic mean of workflowErrorRate across all snapshots in the hour
+    daily:  arithmetic mean of avgErrorRate across all hourly rollups in the day
+
+  Use case: error-rate sparkline showing operational degradation trends over
+  weeks or months.  Consumers should format value as a percentage (× 100).
+
+── GET /governance/trends/backlogs ──────────────────────────────────────────
+
+  operationId: getGovernanceTrendsBacklogs
+  Response DTO: BacklogTrendResponse (TrendEnvelope<BacklogTrendPoint>)
+
+  Each BacklogTrendPoint:
+    timestamp:       ISO 8601
+    approvalBacklog: approvalBacklogCount (raw, integer) or avgApprovalBacklog (rollup, float)
+    delayBacklog:    delayBacklogCount (raw, integer) or avgDelayBacklog (rollup, float)
+    stuckCount:      stuckCount (raw, integer) or avgStuckCount (rollup, float)
+    sourceLayer:     "raw" | "hourly" | "daily"
+
+  Note: For rollup tiers, all three values are floating-point averages.
+  The sourceLayer field signals this precision difference to consumers.
+
+  Use case: stacked area chart showing queue pressure trends across approval,
+  delay, and stuck dimensions.  Useful for identifying bottleneck patterns.
+
+── GET /governance/trends/storms ────────────────────────────────────────────
+
+  operationId: getGovernanceTrendsStorms
+  Response DTO: StormTrendResponse (TrendEnvelope<StormTrendPoint>)
+
+  Each StormTrendPoint:
+    timestamp:        ISO 8601
+    stormFrequency:   [0.0–1.0]
+    dominantSeverity: "healthy" | "warning" | "degraded" | "critical"
+    sourceLayer:      "raw" | "hourly" | "daily"
+
+  stormFrequency semantic:
+    raw:    binary — 1.0 if stormSeverity ≠ "none", 0.0 otherwise
+            (each raw point IS a storm or IS NOT — no fractionality)
+    hourly: fraction of the hour's snapshots with stormSeverity ≠ "none"
+            (e.g. 0.25 = 3 out of 12 snapshots in the hour had storms)
+    daily:  arithmetic mean of hourly stormFrequency values
+            (e.g. 0.4 = on average, 40% of each hour in the day had storms)
+
+  Use case: storm frequency bar chart showing alert storm intensity trends.
+  Combined with dominantSeverity, enables "storm calendar" visualization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUERY CASCADE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The P7-D APIs connect to the P7-C rollup infrastructure through two query
+functions:
+
+  Raw tier (0–30d):
+    querySnapshotsInBucket(workspaceId, since, until, db)
+    → SELECT from governance_snapshots WHERE workspaceId = ? AND capturedAt >= since AND capturedAt < until
+    → Returns StoredSnapshot[] ordered by capturedAt ASC
+
+  Rollup tiers (31–365d):
+    queryRollupsByRange(workspaceId, granularity, since, until, db)
+    → SELECT from governance_snapshot_rollups WHERE workspaceId = ? AND granularity = ?
+         AND bucketStart >= since AND bucketStart < until
+    → Returns StoredRollup[] ordered by bucketStart ASC
+
+  Both functions are already scoped by workspaceId, ensuring tenant isolation
+  at the DB query level.
+
+  The route handler determines which function to call using the layer from
+  TrendQueryContext:
+
+    if (ctx.layer === "raw")   → querySnapshotsInBucket(...)
+    else granularity = ctx.layer as "hourly" | "daily"
+         queryRollupsByRange(workspaceId, granularity, ...)
+
+  The response shape (TrendEnvelope<T>) is identical regardless of which
+  query function was called.  The `sourceLayer` field tells the consumer
+  which tier served the data, enabling them to display appropriate labels
+  (e.g. "5-min resolution" vs "hourly average" vs "daily average").
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE MODELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── TrendEnvelope<T> (common wrapper for all four endpoints) ──────────────────
+
+  {
+    range:       string;      // range literal e.g. "30d"
+    rangeDays:   number;      // numeric days in the query window (e.g. 30)
+    sourceLayer: "raw" | "hourly" | "daily";
+    pointCount:  number;      // length of points array (≤ MAX_TREND_POINTS)
+    truncated:   boolean;     // true when original result > MAX_TREND_POINTS
+    points:      T[];         // sorted ascending by timestamp
+  }
+
+  Design properties:
+    • Pagination-ready: pointCount + truncated signal whether more data exists.
+    • Layer-transparent: sourceLayer tells the consumer the resolution context.
+    • Stable: same inputs always produce the same output (idempotent serialization).
+    • Consumer-safe: no raw DB fields, no internal IDs, no JSONB internals.
+
+── SeverityTrendPoint ────────────────────────────────────────────────────────
+
+  { timestamp: string; severity: string; sourceLayer: QueryLayer }
+
+  Exactly 3 fields. timestamp is always UTC ISO 8601.
+  severity is always one of the 4 canonical severity strings.
+
+── NumericTrendPoint ─────────────────────────────────────────────────────────
+
+  { timestamp: string; value: number; sourceLayer: QueryLayer }
+
+  Exactly 3 fields. value is always a float in [0, 1] for error-rate.
+  For future numeric trends, the range of value is endpoint-specific.
+
+── BacklogTrendPoint ─────────────────────────────────────────────────────────
+
+  { timestamp: string; approvalBacklog: number; delayBacklog: number;
+    stuckCount: number; sourceLayer: QueryLayer }
+
+  Exactly 5 fields. For raw tier, all three counts are exact integers.
+  For rollup tiers, all three are floating-point averages.
+
+── StormTrendPoint ────────────────────────────────────────────────────────────
+
+  { timestamp: string; stormFrequency: number; dominantSeverity: string;
+    sourceLayer: QueryLayer }
+
+  Exactly 4 fields. stormFrequency is always in [0.0, 1.0].
+  dominantSeverity is always one of the 4 canonical severity strings.
+  For raw tier, stormFrequency is binary (0.0 or 1.0).
+  For rollup tiers, stormFrequency is fractional (proportion of period with storms).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RANGE VALIDATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: validateTrendRange(rawRange: string, now: Date): TrendRangeValidation
+
+Validation is a discriminated union result:
+  { ok: true,  context: TrendQueryContext }   — valid, ready to query
+  { ok: false, reason: string, statusCode: 400 | 422 } — rejected
+
+Validation rules applied in order:
+
+  RULE 1 — Must be a declared range literal:
+    EXTENDED_TREND_RANGES = ["1h", "24h", "7d", "30d", "90d", "180d", "365d"]
+    Any other string (including "", "30", "1d", "weekly", "7D") → 400.
+    Set-based O(1) check: VALID_EXTENDED_RANGES.has(rawRange).
+
+  RULE 2 — Computed rangeDays must not exceed MAX_TREND_RANGE_DAYS (365):
+    Since all declared range literals map to ≤ 365 days, this rule is
+    currently unreachable through normal validation but protects against
+    future additions of invalid ranges to the enum.
+
+  RULE 3 — until = now is always used:
+    This prevents future-window queries by construction.
+    since = now - hours is always in the past for any positive hours value.
+    There is no "since > now" path reachable through this function.
+
+  RULE 4 — Default fallback in routes:
+    If no ?range= query param is provided, the route defaults to "30d"
+    (passes rule 1–3 automatically).
+
+Safety properties:
+  • No SQL injection risk: range is matched against a hard-coded Set before use.
+  • No integer overflow: range hours are small constants (max 8,760 hours = 365d).
+  • No unbounded historical queries: max 365d, enforced at validation time.
+  • No future windows: since = now - hours guarantees since < now.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SERIALIZATION HARDENING STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The serialization layer in governance-trends.ts applies four hardening rules:
+
+── 1. No raw DB row exposure ─────────────────────────────────────────────────
+
+  Every serializer explicitly names only the fields needed for the DTO.
+  Fields like `id`, `workspaceId`, `schemaVersion`, `alertCodes`,
+  `alertSummary`, `chronicAlertCodes`, `indicators`, `createdAt` are never
+  included in the output — not even undefined or null.
+
+  Mechanism: Each serializer is a `.map(s => ({ field1: s.field1, ... }))` with
+  an explicit object literal.  No spread operators are used that could
+  accidentally forward internal DB fields.
+
+── 2. Stable, deterministic ordering ────────────────────────────────────────
+
+  All serializers preserve the input array order.  Callers (DB query functions)
+  return data in capturedAt ASC / bucketStart ASC order.  The serializers
+  never re-sort — they trust the ascending order from the DB layer.
+
+  This ensures: same DB state → same API response → deterministic chart
+  rendering on the frontend.  Re-running the same query always produces the
+  same output.
+
+── 3. Pagination-ready (truncation first, not sorting) ─────────────────────
+
+  truncateTrendPoints() takes the FIRST MAX_TREND_POINTS items (oldest → newest).
+  This preserves chronological order and ensures truncated payloads always
+  contain the oldest available data, not a random subset.
+
+  For chart use: consumers can detect `truncated=true` and optionally
+  narrow the range (e.g. switch from "30d" to "7d") to get finer resolution
+  within the available data.
+
+── 4. No JSONB internals exposed ────────────────────────────────────────────
+
+  Raw snapshots store `alertCodes` and `alertSummary` as JSONB.
+  Rollup rows store `chronicAlertCodes` as JSONB.
+  None of these JSONB columns appear in any trend DTO.
+
+  stormFrequency for raw tier is computed from the `stormSeverity` string
+  column — not from any JSONB field.
+
+── 5. sourceLayer as consumer trust signal ───────────────────────────────────
+
+  The sourceLayer field on every data point signals to consumers what
+  precision they should expect:
+
+    "raw"    → 5-min snapshot → exact integer counts, binary storm signal
+    "hourly" → 1-hour average → floating-point averages, fractional storm
+    "daily"  → 1-day average  → floating-point averages, fractional storm
+
+  This prevents consumers from treating float averages as exact counts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Four structured log events per request, all carrying consistent fields.
+
+A) governance_trend_api_requested
+   Level:  INFO
+   When:   Range validated successfully, DB query about to begin
+   Fields: workspaceId, actorId, trendType, range, rangeDays, sourceLayer, action
+   Purpose: Know what was requested before touching DB
+
+B) governance_trend_api_resolved
+   Level:  INFO
+   When:   Response sent successfully
+   Fields: workspaceId, actorId, trendType, range, rangeDays, sourceLayer,
+           layerLabel (human-readable tier name), resultCount, truncated, action
+   Purpose: Track response sizes and cascade routing outcomes for capacity planning
+
+C) governance_trend_query_rejected
+   Level:  WARN
+   When:   Range validation failed → 400 response
+   Fields: workspaceId, actorId, trendType, rawRange, reason, action
+   Purpose: Detect client programming errors or probing attempts
+
+D) governance_trend_payload_truncated
+   Level:  WARN
+   When:   Query returned > MAX_TREND_POINTS data points
+   Fields: workspaceId, actorId, trendType, range, rangeDays, sourceLayer,
+           originalCount, truncatedTo, action
+   Purpose: Signal that a consumer needs a narrower range for full resolution
+
+All four action strings are exported from governance-trends.ts as named
+constants for use by tests, monitoring systems, or future middleware:
+
+  TREND_ACTION_REQUESTED  = "governance_trend_api_requested"
+  TREND_ACTION_RESOLVED   = "governance_trend_api_resolved"
+  TREND_ACTION_REJECTED   = "governance_trend_query_rejected"
+  TREND_ACTION_TRUNCATED  = "governance_trend_payload_truncated"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/governance-trends.test.ts
+New tests: 111 across 10 describe blocks (T1–T10)
+
+Previous suite total: 980 (P7-A + P7-B + P7-C)
+P7-D tests:          +111
+New total:            1091 / 1091 passed (0 failures)
+
+── T1: severity trend uses correct query layer (19 tests) ────────────────────
+
+  Cascade routing tests (selectTrendQueryLayer):
+  ✓ daysBack=0 → raw
+  ✓ daysBack=1 → raw
+  ✓ daysBack=7 → raw (7d range)
+  ✓ daysBack=30 → raw (boundary inclusive)
+  ✓ daysBack=31 → hourly
+  ✓ daysBack=90 → hourly (boundary inclusive)
+  ✓ daysBack=91 → daily
+  ✓ daysBack=180 → daily
+  ✓ daysBack=365 → daily
+
+  Range string routing:
+  ✓ "1h"   → ctx.layer = "raw"
+  ✓ "24h"  → ctx.layer = "raw"
+  ✓ "7d"   → ctx.layer = "raw"
+  ✓ "30d"  → ctx.layer = "raw" (boundary)
+  ✓ "90d"  → ctx.layer = "hourly"
+  ✓ "180d" → ctx.layer = "daily"
+  ✓ "365d" → ctx.layer = "daily"
+
+  Serializer sourceLayer propagation:
+  ✓ raw serializer sets sourceLayer="raw"
+  ✓ rollup serializer with "hourly" sets sourceLayer="hourly"
+  ✓ rollup serializer with "daily" sets sourceLayer="daily"
+
+── T2: error-rate trend serializes correctly (8 tests) ──────────────────────
+
+  ✓ workflowErrorRate mapped from snapshot to value
+  ✓ avgErrorRate mapped from rollup to value
+  ✓ capturedAt preserved as ISO timestamp in raw points
+  ✓ bucketStart preserved as ISO timestamp in rollup points
+  ✓ multiple snapshots serialized in input order (ascending timestamps)
+  ✓ empty snapshots → empty array (no panic)
+  ✓ empty rollups → empty array (no panic)
+  ✓ NumericTrendPoint has exactly 3 fields: timestamp, value, sourceLayer
+
+── T3: backlog trend preserves deterministic ordering (10 tests) ─────────────
+
+  Field mapping tests:
+  ✓ approvalBacklogCount → approvalBacklog (snapshot)
+  ✓ delayBacklogCount → delayBacklog (snapshot)
+  ✓ stuckCount → stuckCount (snapshot, top-level integer)
+  ✓ avgApprovalBacklog → approvalBacklog (rollup)
+  ✓ avgDelayBacklog → delayBacklog (rollup)
+  ✓ avgStuckCount → stuckCount (rollup, float)
+
+  Ordering tests:
+  ✓ multi-snapshot input order preserved in output (stuckCounts: 1,5,3)
+  ✓ multi-rollup input order preserved in output
+  ✓ BacklogTrendPoint has exactly 5 fields
+  ✓ does not mutate input snapshot array
+
+── T4: storm trend returns stable frequency values (11 tests) ────────────────
+
+  Raw tier binary semantics:
+  ✓ stormSeverity="warning" → stormFrequency=1.0
+  ✓ stormSeverity="critical" → stormFrequency=1.0
+  ✓ stormSeverity="none" → stormFrequency=0.0
+
+  Rollup tier fractional semantics:
+  ✓ stormFrequency=0.42 from hourly rollup preserved exactly
+  ✓ stormFrequency=0.75 from daily rollup preserved exactly
+
+  dominantSeverity semantics:
+  ✓ raw: dominantSeverity = snapshot.severity
+  ✓ rollup: dominantSeverity = rollup.dominantSeverity
+
+  Range and stability:
+  ✓ all calm snapshots → all stormFrequency=0.0
+  ✓ all storming snapshots → all stormFrequency=1.0
+  ✓ StormTrendPoint has exactly 4 fields
+  ✓ stormFrequency always in [0,1] for rollup points
+
+── T5: invalid ranges rejected safely (15 tests) ────────────────────────────
+
+  ✓ empty string "" → ok=false, statusCode=400
+  ✓ "week" → ok=false
+  ✓ "daily" (not a valid range literal) → ok=false
+  ✓ "1y" → ok=false
+  ✓ "31d" (not declared) → ok=false
+  ✓ "30" (numeric string) → ok=false
+  ✓ "7D" (case mismatch) → ok=false
+  ✓ all 7 valid range literals → ok=true
+  ✓ rejection includes descriptive reason string
+  ✓ valid range produces non-null context
+  ✓ VALID_EXTENDED_RANGES covers exactly 7 literals (no extras)
+  ✓ isRangeTooLarge(366) → true
+  ✓ isRangeTooLarge(365) → false
+  ✓ isRangeTooLarge for all declared ranges → false
+
+── T6: future windows cannot occur (6 tests) ────────────────────────────────
+
+  ✓ since < now for all 7 valid range literals
+  ✓ until = now for all 7 valid range literals (exact equality)
+  ✓ isFutureWindow returns true when since > now
+  ✓ isFutureWindow returns true when since === now (boundary)
+  ✓ isFutureWindow returns false for all computed since values
+  ✓ rangeDays > 0 for all valid ranges
+
+── T7: payload truncation handled correctly (10 tests) ──────────────────────
+
+  ✓ no truncation when count < max (10 < 1000)
+  ✓ no truncation when count === max (1000 = 1000 boundary)
+  ✓ truncation when count > max (1500 → 1000, truncated=true)
+  ✓ truncates from end — keeps OLDEST/FIRST points
+  ✓ does not mutate input array (original length preserved)
+  ✓ willTruncate(1001) → true
+  ✓ willTruncate(1000) → false
+  ✓ MAX_TREND_POINTS = 1000
+  ✓ empty array → no truncation, zero points
+  ✓ custom max parameter respected (200 points with max=50 → truncated, 50 pts)
+
+── T8: response contracts stable across layers (10 tests) ───────────────────
+
+  ✓ envelope contains all 6 required fields
+  ✓ range field matches context range literal
+  ✓ rangeDays field matches context days
+  ✓ sourceLayer="raw" for 30d context
+  ✓ sourceLayer="hourly" for 90d context
+  ✓ sourceLayer="daily" for 365d context
+  ✓ pointCount = length of points array
+  ✓ truncated=false when not truncated
+  ✓ truncated=true when truncation occurred
+  ✓ empty points → pointCount=0
+  ✓ same inputs → identical output (idempotent/stable)
+
+── T9: tenant isolation enforced (9 tests) ──────────────────────────────────
+
+  ✓ severity serializer: no workspaceId in output
+  ✓ error-rate serializer: no workspaceId in output
+  ✓ backlog serializer: no workspaceId in output
+  ✓ storm serializer: no workspaceId in output
+  ✓ rollup serializer: no workspaceId in output
+  ✓ no id field in any trend point (all 4 surfaces)
+  ✓ no schemaVersion in any trend point (all 4 surfaces)
+  ✓ no alertCodes in any trend point (all 4 surfaces)
+  ✓ two workspaces produce independent arrays; mutation of one does not affect other
+
+── T10: trend APIs remain read-only (13 tests) ──────────────────────────────
+
+  Export inspection (dynamic import):
+  ✓ no prune* symbol exported from governance-trends
+  ✓ no buildRollup* / build_rollup* symbol exported
+  ✓ no insert* symbol exported
+  ✓ no delete* symbol exported
+  ✓ no capture* symbol exported
+
+  Observability action constants:
+  ✓ all 4 action constants are distinct strings (no collisions)
+  ✓ TREND_ACTION_REQUESTED = "governance_trend_api_requested"
+  ✓ TREND_ACTION_RESOLVED  = "governance_trend_api_resolved"
+  ✓ TREND_ACTION_REJECTED  = "governance_trend_query_rejected"
+  ✓ TREND_ACTION_TRUNCATED = "governance_trend_payload_truncated"
+
+  Safety validator sanity checks:
+  ✓ trendLayerLabel("raw") is non-empty
+  ✓ trendLayerLabel("hourly") is non-empty
+  ✓ trendLayerLabel("daily") is non-empty
+  ✓ all 3 layer labels are distinct strings
+  ✓ MAX_TREND_RANGE_DAYS = 365
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TYPECHECK RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  @workspace/db              → 0 errors
+  @workspace/api-server      → 0 errors (including new governance-trends.ts
+                               and the 4 new route handlers in governance.ts)
+  @workspace/api-spec        → 0 errors (codegen succeeded, libs rebuilt)
+  @workspace/ops-platform    → 2 pre-existing errors in workflow-detail.tsx /
+                               workflows.tsx (isActive on UpdateWorkflowBody —
+                               not introduced by P7-D, carry-forward)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING ANALYTICS API GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. NO FRONTEND TREND CHARTS (not in P7-D):
+   The four new API endpoints are ready but no React chart components consume
+   them.  A historical analytics dashboard page would need:
+   • Recharts LineChart / AreaChart components for severity, error-rate, backlogs
+   • BarChart for storm frequency
+   • Range selector UI (1h / 24h / 7d / 30d / 90d / 180d / 365d)
+   • sourceLayer-aware axis labels ("5-min", "hourly avg", "daily avg")
+   • truncated=true warning banner ("Showing oldest 1000 points — narrow your range")
+
+2. NO PAGINATION CURSOR (not in P7-D):
+   The truncation mechanism is a safety cap, not a pagination interface.
+   When truncated=true, there is no cursor token to fetch the next page.
+   A future cursor-based pagination (e.g. ?before=<timestamp>&limit=500)
+   would allow clients to page through high-density raw windows.
+
+3. ROLLUP RETENTION PRUNING NOT YET IMPLEMENTED (not in P7-D):
+   Hourly rollup rows older than 90 days and daily rollup rows older than 365 days
+   are never pruned.  governance_snapshot_rollups grows indefinitely.
+   A future pruning step needs to be gated on: prune hourly only after daily covers
+   the same window; prune daily after 365-day threshold.
+
+4. FIRST-RUN BACKFILL GAP (not in P7-D):
+   The P7-C rollup scheduler only covers a ±2d overlap window.  On first
+   deployment with existing raw history, 28 days of data before the overlap
+   zone have no hourly rollups.  A one-time backfill job covering [0d, 30d ago]
+   would fill this gap.  The APIs would then serve correct hourly data from day 1.
+
+5. NO SUPER-ADMIN CROSS-WORKSPACE TREND (not in P7-D):
+   Super admins cannot query trend data across all workspaces simultaneously.
+   A platform-wide endpoint (e.g. GET /platform/trends/severity?range=90d)
+   would aggregate across all workspace rollups.  This requires careful
+   isolation to prevent data leakage.
+
+6. CHRONIC ALERT TRENDS NOT SURFACED (not in P7-D):
+   chronicAlertCodes on rollup rows are stored but not exposed by any
+   P7-D endpoint.  A fifth endpoint — GET /governance/trends/chronic-alerts —
+   could return the historically chronic codes per time bucket using the rollup
+   tier.  Currently only GET /governance/snapshots/chronic-alerts (raw tier,
+   ≤30d) exists.
+
+7. NO RANGE DOWNSAMPLING FOR DENSE RAW WINDOWS (not in P7-D):
+   A 30d raw query can return up to 8,640 points before truncation.  After
+   truncation to 1,000 points, the oldest 7,640 points are silently discarded.
+   Client-side downsampling (e.g. LTTB — Largest Triangle Three Buckets) would
+   provide a better representation of the full window within the point limit.
+
+8. ROLLUP SCHEDULER STATUS ENDPOINT (not in P7-D):
+   No GET endpoint exposes rollup pipeline health (last run time, built counts,
+   success/failure per workspace) to the super-admin dashboard.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+READINESS ASSESSMENT — PRE-HISTORICAL DASHBOARD PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+READY (P7-A + P7-B + P7-C + P7-D complete):
+
+  ✓ Four stable, tested REST endpoints for long-term trend consumption
+    GET /governance/trends/severity  — severity timeline
+    GET /governance/trends/error-rate — error-rate timeline
+    GET /governance/trends/backlogs  — backlog queue timeline
+    GET /governance/trends/storms    — storm frequency timeline
+
+  ✓ Query cascade transparent to consumers
+    Single range parameter selects the correct storage tier automatically.
+    Consumers specify "how long ago" — the backend selects raw / hourly / daily.
+
+  ✓ Consistent response contract across all tiers and endpoints
+    TrendEnvelope<T>: range, rangeDays, sourceLayer, pointCount, truncated, points.
+    Same shape for raw 5-min resolution and daily 365-day resolution.
+
+  ✓ Safe for chart rendering
+    Stable, deterministic ordering (ascending by timestamp).
+    No JSONB internals, no raw DB fields, no internal IDs.
+    sourceLayer signals precision (integer vs float, binary vs fractional storm).
+
+  ✓ Payload safety
+    MAX_TREND_POINTS = 1000 hard cap prevents accidental bloat.
+    truncated=true signals when finer resolution was capped.
+    The oldest (chronologically first) points are kept when truncated.
+
+  ✓ Full observability
+    4 structured log events per request.
+    Cascade routing, result count, truncation all observable per request.
+
+  ✓ Generated client hooks available
+    Codegen ran successfully → 4 new React Query hooks generated:
+      useGetGovernanceTrendsSeverity()
+      useGetGovernanceTrendsErrorRate()
+      useGetGovernanceTrendsBacklogs()
+      useGetGovernanceTrendsStorms()
+    Ready for use in frontend chart components immediately.
+
+  ✓ 1091 tests, 0 new typecheck errors
+    Full regression coverage maintained.
+
+NOT YET READY FOR PRODUCTION HISTORICAL DASHBOARD:
+
+  ○ Frontend chart components not yet implemented
+    The hooks are generated; the UI layer is the only remaining gap.
+
+  ○ Rollup retention pruning not yet implemented
+    governance_snapshot_rollups grows indefinitely.
+    Acceptable for low-volume production (≤ 11,165 rows/workspace at cap)
+    but a prune step is needed for high-volume multi-workspace deployments.
+
+  ○ First-run historical backfill not yet implemented
+    New deployments or those upgrading from P7-B will have a 0–28d coverage
+    gap in the hourly rollup tier until the scheduler fills it naturally.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATED
+  artifacts/api-server/src/lib/workflows/governance-trends.ts
+    — 7 sections; 340 lines; pure model + serialization layer
+    — 10 exported constants, 9 exported types, 15 exported pure functions
+    — Zero DB access, zero async functions, fully testable in isolation
+
+  artifacts/api-server/src/lib/workflows/__tests__/governance-trends.test.ts
+    — 111 tests across 10 describe blocks (T1–T10)
+
+  workflow-phase-7d-report.txt
+
+MODIFIED
+  lib/api-spec/openapi.yaml
+    + 4 new endpoint paths under /governance/trends/
+    + 8 new component schemas (4 point DTOs + 4 response envelopes)
+    — 96 lines added to the spec
+
+  artifacts/api-server/src/routes/governance.ts
+    + 22 lines of new imports (governance-rollup, governance-trends)
+    + serveTrendRoute<T> shared handler helper (~60 lines)
+    + 4 route handlers (GET severity, error-rate, backlogs, storms) (~60 lines)
+    — File grew from 473 to ~640 lines
+
+GENERATED (by codegen, do not edit manually)
+  lib/api-client-react/src/generated/  — 4 new React Query hooks
+  lib/api-zod/src/generated/api.ts     — 8 new Zod schemas regenerated
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS: COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tests:     1091 / 1091 passed  (111 new P7-D tests)
+Typecheck: 0 new errors introduced by P7-D
+Codegen:   4 React Query hooks + 8 Zod schemas generated successfully
+Endpoints: 4 new GET /governance/trends/* endpoints registered and serving
+═══════════════════════════════════════════════════════════════════════════════

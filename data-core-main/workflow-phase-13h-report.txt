@@ -1,0 +1,79 @@
+Phase 13-H — Tenant Administration Console Consolidation
+=========================================================
+
+Status: COMPLETE
+
+## Objective
+
+Reorganise the super-admin tenant detail view from a flat, vertically-stacked
+layout into a tabbed Tenant Administration Console with seven distinct sections.
+
+## Files Created
+
+### lib/tenant-admin-console-config.ts
+  - TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT (12 boolean props + contractVersion)
+  - ConsoleTab union type + CONSOLE_TABS array (7 tabs)
+  - CONSOLE_TAB_CONFIG: per-tab label/description/icon/readOnly/testId
+  - OverviewCardId union + OVERVIEW_CARDS array (6 cards)
+  - OVERVIEW_CARD_CONFIG: per-card label/description/testId
+  - CONSOLE_EMPTY_STATE: UI copy for safety banner, warnings, read-only notice
+  - CONSOLE_FORBIDDEN_WORDING: 15 dangerous strings (used by tests to verify safety)
+
+### lib/__tests__/tenant-admin-console-config.test.ts
+  - T1  — safety contract all true (12 boolean + contractVersion)
+  - T2  — CONSOLE_TABS lists all 7 required tabs
+  - T3  — OVERVIEW_CARDS lists all 6 summary cards
+  - T4  — lifecycle tab config preserved (label, readOnly:false, testId)
+  - T5  — subscription tab config preserved
+  - T6  — entitlements tab config preserved
+  - T7  — usage tab readOnly:true
+  - T8  — renewal tab readOnly:true
+  - T9  — health tab readOnly:true
+  - T10 — overview tab readOnly:true
+  - T11 — no dangerous wording in CONSOLE_EMPTY_STATE
+  - T12 — all CONSOLE_TABS have non-empty testId
+  - T13 — CONSOLE_FORBIDDEN_WORDING is a non-empty string array
+  - T14 — OVERVIEW_CARD_CONFIG covers all 6 cards with testIds
+
+## Files Modified
+
+### pages/super-admin-tenants.tsx
+  - Updated file docblock to include P13-H phase entry
+  - Added LayoutDashboard to lucide-react imports
+  - Added import of TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT + console config types
+  - Added import-time safety contract guard (throws on violation)
+  - Added TAB_ICON map (ConsoleTab → lucide React.ElementType)
+  - Added ConsoleOverviewTab component:
+      * Read-only. No action buttons. No mutations.
+      * Safety banner (ShieldCheck + CONSOLE_EMPTY_STATE.overviewSafetyBanner)
+      * 3-col identity summary (workspace, subscription/plan, module summary)
+      * 6-card summary grid (lifecycle, subscription, plan, health, usage, renewal)
+      * Consolidated recommended action from riskSignalSummary.healthRecommendedAction
+      * Active risk/warning list derived from riskSignalSummary booleans
+      * Overall risk badge + tenant ID display
+  - Added TenantAdminConsole component:
+      * data-testid="tenant-detail-{tenantId}" preserved on outer wrapper
+      * Tab bar (role=tablist) with 7 tabs; active tab highlighted; editable tabs
+        show a small primary dot
+      * Tab content area: each tab renders its dedicated panel component
+      * Default active tab: "overview"
+  - TenantDetailPanel kept as a thin alias → TenantAdminConsole
+    (preserves call site in TenantTableRow without any other change)
+
+## Safety Contract Compliance
+
+  - TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT validated at import-time
+  - Overview tab is strictly read-only — no mutations
+  - No payment, invoice, charge, billing-portal, or tax UI anywhere
+  - No automatic workspace suspension or entitlement enforcement
+  - No email or legal notice UI
+  - No destructive tenant actions
+  - All prior P13 safety contracts (B–G) remain active and enforced
+  - All existing panels preserve their own safety contracts
+
+## Test Results
+
+  Frontend: 938 passed (938) across 17 test files  — 14 new P13-H tests + 924 pre-existing
+  Backend:  (see api-server test run)
+  Pre-existing typecheck errors: unchanged (governance-audit x4, governance-violations x1, workflows x2)
+  New typecheck errors from P13-H: 0

@@ -1,0 +1,196 @@
+راجع الـ EventBus architecture الحالية بالكامل ثم نفّذ فقط مهمة تحليل وتصميم Observability Layer بدون أي implementation فعلي حتى الآن.
+
+عنوان المهمة:
+EVENT OBSERVABILITY & DIAGNOSTICS — Architecture Review
+
+المهمة الحالية:
+تحليل جميع طبقات:
+- event logging
+- tracing
+- diagnostics
+- workflow visibility
+- listener execution visibility
+- operational monitoring
+
+داخل النظام الحالي قبل بناء أي observability infrastructure جديدة.
+
+الهدف:
+تصميم Enterprise-grade Event Observability Layer
+بدون تكرار وظائف موجودة أو خلق logging chaos.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — راجع البنية الحالية بالكامل
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- app-bus.ts
+- bus.ts
+- bridge.ts
+- activity.ts
+- notifications-bus.ts
+- workflow engine logs
+- workspace_event_logs
+- activity_logs
+- audit systems
+- pino configuration
+- correlationId usage
+- EventMetadata
+- listener registry
+- any SSE/event streaming layers
+- retry/error logging
+- API request logging
+- structured logging configuration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — حلّل الـ Event Lifecycle الحالي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّد:
+- أين يبدأ event lifecycle
+- كيف يتم logging
+- أين تضيع الأخطاء
+- أين توجد blind spots
+- هل listener timing يُسجل
+- هل failures قابلة للتتبع
+- هل side-effects مرئية
+- هل workflows مرتبطة بالـ events traceably
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — حلّل مشاكل الـ Observability الحالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ابحث عن:
+- duplicate logging
+- inconsistent correlationId propagation
+- missing event timing
+- missing listener execution visibility
+- no replay visibility
+- missing failure traces
+- hidden async failures
+- workflow debugging limitations
+- notification debugging limitations
+- missing admin diagnostics
+- noisy logs
+- log fragmentation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — صمّم الـ Canonical Observability Model
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+- event trace lifecycle
+- correlation model
+- listener execution model
+- event failure tracking
+- workflow traceability
+- side-effect visibility
+- diagnostics boundaries
+- observability ownership
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — حدّد ما يجب تخزينه
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+ما الذي يجب أن يكون:
+- structured logs فقط
+- DB event history
+- audit trail
+- ephemeral runtime telemetry
+- admin diagnostics snapshots
+
+ولا تخلط بينهم.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — صمّم Event Traceability
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل كيف يمكن تتبع:
+request
+→ event
+→ listeners
+→ workflows
+→ notifications
+→ DB side effects
+
+عبر:
+- correlationId
+- causationId
+- event.id
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — حلّل Admin Diagnostics المستقبلية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم ما يحتاجه Admin UI مستقبلًا:
+- event timeline
+- failed listeners
+- workflow execution traces
+- notification delivery visibility
+- event replay visibility
+- stuck workflows
+- event search/filtering
+- actor timeline
+- workspace event inspection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — لا تنفذ implementation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- tables
+- tracing systems
+- OpenTelemetry
+- queues
+- Grafana
+- Prometheus
+- Redis
+- replay systems
+
+فقط تحليل وتصميم.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — لا تغيّر behavior الحالي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تعدّل:
+- EventBus
+- listeners
+- workflows
+- DB schema
+- logging behavior
+
+إلا إذا اكتشفت bug خطير جدًا، وثّقه فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — صمّم مراحل التنفيذ المستقبلية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم التنفيذ المستقبلي إلى phases واضحة:
+- minimal observability
+- diagnostics
+- tracing
+- operational tooling
+- advanced telemetry
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+event-observability-architecture-review.txt
+
+ويحتوي:
+- التحليل الكامل
+- current observability map
+- blind spots
+- duplication analysis
+- correlation analysis
+- proposed observability architecture
+- event traceability model
+- diagnostics model
+- storage strategy
+- implementation phases
+- risks إذا تم بناء observability بشكل خاطئ
+- recommendation النهائية قبل implementation

@@ -1,0 +1,268 @@
+راجع:
+- workflow-phase-9b-report.txt
+- workflow-phase-9d-report.txt
+- workflow-phase-9e-report.txt
+خصوصًا:
+- schedulerWeight semantics
+- fairness policies
+- workload partitions
+- noisy tenant detection
+- rollback guarantees
+- governance audit trail
+
+ثم نفّذ فقط:
+P9-F — Adaptive Scheduling Research Foundations & Safe Enforcement Bridge
+
+ولا تنفّذ:
+- autonomous scheduling
+- AI balancing
+- realtime self-healing
+- distributed schedulers
+- autoscaling infra
+- Kubernetes orchestration
+- dynamic tenant migration
+
+عنوان المهمة:
+WORKFLOW PHASE 9-F — Adaptive Scheduling Research Foundations & Safe Enforcement Bridge
+
+المهمة الحالية:
+تحويل:
+manual advisory scheduler governance
+
+إلى:
+safe adaptive-scheduling research infrastructure
+
+الهدف:
+تمكين:
+- future scheduler enforcement readiness
+- adaptive scheduling experimentation
+- controlled policy-to-scheduler bridge
+- governance-safe enforcement semantics
+- reversible scheduler research foundations
+
+بطريقة:
+deterministic human-controlled enforcement bridge
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT SCHEDULER GOVERNANCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- schedulerWeight
+- SchedulerFairnessPolicy
+- rollback semantics
+- fairness observability
+- workload partitions
+- governance telemetry
+
+حدّد:
+- أين scheduler enforcement مفقود
+- أين policy application remains manual
+- أين adaptive research يحتاج instrumentation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN ENFORCEMENT BRIDGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+SchedulerEnforcementBridge
+
+ليحتوي:
+- workspaceId
+- effectiveSchedulerWeight
+- sourcePolicyId
+- enforcementMode
+- enforcementStatus
+- appliedAt
+- rollbackReference
+
+مع:
+deterministic bridge semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SAFE POLICY ENFORCEMENT LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+resolveEffectiveSchedulerWeight()
+
+بحيث:
+- يقرأ active fairness policies
+- يحدد effective advisory weight
+- يحترم starvation floor
+- يدعم rollback-safe semantics
+- يفشل fail-closed عند ambiguity
+
+لكن:
+بدون autonomous adaptation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ADAPTIVE RESEARCH INSTRUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+research instrumentation فقط:
+
+- fairness improvement tracking
+- containment effectiveness
+- backlog trend after adjustment
+- noisy-tenant reduction metrics
+- rollback frequency metrics
+
+لكن:
+بدون automatic optimization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ENFORCEMENT SAFETY CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+- one effective policy per workspace
+- bounded effective weights
+- rollback precedence
+- policy expiration precedence
+- stale policy rejection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — CONTROLLED ENFORCEMENT MODES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+EnforcementMode
+
+يحتوي:
+- advisory_only
+- operator_confirmed
+- research_shadow
+
+مع:
+strict deterministic transitions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+enforcement bridge visibility
+
+داخل:
+- governance dashboards
+- scheduler oversight
+- fairness policy panels
+- operational consoles
+
+لكن:
+بدون autonomous orchestration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+scheduler_enforcement_bridge_resolved
+
+B)
+scheduler_effective_weight_applied
+
+C)
+scheduler_policy_resolution_conflict
+
+D)
+scheduler_research_metric_recorded
+
+كلها تحتوي:
+- workspaceId
+- sourcePolicyId
+- effectiveSchedulerWeight
+- enforcementMode
+- enforcementStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Adaptive scheduling foundations MUST:
+- remain human-controlled
+- never self-adjust automatically
+- preserve rollback guarantees
+- preserve starvation guarantees
+- fail closed on ambiguity
+
+أي:
+research-ready enforcement bridge فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+effective weight resolution deterministic
+
+T2:
+expired policy ignored safely
+
+T3:
+rollback precedence preserved
+
+T4:
+multiple active policy conflict rejected
+
+T5:
+starvation floor preserved
+
+T6:
+research metrics serialization stable
+
+T7:
+enforcement mode transitions deterministic
+
+T8:
+stale policy rejected
+
+T9:
+observability events scoped correctly
+
+T10:
+no autonomous adaptation occurs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- adaptive AI balancing
+- self-healing schedulers
+- autonomous throttling
+- autoscaling orchestration
+- distributed scheduling
+- realtime optimization loops
+
+خلك:
+minimal safe enforcement bridge infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9f-report.txt
+
+ويحتوي:
+- enforcement bridge architecture
+- effective weight resolution semantics
+- enforcement safety constraints
+- research instrumentation model
+- rollback preservation guarantees
+- governance integration points
+- observability additions
+- tests results
+- remaining adaptive scheduling gaps
+- readiness assessment قبل autonomous orchestration research

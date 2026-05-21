@@ -1,0 +1,383 @@
+================================================================================
+  ARCHITECTURE TICKET 01 — Core Shared Packages Foundation
+  Internal Operations Platform — Monorepo
+  تاريخ التنفيذ: مايو 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. REVIEW FINDINGS — ما تم اكتشافه في المشروع قبل التنفيذ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1 Naming Convention الحالية
+─────────────────────────────
+  البادئة:    @workspace/   (مثال: @workspace/db، @workspace/api-zod)
+  التسمية:    kebab-case     (مثال: api-client-react، object-storage-web)
+  موقع Libs:  lib/*          (glob في pnpm-workspace.yaml)
+  النمط:      لا يوجد "packages/" — كل الـ shared libs تعيش في lib/
+
+1.2 Pattern الـ Composite Lib
+──────────────────────────────
+  كل lib مشتركة تتبع هذه البنية الدقيقة:
+  ┌─────────────────────────────────────────────────┐
+  │  package.json    → name: "@workspace/<name>"    │
+  │                    type: "module"               │
+  │                    exports: {".": "./src/index.ts"} │
+  │  tsconfig.json   → composite: true             │
+  │                    declarationMap: true         │
+  │                    emitDeclarationOnly: true    │
+  │                    outDir: "dist"               │
+  │                    rootDir: "src"               │
+  │  src/index.ts    → public exports only          │
+  └─────────────────────────────────────────────────┘
+  root tsconfig.json تحتوي كل composite libs في قسم "references".
+
+1.3 ما كان موجوداً من منطق مرتبط بالـ Core Packages
+──────────────────────────────────────────────────────
+  المنطق الحالي مبعثر داخل api-server (ليس في lib مشتركة):
+
+  الأحداث:      artifacts/api-server/src/lib/events/types.ts
+                artifacts/api-server/src/lib/events/dispatcher.ts
+                artifacts/api-server/src/lib/events/registry.ts
+                artifacts/api-server/src/lib/events/listeners/notifications.ts
+
+  Workflows:    artifacts/api-server/src/lib/workflows/types.ts
+                artifacts/api-server/src/lib/workflows/engine.ts
+                artifacts/api-server/src/lib/workflows/executor.ts
+                artifacts/api-server/src/lib/workflows/conditions.ts
+                artifacts/api-server/src/lib/workflows/steps/*.ts
+
+  الصلاحيات:   artifacts/api-server/src/middlewares/requireAuth.ts
+               (فحص الأدوار مباشرةً في كل route handler)
+
+  Audit:        lib/db/src/schema/activity.ts
+                artifacts/api-server/src/routes/activity.ts
+                (سجلات حرة بدون schema موحّد)
+
+  Notifications: artifacts/api-server/src/lib/sse.ts
+                 lib/db/src/schema/notifications.ts
+
+  Approvals:    lib/db/src/schema/approvals.ts
+                artifacts/api-server/src/routes/approvals.ts
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. STRUCTURAL DECISION — قرار معماري مهم
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المطلوب في التذكرة كان "packages/" لكن تقرر استخدام "lib/" للأسباب التالية:
+
+  ✓ المشروع يستخدم lib/* حصراً لكل الـ shared libs
+  ✓ pnpm-workspace.yaml يستكشف lib/* تلقائياً — لا تعديل مطلوب
+  ✓ إضافة packages/ مجلد جديد كان سيُحدث naming inconsistency
+  ✓ الفكرة المعمارية محفوظة 100% — فقط الموقع يتبع اتفاقية المشروع
+
+التسمية النهائية: lib/core-* بدلاً من packages/core-*
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CREATED FILES — المجلدات والملفات الجديدة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+lib/
+├── core-events/                    ← @workspace/core-events
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── README.md
+│   └── src/
+│       ├── index.ts
+│       └── types.ts
+│
+├── core-approvals/                 ← @workspace/core-approvals
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── README.md
+│   └── src/
+│       ├── index.ts
+│       └── types.ts
+│
+├── core-notifications/             ← @workspace/core-notifications
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── README.md
+│   └── src/
+│       ├── index.ts
+│       └── types.ts
+│
+├── core-audit/                     ← @workspace/core-audit
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── README.md
+│   └── src/
+│       ├── index.ts
+│       └── types.ts
+│
+├── core-permissions/               ← @workspace/core-permissions
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── README.md
+│   └── src/
+│       ├── index.ts
+│       └── types.ts
+│
+└── core-workflows/                 ← @workspace/core-workflows
+    ├── package.json
+    ├── tsconfig.json
+    ├── README.md
+    └── src/
+        ├── index.ts
+        └── types.ts
+
+إجمالي الملفات الجديدة: 30 ملف في 6 packages
+تم تعديله أيضاً: tsconfig.json (root) — إضافة 6 references جديدة
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. PACKAGE DESCRIPTIONS — وصف كل Package
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── @workspace/core-events ──────────────────────────────────────────────────────
+
+  المسؤولية:  العقد المرجعي لنظام الأحداث عبر المنصة (Event Bus contracts)
+  الأنواع:
+    BaseEvent             — المغلف العام لكل حدث (type, module, workspaceId, data...)
+    EventListenerFn       — توقيع كل دالة مستمعة للأحداث
+    EventRegistryEntry    — metadata الأحداث المسجّلة في platform_event_registry
+    ISOTimestamp          — alias لـ string يمثّل timestamps
+    WorkspaceId           — alias لـ number (معرّف مساحة العمل)
+    UserId                — alias لـ number | undefined (معرّف المستخدم)
+    WellKnownEventType    — branded type لأسماء الأحداث المعروفة
+  مكانتها في شجرة التبعية: جذر — لا تستورد من أي core-* package أخرى
+  الوضع الحالي: placeholder — النسخة الحالية العاملة في api-server/src/lib/events/types.ts
+
+── @workspace/core-approvals ───────────────────────────────────────────────────
+
+  المسؤولية:  عقود نظام الموافقات متعدد المستويات
+  الأنواع:
+    ApprovalStatus        — دورة الحياة: pending | approved | rejected | cancelled | expired
+    ApprovalEntityRef     — مرجع عام للكيان الخاضع للموافقة (ticket, form, hr_request...)
+    ApprovalContext       — السياق الكامل لطلب الموافقة
+    ApprovalDecision      — البيانات المُرسَلة عند اتخاذ قرار approve/reject
+  الوضع الحالي: placeholder — المنطق الحالي في api-server/src/routes/approvals.ts
+
+── @workspace/core-notifications ───────────────────────────────────────────────
+
+  المسؤولية:  عقود إنشاء الإشعارات وإرسالها عبر قنوات متعددة
+  الأنواع:
+    NotificationChannel   — القنوات: in_app | email | push
+    NotificationSeverity  — الأهمية: info | success | warning | error
+    NotificationPayload   — كل ما يحتاجه النظام لإنشاء وإرسال إشعار
+    NotificationRecord    — الشكل المخزَّن في قاعدة البيانات
+  الوضع الحالي: placeholder — المنطق الحالي في api-server/src/lib/sse.ts
+
+── @workspace/core-audit ───────────────────────────────────────────────────────
+
+  المسؤولية:  عقود سجل التدقيق الثابت append-only
+  الأنواع:
+    AuditAction           — تصنيف موحّد للعمليات (created, updated, approved...)
+    AuditEntityRef        — مرجع الكيان الذي خضع للعملية
+    AuditRecord           — سجل تدقيق واحد لا يمكن تعديله
+    AuditEmitRequest      — ما يرسله المستدعي (بدون id و occurredAt)
+  الوضع الحالي: placeholder — الكود الحالي يستخدم activity table بشكل حر
+
+── @workspace/core-permissions ─────────────────────────────────────────────────
+
+  المسؤولية:  نموذج الصلاحيات المرجعي (RBAC + أسس ABAC)
+  الأنواع:
+    BuiltInRole           — الأدوار الثابتة: super_admin | admin | manager | member
+    PermissionKey         — معرّف الصلاحية: "resource.action" (branded type)
+    WorkspaceRoleRef      — مرجع للأدوار المخصصة per-workspace
+    PermissionActor       — الفاعل موضوع فحص الصلاحية
+    PermissionCheckRequest — طلب فحص الصلاحية
+    PermissionCheckResult  — نتيجة فحص الصلاحية
+  مستقلة تماماً: لا تستورد من أي core-* package أخرى
+  الوضع الحالي: placeholder — الفحص يتم يدوياً في كل route handler
+
+── @workspace/core-workflows ───────────────────────────────────────────────────
+
+  المسؤولية:  عقود محرك سير العمل الآلي
+  الأنواع:
+    WorkflowStepType       — أنواع خطوات الأتمتة (notification, approval, task...)
+    WorkflowTrigger        — إعلان الحدث المُفعِّل لسير العمل
+    WorkflowTriggerCondition — فلتر شرطي على payload الحدث
+    WorkflowStep           — خطوة أتمتة واحدة
+    WorkflowDefinition     — التعريف الكامل المحفوظ لسير العمل
+    WorkflowExecutionStatus — دورة حياة التشغيل
+    WorkflowExecution      — سجل تشغيل واحد لسير عمل
+    WorkflowEventRef       — مرجع مخفّف للحدث (مستقل عن core-events)
+  الوضع الحالي: placeholder — المنطق الحالي في api-server/src/lib/workflows/
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. NAMING INCONSISTENCIES NOTICED — تناقضات في التسمية لاحظتها
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1 EventPayload مقابل BaseEvent
+──────────────────────────────────
+  الكود الحالي:   EventPayload  (في api-server/src/lib/events/types.ts)
+  الكود الجديد:   BaseEvent     (في core-events)
+  التوصية: البقاء على BaseEvent — أوضح دلالةً، لا يُوهم بأن الـ payload
+           هو الشيء الوحيد في المغلف.
+
+5.2 StepType مقابل WorkflowStepType
+─────────────────────────────────────
+  الكود الحالي:   StepType               (في api-server/src/lib/workflows/types.ts)
+  الكود الجديد:   WorkflowStepType       (في core-workflows)
+  التوصية: الإبقاء على WorkflowStepType — أوضح عند استخدامه خارج السياق.
+
+5.3 WorkflowCondition مقابل WorkflowTriggerCondition
+──────────────────────────────────────────────────────
+  الكود الحالي:   WorkflowCondition      (في api-server/src/lib/workflows/types.ts)
+  الكود الجديد:   WorkflowTriggerCondition (في core-workflows)
+  التوصية: الإبقاء على WorkflowTriggerCondition — يوضح أن الشرط تابع لـ Trigger.
+
+5.4 activity_log مقابل AuditRecord
+─────────────────────────────────────
+  الكود الحالي:   جدول "activity" بـ schema حر (lib/db/src/schema/activity.ts)
+  الكود الجديد:   AuditRecord بـ schema مقنَّن (core-audit)
+  التناقض: "activity" تعني سجل نشاط (قابل للقراءة)؛ "audit" تعني سجل رقابة (للامتثال).
+  التوصية: الاحتفاظ بالجدولين — activity للعرض في الواجهة، audit للامتثال.
+
+5.5 WorkspaceCustomRolesTable مقابل WorkspaceRoleRef
+──────────────────────────────────────────────────────
+  الكود الحالي:   workspaceCustomRolesTable (lib/db/src/schema/custom-roles.ts)
+  الكود الجديد:   WorkspaceRoleRef          (core-permissions)
+  التوصية: متسقان — WorkspaceRoleRef هو فقط مرجع pointer للجدول وليس تعريفاً له.
+
+5.6 ملف scripts/src/migrate.mjs (تم حذفه)
+────────────────────────────────────────────
+  كان يستخدم مسار مطلق: /home/runner/workspace/node_modules/.pnpm/...
+  هذا anti-pattern خطير — تم حذفه بشكل صحيح في التذكرة السابقة.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ARCHITECTURAL NOTES — ملاحظات معمارية مهمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1 Package Independence (الاستقلالية الكاملة)
+────────────────────────────────────────────────
+  جميع الـ 6 packages مستقلة تماماً — لا يوجد تبعيات بينها الآن.
+  الأنواع المشتركة (ISOTimestamp، WorkspaceId، UserId) مُعاد تعريفها محلياً
+  في كل package تحتاجها.
+  هذا قرار مقصود للمرحلة الحالية (Foundation Placeholder):
+    + يضمن تجميع كل package بشكل مستقل دون أخطاء
+    + يتيح تطوير كل package بمعزل تام
+    - يُحدث تكراراً في التعريفات (مقبول مؤقتاً)
+  عند graduation: ستُضاف core-events كـ dependency لباقي الـ packages.
+
+6.2 Composite Lib Build (التجميع المتدرج)
+──────────────────────────────────────────
+  تمت إضافة الـ 6 packages لـ root tsconfig.json كـ project references.
+  pnpm run typecheck:libs يجمعها جميعاً بشكل صحيح (تم التحقق ✓).
+  pnpm-workspace.yaml يكتشفها تلقائياً عبر glob lib/* — لا تعديل مطلوب.
+
+6.3 type-only exports (تصدير الأنواع فقط)
+────────────────────────────────────────────
+  كل index.ts يستخدم "export type" — لا قيم runtime تُصدَّر.
+  هذا مقصود: هذه packages هي type contracts فقط في المرحلة الحالية.
+  يضمن zero runtime overhead عند الاستيراد.
+
+6.4 Branded Types
+──────────────────
+  PermissionKey و WellKnownEventType يستخدمان branded types:
+    type PermissionKey = string & { readonly __brand: "PermissionKey" };
+  هذا يمنع الخلط بين strings عادية ومعرّفات الصلاحيات في الـ type system.
+  مفيد عند تطوير PermissionEvaluator مستقبلاً.
+
+6.5 WorkflowEventRef مقابل BaseEvent
+──────────────────────────────────────
+  core-workflows تعرّف WorkflowEventRef (نسخة مخفّفة) بدلاً من استيراد BaseEvent.
+  هذا قرار محدود المدى — عند ربط core-workflows بـ core-events سيُستبدَل.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. WHAT WAS NOT TOUCHED — ما لم يُلمَس
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ لم يتغيّر أي business logic حالي
+  ✓ لم يتغيّر أي import في الكود الحالي
+  ✓ لم يتغيّر أي database schema
+  ✓ لم يتغيّر أي API route
+  ✓ لم يتغيّر أي سلوك في runtime
+  ✓ لم يُضَف أي dependency خارجية جديدة
+  ✓ لم تُحذَف أي ملفات موجودة
+  ✓ TypeScript composite build يعمل بشكل نظيف (0 أخطاء)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. NEXT ARCHITECTURE TICKETS — اقتراحات للتذاكر القادمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TICKET 02 — Wire core-events with api-server (الأولوية: عالية)
+─────────────────────────────────────────────────────────────────
+  المهمة:   استبدال EventPayload المحلي في api-server/src/lib/events/types.ts
+            بـ BaseEvent من @workspace/core-events.
+  الخطوات:
+    1. أضف "@workspace/core-events": "workspace:*" لـ api-server/package.json
+    2. أضف project reference في api-server/tsconfig.json
+    3. استبدل EventPayload → BaseEvent في events/types.ts و dispatcher.ts
+    4. احذف التعريف المكرر
+  التأثير: صفر تأثير على السلوك — تغيير في الأنواع فقط.
+
+TICKET 03 — Wire core-workflows with api-server (الأولوية: عالية)
+──────────────────────────────────────────────────────────────────
+  المهمة:   ربط محرك الـ workflows الحالي بـ @workspace/core-workflows.
+  الخطوات:
+    1. استبدل StepType → WorkflowStepType
+    2. استبدل WorkflowCondition → WorkflowTriggerCondition
+    3. اجعل WorkflowDefinition في DB تُعيد نفس شكل @workspace/core-workflows
+  التأثير: يوحّد الأنواع بين الـ engine والـ UI builder.
+
+TICKET 04 — PermissionEvaluator Service (الأولوية: متوسطة)
+─────────────────────────────────────────────────────────────
+  المهمة:   بناء دالة مركزية checkPermission() في api-server تستورد
+            أنواعها من @workspace/core-permissions.
+  يحل مشكلة: الفحص اليدوي (if role === "admin") المكرر في 20+ route handler.
+  التوسع المستقبلي: matrix RBAC → ثم ABAC مع resource context.
+
+TICKET 05 — AuditService + core-audit integration (الأولوية: متوسطة)
+──────────────────────────────────────────────────────────────────────
+  المهمة:   توحيد سجلات النشاط الحالية مع AuditRecord من @workspace/core-audit.
+  المطلوب:
+    1. تعديل activity table schema ليطابق AuditRecord
+    2. إنشاء AuditService.emit() في api-server
+    3. الانتقال التدريجي من direct DB writes → AuditService.emit()
+
+TICKET 06 — core-events cross-package wiring (الأولوية: متوسطة)
+─────────────────────────────────────────────────────────────────
+  المهمة:   ربط core-approvals و core-notifications و core-audit و core-workflows
+            بـ core-events رسمياً (package.json dependencies + tsconfig references).
+  الخطوات:
+    1. إضافة "@workspace/core-events": "workspace:*" لكل من يحتاجه
+    2. حذف التعريفات المكررة لـ ISOTimestamp و WorkspaceId و UserId
+    3. استيراد من @workspace/core-events بدلاً من التعريف المحلي
+  المتطلب: يجب تنفيذ TICKET 02 أولاً.
+
+TICKET 07 — NotificationService facade (الأولوية: منخفضة)
+───────────────────────────────────────────────────────────
+  المهمة:   إنشاء NotificationService في api-server يستورد NotificationPayload
+            من @workspace/core-notifications ويوحّد كل نقاط إرسال الإشعارات.
+  حالياً: الإشعارات تُرسَل من أماكن متعددة بأشكال مختلفة.
+
+TICKET 08 — core-permissions UI integration (الأولوية: منخفضة)
+────────────────────────────────────────────────────────────────
+  المهمة:   استخدام PermissionActor و PermissionCheckRequest في ops-platform
+            لبناء permission guards في الواجهة بدلاً من فحص الدور مباشرةً.
+  مثال:    usePermission("tickets.delete.any") بدلاً من useRole() === "admin"
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. VERIFICATION — التحقق من صحة التنفيذ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm run typecheck:libs    → ✅ نظيف، 0 أخطاء
+  pnpm install               → ✅ lockfile محدَّث، 0 حزم جديدة خارجية
+  تأثير على runtime          → ✅ صفر — ملفات foundation فقط، لا imports حالية
+  تأثير على API routes       → ✅ صفر
+  تأثير على DB schema        → ✅ صفر
+  تأثير على الواجهة          → ✅ صفر
+
+
+================================================================================
+  نهاية التقرير — Architecture Ticket 01
+================================================================================

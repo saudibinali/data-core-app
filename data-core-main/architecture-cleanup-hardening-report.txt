@@ -1,0 +1,331 @@
+ARCHITECTURE CLEANUP + HARDENING REPORT — EventBus Sprint
+==========================================================
+Date:    2026-05-13
+Status:  ✅ COMPLETE — TypeScript clean, server running
+Scope:   Cleanup + hardening of the stabilized EventBus architecture.
+         No new feature migrations, no schema changes, no new events added.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLEANUP WORK EXECUTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ITEM 1 — Global Synchronous Error Boundary in EventBus.fanOut()
+  File: lib/core-events/src/bus.ts
+  Problem:
+    Promise.allSettled was called with the result of listeners.map(), but if a
+    listener's handler() threw *synchronously* (before returning a Promise), the
+    throw escaped the .map() callback and propagated up to the await site.
+    Promise.allSettled never received that element — the settled array would be
+    shorter than the listeners array, silently corrupting the error-accounting
+    loop.  Other listeners were still at risk of being counted incorrectly.
+    This was a real risk: any listener that forgot to `async` its function, or
+    threw before a first `await`, would trigger the bug.
+  Fix:
+    Each entry.handler(event) call is now wrapped in a try/catch before being
+    passed to Promise.allSettled.  Sync throws are converted to Promise.reject(),
+    which Promise.allSettled handles at the correct index.  The existing error
+    logging and EmitResult.errors collection handles them identically to async
+    rejections.  The emit() API and EmitResult shape are completely unchanged.
+  Code change:
+    BEFORE:
+      const settled = await Promise.allSettled(
+        listeners.map((entry) => entry.handler(event)),
+      );
+    AFTER:
+      const settled = await Promise.allSettled(
+        listeners.map((entry) => {
+          try {
+            return entry.handler(event);
+          } catch (syncErr) {
+            return Promise.reject(syncErr instanceof Error ? syncErr : new Error(String(syncErr)));
+          }
+        }),
+      );
+
+
+ITEM 2 — BUG-001 Fixed: leave.requested duplicate in registry.ts
+  File: artifacts/api-server/src/lib/events/registry.ts
+  Problem:
+    "leave.requested" was registered TWICE in the event catalog:
+      Entry 1 (line ~472): module = "hr", correct schema
+        fields: employeeId, leaveType (enum), startDate (date), endDate (date)
+      Entry 2 (line ~630): module = "forms", diverged schema
+        fields: leave_type (snake_case vs camelCase), no dates, extra "emergency"
+        enum value, DEPARTMENT_FIELD.  Missing employeeId.
+    The duplicate caused:
+      • Potential duplicate rows in platformEventRegistryTable on seed/upsert.
+      • Schema drift — field names inconsistent between both entries.
+      • Workflow builder showing "leave.requested" twice in the trigger picker,
+        confusing workspace admins selecting the event.
+    Root cause: copy-paste error when a forms-based leave workflow was added.
+  Fix:
+    The forms duplicate (Entry 2) has been REMOVED.
+    Canonical owner: module = "hr" (Entry 1, unchanged).
+    A comment block has been added at the removal site explaining the root cause,
+    the canonical owner, and the correct pattern for future dual-event scenarios.
+    Note: "forms.form.submitted" already covers generic form submissions from
+    the forms module.  A leave form submitted via the form builder correctly
+    fires form.submitted.  leave.requested is a distinct HR domain event fired
+    by the HR route when an official leave request is recorded.
+
+
+ITEM 3 — notifications.ts dead import and void-statement cleanup
+  File: artifacts/api-server/src/lib/events/listeners/notifications.ts
+  Problem:
+    After T07 migration (EMPLOYEE_CREATED), the file had NO active listeners
+    but still imported eventDispatcher and logger with `void` statements to
+    suppress linting errors.  The imports were dead code with no future use case
+    identified.  The void statements were misleading — they implied the imports
+    were intentionally referenced.
+  Fix:
+    Removed both imports and their void references.
+    Retained only the registerNotificationListeners() no-op export.
+    Added clear documentation explaining:
+      • Why the file still exists (index.ts import compatibility).
+      • What was migrated (T06-A, T06-B, T07).
+      • Cleanup TODO: remove this file + the index.ts import together.
+    File is now a clean, documented intentional legacy scaffold.
+
+
+ITEM 4 — tickets.ts stale/verbose comment cleanup
+  File: artifacts/api-server/src/routes/tickets.ts
+  Problem:
+    POST /tickets had a 20-line migration history comment block (lines 113-135)
+    detailing "what was replaced in T06-A", "listener activation path", "schema
+    note", etc.  This archaeological history is now captured in the reports.
+    Keeping it inline makes the route handler harder to scan.
+    PATCH /tickets had a "NOTE(Ticket 06-B)" comment listing removed side-effects.
+  Fix:
+    POST /tickets: condensed the 20-line block to a 3-line comment naming the
+    fanout targets.  The `ticketType: "general"` rationale is preserved inline.
+    PATCH /tickets: condensed the 4-line NOTE to a 2-line comment.
+    All business logic, emit calls, dual-emit policy comments (Rules 1-4) are
+    completely unchanged.
+
+
+ITEM 5 — bridge.ts legacy direct callers list corrected
+  File: artifacts/api-server/src/lib/events/bridge.ts
+  Problem:
+    tickets.ts POST /tickets and tickets.ts PATCH /tickets/:id were still listed
+    as "legacy direct callers" using eventDispatcher.dispatch().  Both were
+    migrated to appEventBus.emit() in T06-A, T06-B, and Stabilization.
+    The stale comment was misleading to developers reading bridge.ts.
+  Fix:
+    Moved tickets.ts entries to the "Migrated" section with ✅ status.
+    admin.ts already had ✅ status — confirmed correct.
+    Only forms.ts remains in the active legacy callers list.
+
+
+ITEM 6 — index.ts migration progress tables corrected
+  File: artifacts/api-server/src/lib/events/index.ts
+  Problem:
+    "Notification Migration Progress" and "Activity Migration Progress" tables
+    showed ticket.created, ticket.updated, ticket.status_changed as ⏳ READY,
+    but they were fully migrated and active since T06-A/T06-B/Stabilization.
+    Also the legacy direct callers section had the same ticket.ts stale entries.
+  Fix:
+    Updated all progress tables to ✅ ACTIVE for all migrated events.
+    Only form.submitted remains ⏳ READY.
+    Updated legacy callers section to match bridge.ts.
+
+
+ITEM 7 — bus.ts stale TODO comments removed
+  File: lib/core-events/src/bus.ts
+  Problem:
+    BusLogger JSDoc had: "TODO: Define a pino-compatible adapter in api-server".
+    This was completed in app-bus.ts (pinoAdapter) long ago.
+    eventBus singleton had: "TODO: Replace this singleton with a module-level bus..."
+    This was completed — api-server uses appEventBus from app-bus.ts.
+  Fix:
+    Both stale TODOs removed.
+    BusLogger JSDoc now references the completed implementation in app-bus.ts.
+    eventBus singleton now has a clear "Do NOT use in api-server" warning instead
+    of a stale TODO that implied it was still broken.
+
+
+ITEM 8 — app-bus.ts stale TODO removed
+  File: artifacts/api-server/src/lib/events/app-bus.ts
+  Problem:
+    "TODO(future): Integrate core-audit" — this is a valid future goal but
+    the TODO prefix implied it was a near-term task.
+  Fix:
+    Changed "TODO(future):" to "Future:" — it remains documented but is clearly
+    a long-term item, not an imminent TODO.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  lib/core-events/src/bus.ts
+    → Global sync error boundary added to fanOut()
+    → Stale BusLogger TODO removed (pino adapter already done)
+    → Stale eventBus singleton TODO removed (appEventBus already done)
+
+  artifacts/api-server/src/lib/events/registry.ts
+    → Duplicate "leave.requested" entry under module "forms" REMOVED
+    → Comment added explaining BUG-001 root cause and resolution
+
+  artifacts/api-server/src/lib/events/listeners/notifications.ts
+    → Dead imports (eventDispatcher, logger) REMOVED
+    → Dead void statements REMOVED
+    → File replaced with clean documented scaffold
+
+  artifacts/api-server/src/routes/tickets.ts
+    → Verbose migration history comment condensed (POST /tickets)
+    → Stale NOTE(Ticket 06-B) condensed (PATCH /tickets/:id)
+    → All business logic and emit calls unchanged
+
+  artifacts/api-server/src/lib/events/bridge.ts
+    → Legacy direct callers list: tickets.ts moved to Migrated section
+
+  artifacts/api-server/src/lib/events/index.ts
+    → Notification Migration Progress table: all ticket/employee events → ✅
+    → Activity Migration Progress table: all ticket/employee events → ✅
+    → Legacy direct callers section corrected
+
+  artifacts/api-server/src/lib/events/app-bus.ts
+    → TODO(future) → Future (cosmetic — de-escalates priority)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEAD CODE REMOVED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. registry.ts — duplicate leave.requested entry (25 lines, module: "forms")
+
+  2. notifications.ts:
+       import { eventDispatcher } from "../dispatcher";
+       import { logger } from "../../logger";
+       void eventDispatcher;
+       void logger;
+
+  3. bus.ts:
+       "TODO: Define a pino-compatible adapter in api-server and pass it when
+        creating the shared eventBus singleton (see createEventBus below)."
+       "TODO: Replace this singleton with a module-level bus created in
+        api-server/src/lib/events/index.ts using the pino logger adapter."
+
+  4. tickets.ts — 20-line migration archaeology comment (POST /tickets)
+  5. tickets.ts — 4-line NOTE(Ticket 06-B) (PATCH /tickets/:id)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INTENTIONAL LEGACY AREAS (unchanged, documented)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. notifications.ts (listener scaffold)
+     Status: EMPTY — no active listeners
+     Why kept: index.ts has `import "./listeners/notifications"` as a side-effect.
+     Removing the file without removing the import crashes startup.
+     Next step: remove both together in one commit (safe at any time).
+
+  2. eventDispatcher (dispatcher.ts)
+     Status: ACTIVE — still the persistence layer for workspace_event_logs
+     Why kept: bridge forwards all appEventBus events to it.
+     It writes workspace_event_logs and triggers WorkflowEngine.
+     Not replaced — it is the intentional legacy compatibility layer.
+     Future: when ALL routes are on appEventBus, replace eventDispatcher with
+     a direct workspace_event_logs write inside the bridge.
+
+  3. EVENTS constant (types.ts)
+     Status: ACTIVE — still referenced by forms.ts and some routes
+     Why kept: forms.ts still calls eventDispatcher.dispatch() directly with
+     legacy EVENTS names.  Cannot remove until forms.ts is migrated.
+     Future: after forms.ts migration, deprecate EVENTS in favor of EVENT_TYPES.
+
+  4. tickets.ts cc routes (inline activityLogsTable insert)
+     Status: ACTIVE — cc_added and cc_removed actions inserted inline
+     Why kept: no appEventBus event type exists for CC changes.
+     These are not domain events in the current catalog.
+     Coupling note: documented, not refactored.
+
+  5. forms.ts eventDispatcher.dispatch() — only remaining legacy direct caller
+     Status: ACTIVE — dynamic event name from form config
+     Why not migrated: dynamic event names require registry mapping to be
+     type-safe on appEventBus.  Needs its own migration design.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING RISKS (inherited, not introduced in this sprint)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK-01  In-memory IdempotencyGuard — cleared on restart.
+           Impact: if the server restarts mid-emit (e.g. deploy), a partially
+           processed event may be reprocessed.
+           Mitigation: acceptable at current scale.
+           Fix path: persist event IDs to DB table with TTL.
+
+  RISK-02  No dead-letter queue — failed listeners are logged and dropped.
+           A permanent DB failure in a listener drops the side-effect silently.
+           Fix path: add a failed_events table + background retry worker.
+
+  RISK-03  Synchronous bridge (await dispatch) adds latency to bus fanout.
+           All bus listeners wait for bridge → eventDispatcher → DB write.
+           Impact: bus emit() resolves ~10-30ms slower than a pure in-memory bus.
+           Mitigation: routes use `void appEventBus.emit()` — never blocks HTTP.
+           Fix path: make bridge fire-and-forget when scale requires it.
+
+  RISK-04  notifications.ts import in index.ts (no-op scaffold).
+           Cosmetic only — file is intentional and documented.
+           Fix path: one-line removal when convenient.
+
+  RISK-05  Invitation-flow users (POST /users sync) do NOT emit EMPLOYEE_CREATED.
+           Activity logs and admin notifications not triggered for invited users.
+           Fix path: add appEventBus.emit(EMPLOYEE_CREATED) to the user sync route.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+READINESS ASSESSMENT — BEFORE FORMS MIGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Architecture health: ✅ STABLE
+
+  ── Active, fully migrated events ──────────────────────────────────────────
+    approval.created       ✅  emitter + listener + bridge + workspace_event_logs
+    approval.completed     ✅  emitter + listener + bridge + workspace_event_logs
+    ticket.created         ✅  emitter + listener + bridge + workspace_event_logs
+    ticket.updated         ✅  emitter + listener + bridge + workspace_event_logs
+    ticket.status_changed  ✅  emitter + listener + bridge + workspace_event_logs
+    employee.created       ✅  emitter + listener + bridge + workspace_event_logs
+
+  ── Ready listeners (await forms.ts emitter) ───────────────────────────────
+    form.submitted         ⏳  listeners ready in activity.ts + notifications-bus.ts
+                               emitter (forms.ts) still uses eventDispatcher
+
+  ── EventBus infrastructure ────────────────────────────────────────────────
+    Global sync error boundary     ✅  added in this sprint
+    Async rejection isolation      ✅  Promise.allSettled (pre-existing)
+    Duplicate event guard          ✅  IdempotencyGuard (in-memory, per-listener)
+    Cross-listener dedup isolation ✅  independent guard instances per file
+    Bridge (appEventBus → legacy)  ✅  one-way, no-loop guarantee, fully documented
+    Structured logging (pino)      ✅  appEventBus uses pinoAdapter
+
+  ── Known issues resolved ──────────────────────────────────────────────────
+    BUG-001 leave.requested duplicate   ✅  FIXED (registry.ts)
+    Stale TODO in bus.ts               ✅  FIXED
+    Dead imports in notifications.ts   ✅  FIXED
+    Wrong legacy caller list entries   ✅  FIXED (bridge.ts, index.ts)
+    Verbose migration comments         ✅  CONDENSED (tickets.ts)
+
+  ── What forms migration needs from the bus (already available) ───────────
+    1. form.submitted listener in activity.ts          ✅ READY
+    2. form.submitted listener in notifications-bus.ts ✅ READY
+    3. EVENT_TYPES.FORM_SUBMITTED constant             ✅ READY
+    4. FormSubmittedPayload in @workspace/core-events  ✅ READY
+    5. EventTypeMap["form.submitted"] mapping          ✅ READY
+    6. Bridge forwarding (automatic for all events)    ✅ READY
+
+    ONLY REMAINING WORK for forms migration:
+      Replace eventDispatcher.dispatch() in forms.ts with
+      appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED, FormSubmittedPayload).
+      Design decision needed: how to map the dynamic form event name to the
+      canonical "form.submitted" type (forms.ts uses a config-driven event name).
+
+  ── Verdict ────────────────────────────────────────────────────────────────
+    The EventBus architecture is stable, documented, and clean.
+    Forms migration can proceed immediately — all infrastructure is ready.
+    The only design question is how forms.ts maps its dynamic event name to
+    the canonical form.submitted type.  Once decided, the migration is 1 emit
+    call replacing 1 dispatch call.

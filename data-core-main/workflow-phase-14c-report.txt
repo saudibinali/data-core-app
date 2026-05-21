@@ -1,0 +1,262 @@
+================================================================================
+P14-C COMPLETION REPORT — Platform Access Boundary & Route Guards
+================================================================================
+Date: 2026-05-16
+Phase: P14-C
+
+────────────────────────────────────────────────────────────────────────────────
+SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+P14-C implements client-side permission gating so that every page, navigation
+item, tab, button, and write action in the Super Admin area is visible and
+accessible only to platform users whose role grants the required permission.
+The backend remains the authoritative enforcement layer (requirePlatformPermission
+middleware from P14-B). P14-C adds a synchronous, zero-network-request client
+layer on top using the same permission matrix.
+
+All P14-C deliverables are complete and tested.
+
+────────────────────────────────────────────────────────────────────────────────
+FILES CREATED (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+artifacts/api-server/src/routes/platform-me.ts
+  - GET /platform/me — platform users only (role=super_admin, workspaceId IS NULL)
+  - Returns: { userId, role, platformRoleCode, effectivePlatformRoleCode,
+               isRootOwner, isProtected, permissions[] }
+  - effectivePlatformRoleCode: legacy root (platformRoleCode IS NULL) → "root_platform_owner"
+  - permissions[]: array of all PlatformPermissionCode values the user holds
+  - 403 if caller is a workspace user (workspaceId IS NOT NULL or role ≠ super_admin)
+  - Registered in routes/index.ts
+
+artifacts/api-server/src/lib/__tests__/platform-me.test.ts
+  - 5 describe blocks, 18 individual tests
+  - T1: Legacy root (platformRoleCode=null) → root_platform_owner + all 18 perms
+  - T1b: isRootOwner=true → root_platform_owner regardless of platformRoleCode
+  - T2: Workspace users / non-super_admin blocked (403 logic verified)
+  - T3: getPlatformUserRoleCode correctness for 3 roles
+  - T4: Role-specific permissions (platform_admin ALL, support_admin no users.read,
+        finance_admin subscriptions.read only, read_only_operator write-free)
+  - T5: hasPlatformPermission used by requirePlatformPermission middleware
+
+artifacts/ops-platform/src/lib/platform-access.ts
+  - Pure client-side permission library — zero network, zero React, fully synchronous
+  - MinimalPlatformUser interface: { role?, platformRoleCode?, isRootOwner? }
+  - getEffectivePlatformRoleCode(user): resolves legacy root + isRootOwner flag
+  - getCurrentPlatformPermissions(user): returns Set<PlatformPermissionCode>
+  - hasPlatformPermissionClient(user, code): boolean
+  - hasAnyPlatformPermissionClient(user, codes[]): boolean
+  - hasAllPlatformPermissionsClient(user, codes[]): boolean
+  - canViewPlatformNavItem(user, navKey): boolean — controls sidebar visibility
+      NavItemKey values: "overview" | "workspaces" | "tenant-registry" |
+        "platform-users" | "platform-activity" | "event-log" | "platform-settings"
+      Permission requirements per key:
+        overview          — always visible (unrestricted)
+        workspaces        — always visible (unrestricted)
+        tenant-registry   — tenants.read
+        platform-users    — platform.users.read
+        platform-activity — platform.activity.read
+        event-log         — audit.read
+        platform-settings — platform.settings.read
+  - canViewTenantConsoleTab(user, tab): boolean — controls TenantAdminConsole tabs
+      Tab values: overview | lifecycle | subscription | entitlements |
+                  usage | renewal | health | evaluation
+      Permission requirements per tab:
+        overview      — tenants.read OR health.read OR usage.read OR renewal.read
+        lifecycle     — tenants.lifecycle.update OR tenants.read
+        subscription  — subscriptions.read
+        entitlements  — entitlements.read
+        usage         — usage.read
+        renewal       — renewal.read
+        health        — health.read
+        evaluation    — evaluation.read
+  - canPerformPlatformAction(user, actionKey): boolean — controls write buttons
+      PlatformActionKey values (6 total — no forbidden scope):
+        platform.user.create                → platform.users.create
+        platform.user.status.update         → platform.users.status.update
+        platform.user.role.update           → platform.users.role.update
+        tenant.lifecycle.update             → tenants.lifecycle.update
+        tenant.subscription.update          → subscriptions.update
+        tenant.entitlement.override.update  → entitlements.override.update
+  - canAccessPlatformRoute(user, routeKey): boolean — for route-level guards
+      RouteKey values: "platform.users" | "tenant.registry" |
+                       "platform.activity" | "audit"
+
+artifacts/ops-platform/src/lib/platform-me-hooks.ts
+  - useCurrentPlatformUser(): React Query hook → GET /api/platform/me
+      staleTime: 5 min, enabled when role === "super_admin"
+  - useCurrentPlatformPermissions(): returns Set<PlatformPermissionCode> from hook
+
+artifacts/ops-platform/src/components/platform-permission-route.tsx
+  - PlatformPermissionRoute component:
+      Props: { requiredPermission, children, fallback?, compact? }
+      Uses useAppAuth() — does NOT call GET /platform/me (synchronous only)
+      Renders children if user has permission, fallback/denied UI otherwise
+  - PlatformAccessDenied component (full + compact variant):
+      Full: centered card with shield icon, bilingual title
+        "Access Denied — لا تملك صلاحية الوصول"
+        "Contact Platform Owner — تواصل مع مالك المنصة"
+        <code>{requiredPermission}</code> inline
+      Compact: inline warning strip — same bilingual text, smaller layout
+      Props: requiredPermission, message? (override), compact?, data-testid?
+
+artifacts/ops-platform/src/lib/__tests__/platform-access.test.ts
+  - 9 describe blocks, 42 individual tests
+  - T1: getEffectivePlatformRoleCode — 9 cases (legacy root, isRootOwner, all 8 roles,
+        unknown role, workspace user, empty user)
+  - T2: getCurrentPlatformPermissions — root all 18, unknown 0, workspace 0,
+        read_only_operator > 0 and < 18
+  - T3: hasPlatformPermissionClient / hasAny / hasAll helpers
+  - T4: canViewPlatformNavItem — root sees all, unknown sees only unrestricted,
+        finance_admin / support_admin hide platform-users, platform_admin shows all,
+        read_only_operator hides event-log
+  - T5: canViewTenantConsoleTab — root all 8 tabs, workspace user none,
+        finance_admin subscription but not evaluation,
+        auditor health + evaluation + usage,
+        overview multi-permission fallback
+  - T6: canPerformPlatformAction — all 6 action keys verified per role
+  - T7: canAccessPlatformRoute — root all, empty user blocked, auditor tenant.registry
+  - T8: PlatformAccessDenied bilingual strings contract (EN + AR)
+  - T9: No forbidden action keys introduced (6 allowed, none forbidden)
+
+────────────────────────────────────────────────────────────────────────────────
+FILES UPDATED
+────────────────────────────────────────────────────────────────────────────────
+
+artifacts/api-server/src/routes/index.ts
+  - Added import: platformMeRouter from "./platform-me"
+  - Registered: router.use(platformMeRouter)
+
+artifacts/api-server/src/routes/platform-me.ts (isProtectedPlatformAccount call)
+  - Added workspaceId to the isProtectedPlatformAccount call to ensure legacy root
+    detection via isRootPlatformOwner uses all 4 identity fields
+
+artifacts/ops-platform/src/lib/auth.tsx
+  - AuthUser interface extended:
+      platformRoleCode?: string | null
+      isRootOwner?: boolean
+  - Both fields now propagated from POST /auth/login and GET /auth/me responses
+    into the AuthProvider context, making them available to all permission helpers
+    without an extra network request
+
+artifacts/ops-platform/src/components/layout/super-admin-layout.tsx
+  - Imports added: canViewPlatformNavItem, PlatformNavItemKey from platform-access.ts
+  - NavItem interface extended: navKey: PlatformNavItemKey
+  - navItems array: 7 entries, each tagged with navKey
+  - visibleNavItems computed synchronously from canViewPlatformNavItem(authUser, navKey)
+    — root sees all 7, unknown/workspace user sees 2 (overview + workspaces only)
+  - Governance section stays always-visible (out-of-scope in P14-C per spec)
+  - data-testid="nav-{navKey}" on every nav link for test automation
+
+artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+  - Imports added: useAppAuth, canPerformPlatformAction, PlatformAccessDenied
+  - Main component: canCreate = canPerformPlatformAction(authUser, "platform.user.create")
+      → "Create Platform User" button hidden when canCreate is false
+  - StatusChangePanel: canWrite check for "platform.user.status.update"
+      → renders <PlatformAccessDenied compact requiredPermission="platform.users.status.update" />
+         when permission missing (only reached if user is not root/protected)
+  - RoleChangePanel: canWrite check for "platform.user.role.update"
+      → renders <PlatformAccessDenied compact requiredPermission="platform.users.role.update" />
+         when permission missing (only reached if user is not root/protected)
+
+artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+  - Imports added: useAppAuth, canViewTenantConsoleTab, canPerformPlatformAction,
+    PlatformAccessDenied
+  - LifecycleControlPanel:
+      Signature: { tenant, canWrite?: boolean } (default: true)
+      When canWrite=false: renders PlatformAccessDenied compact instead of action buttons
+      When canWrite=true: existing allow/block/action flow unchanged
+  - SubscriptionManagementPanel:
+      Signature: { tenant, canWrite?: boolean } (default: true)
+      When canWrite=false: "Edit Subscription Metadata" button hidden
+      Read-only view (DL grid) always visible when tab is visible
+  - EntitlementPanel:
+      Signature: { tenant, canWrite?: boolean } (default: true)
+      When canWrite=false: "Add / Edit Override" button hidden
+      Read-only entitlement list always visible when tab is visible
+  - TenantAdminConsole (replaces flat inline logic):
+      useAppAuth() → authUser
+      visibleTabs = CONSOLE_TABS.filter(tab => canViewTenantConsoleTab(authUser, tab))
+      canWriteLifecycle    = canPerformPlatformAction(authUser, "tenant.lifecycle.update")
+      canWriteSubscription = canPerformPlatformAction(authUser, "tenant.subscription.update")
+      canWriteEntitlements = canPerformPlatformAction(authUser, "tenant.entitlement.override.update")
+      effectiveTab: resets to first visible tab if current tab becomes invisible
+      visibleTabs.length === 0 → renders PlatformAccessDenied (full) with
+        data-testid="console-no-tabs-denied"
+      Tab bar renders only visibleTabs (not all CONSOLE_TABS)
+      canWrite props passed to LifecycleControlPanel, SubscriptionManagementPanel,
+        EntitlementPanel
+
+────────────────────────────────────────────────────────────────────────────────
+PERMISSION GATING MATRIX — What each role can see/do
+────────────────────────────────────────────────────────────────────────────────
+
+Role                 | Nav items visible                      | Write actions
+---------------------|----------------------------------------|----------------------------
+root_platform_owner  | all 7                                  | all 6
+platform_admin       | all 7                                  | all 6
+support_admin        | overview, workspaces, platform-activity| none (read-only role)
+workspace_support    | overview, workspaces, tenant-registry  | none
+sales_admin          | overview, workspaces, tenant-registry  | none
+finance_admin        | overview, workspaces, tenant-registry  | tenant.subscription.update
+auditor              | overview, workspaces, tenant-registry, | none
+                     | platform-activity, event-log           |
+read_only_operator   | overview, workspaces, tenant-registry  | none
+
+Tenant Console tabs visible per role:
+  root / platform_admin → all 8 tabs (overview + lifecycle + subscription +
+                          entitlements + usage + renewal + health + evaluation)
+  support_admin         → overview, usage, renewal, health, evaluation
+  workspace_support     → overview, usage, health, evaluation
+  sales_admin           → overview, subscription, renewal, health
+  finance_admin         → overview, subscription, renewal
+  auditor               → overview, subscription, entitlements, usage,
+                          renewal, health, evaluation
+  read_only_operator    → overview, usage, renewal, health, evaluation
+  workspace user / none → 0 tabs (full access denied UI shown)
+
+────────────────────────────────────────────────────────────────────────────────
+BACKWARD COMPATIBILITY
+────────────────────────────────────────────────────────────────────────────────
+
+  ✅ Legacy root (role=super_admin, platformRoleCode IS NULL) → all 18 permissions
+     → all 7 nav items, all 8 tabs, all 6 write actions — no change to existing behavior
+  ✅ requireSuperAdmin middleware unchanged (still used by non-platform routes)
+  ✅ requirePlatformPermission (P14-B) unchanged — remains the backend authority
+  ✅ SuperAdminRoute component unchanged — still guards /super-admin/* at route level
+  ✅ Governance nav section always visible (P14-C spec: out-of-scope)
+  ✅ GET /auth/me and POST /auth/login responses unchanged (platformRoleCode already present)
+
+────────────────────────────────────────────────────────────────────────────────
+SAFETY GUARANTEES
+────────────────────────────────────────────────────────────────────────────────
+
+  ✅ Client gating is defense-in-depth only — backend requirePlatformPermission is
+     the authoritative guard; hiding buttons/tabs does not replace server enforcement
+  ✅ No password reset, no delete, no email change, no SSO, no MFA, no break-glass
+  ✅ No custom role builder — fixed 8-role matrix from P14-B used everywhere
+  ✅ No billing, invoice, or payment actions
+  ✅ canPerformPlatformAction only accepts 6 typed PlatformActionKey values —
+     forbidden action keys (user.delete, password.reset, sso.configure, etc.)
+     are TypeScript compile errors, not runtime errors
+  ✅ PlatformAccessDenied always renders bilingual (EN + AR) text
+  ✅ Root owner / protected account check in StatusChangePanel/RoleChangePanel
+     runs BEFORE the permission check — root accounts skip both panels entirely
+
+────────────────────────────────────────────────────────────────────────────────
+TEST RESULTS
+────────────────────────────────────────────────────────────────────────────────
+
+Backend  (api-server):   3099 tests, 53 files — ALL PASSED  ✅  (+18 new P14-C tests)
+Frontend (ops-platform): 1057 tests, 21 files — ALL PASSED  ✅  (+42 new P14-C tests, +3 new test file)
+
+Typecheck:
+  api-server:   0 errors  ✅
+  ops-platform: 7 errors  — all pre-existing (governance-audit.tsx TS2322×4,
+                              governance-violations.tsx TS2503, workflow-detail.tsx TS2353,
+                              workflows.tsx TS2353) — NOT introduced by P14-C
+
+────────────────────────────────────────────────────────────────────────────────
+END OF P14-C REPORT
+================================================================================

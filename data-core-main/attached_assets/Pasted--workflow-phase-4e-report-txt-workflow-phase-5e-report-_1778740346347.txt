@@ -1,0 +1,272 @@
+راجع:
+- workflow-phase-4e-report.txt
+- workflow-phase-5e-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- WG-02
+- approval lifecycle gaps
+- approval audit concerns
+- publish governance model
+- immutable version linkage
+- execution resume flow
+
+ثم نفّذ فقط:
+P5-F — Approval Resume Governance Completion
+
+ولا تنفّذ:
+- SLA engine
+- escalations
+- scheduler
+- retries
+- DAG merge runtime
+- simulation engine
+- multi-stage approvals
+
+عنوان المهمة:
+WORKFLOW PHASE 5-F — Approval Governance & Human Workflow Integrity
+
+المهمة الحالية:
+إغلاق آخر gaps الحرجة
+داخل:
+human approval lifecycle
+
+الهدف:
+تحويل approval flows من:
+runtime pause behavior
+
+إلى:
+governed auditable human workflow lifecycle
+
+بطريقة:
+enterprise-safe approval governance model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT APPROVAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- approval step handler
+- approval persistence
+- resumeExecution()
+- approval routes/APIs
+- approval audit logs
+- approval notifications
+- execution snapshots
+- version linkage
+
+حدّد:
+- أين توجد audit ambiguities
+- أين approval identity غير واضحة
+- أين human action attribution ناقص
+- أين replay/re-approval ممكن نظريًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN APPROVAL GOVERNANCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+immutable approval lifecycle
+
+المطلوب:
+- approval request identity
+- approval decision identity
+- actor attribution guarantees
+- decision timestamps
+- immutable approval records
+- approval-to-execution linkage
+- approval-to-version linkage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — IMMUTABLE APPROVAL RECORDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+approval records append-only.
+
+المطلوب:
+- no decision overwrite
+- no mutable approval result
+- no silent reassignment
+- no approval mutation after completion
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — APPROVAL DECISION GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف governance تمنع:
+- double approval
+- double rejection
+- approval after timeout
+- approval after cancellation
+- approval after completion
+- approval replay
+
+المطلوب:
+guarded decision model
+بنفس فلسفة:
+P4-D exact-once transitions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — APPROVAL STATUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم status lifecycle واضح:
+
+pending
+→ approved
+→ rejected
+→ expired
+→ cancelled
+
+مع:
+terminal semantics واضحة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — EXECUTION + APPROVAL CONSISTENCY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+approval decisions
+لا يمكن أن:
+- تعيد تشغيل execution terminal
+- تتجاوز cancel_requested
+- تتجاوز timed_out
+- تتجاوز deprecated workflow version
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — AUDIT & OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+approval_requested
+
+B)
+approval_decision_recorded
+
+C)
+approval_decision_rejected
+
+D)
+approval_resume_started
+
+E)
+approval_resume_blocked
+
+F)
+approval_replay_prevented
+
+كلها تحتوي:
+- executionId
+- workflowId
+- workflowVersion
+- approvalId
+- approverId
+- decision
+- previousStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — VERSION LINKAGE GOVERNANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+approval records
+مرتبطة بـ:
+- immutable workflow version
+- execution snapshot
+- approval step index
+
+حتى لو:
+workflow تغيّر لاحقًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — VALIDATION ENGINE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث validation/governance rules:
+
+WG-02
+لا يعود blocked بالكامل.
+
+بدل ذلك:
+approval workflows تصبح:
+fully governed + publishable.
+
+أضف validation تغطي:
+- invalid approver configuration
+- missing approval targets
+- approval loops المستقبلية
+- impossible approval routing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+approval decision recorded exactly once
+
+T2:
+duplicate approval prevented
+
+T3:
+approval after timeout blocked
+
+T4:
+approval after cancellation blocked
+
+T5:
+approval replay prevented
+
+T6:
+approval linked to immutable workflow version
+
+T7:
+approval resume respects guarded transitions
+
+T8:
+approval records append-only
+
+T9:
+approval workflows now publish successfully
+
+T10:
+terminal approval statuses immutable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- multi-level approval chains
+- SLA engine
+- escalation scheduler
+- delegation system
+- calendar integrations
+- reminder engine
+
+خلك:
+single-step governed approval lifecycle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5f-report.txt
+
+ويحتوي:
+- approval governance architecture
+- immutable approval model
+- decision lifecycle
+- exact-once approval guarantees
+- execution consistency behavior
+- version linkage strategy
+- audit/observability additions
+- validation integration
+- tests results
+- remaining enterprise approval gaps

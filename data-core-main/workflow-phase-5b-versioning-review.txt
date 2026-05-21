@@ -1,0 +1,1622 @@
+══════════════════════════════════════════════════════════════════════════════════
+  WORKFLOW PHASE 5-B — Immutable Workflow Versioning Architecture Review
+  Internal Operations Platform · May 2026
+══════════════════════════════════════════════════════════════════════════════════
+
+Phase:        P5-B (Architecture Review — NO implementation)
+Type:         Design document
+Prerequisite: P5-A complete (execution snapshots deployed, 325 tests passing)
+Risk closed:  H-06 — No versioning history (design only; implementation = P7-A)
+Sources:
+  workflow-platform-hardening-review.txt        (15 risks, full architecture)
+  workflow-phase-5a-report.txt                  (snapshot model, P5-A delivery)
+  lib/db/src/schema/workflows.ts                (live schema)
+  artifacts/api-server/src/lib/workflows/engine.ts    (trigger + snapshot capture)
+  artifacts/api-server/src/lib/workflows/executor.ts  (resume + snapshot selection)
+  artifacts/api-server/src/routes/workflows.ts         (activation lifecycle)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — CURRENT MODEL REVIEW: WHAT IS MUTABLE AND WHY IT MATTERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  Current Schema (workflow_definitions)
+──────────────────────────────────────────
+
+  The workflow_definitions table has the following mutable JSONB columns:
+
+    steps      JSONB NOT NULL DEFAULT '[]'
+    conditions JSONB NOT NULL DEFAULT '[]'
+
+  And the following mutable text/metadata columns:
+    name, nameAr, description, descriptionAr, module, triggerEvent
+
+  Lifecycle status:
+    status: text  — values: 'draft' | 'active' | 'deprecated' | 'archived'
+    isActive: boolean — synced with status (convenience redundancy)
+
+  Timestamps:
+    createdAt, updatedAt — updatedAt auto-refreshed on any PATCH ($onUpdate).
+    deletedAt, archivedAt — set on soft-delete and archive transitions.
+
+  Missing entirely:
+    version:       INTEGER — no version counter exists on the definition.
+    publishedBy:   INTEGER FK — no record of who activated.
+    publishedAt:   TIMESTAMPTZ — updatedAt is the only proxy (unreliable).
+    changeNotes:   TEXT — no structured changelog.
+
+  Authorship:
+    createdBy: INTEGER FK → users.id (set null on delete) — exists.
+    No "last published by" or "last deactivated by" attribution.
+
+1.2  Current Activation Lifecycle
+──────────────────────────────────
+
+  State machine enforced by routes/workflows.ts:
+
+    ┌──────────┐  POST /workflows       ┌────────────────────────┐
+    │  (none)  │ ─────────────────────► │  draft                 │
+    └──────────┘                        │  isActive=false        │
+                                        │  Engine: skips         │
+                                        └────────────┬───────────┘
+                                                     │
+                           POST /workflows/:id/activate
+                           (runs validateWorkflow)
+                                                     │
+                                        ┌────────────▼───────────┐
+                                        │  active                │
+                                        │  isActive=true         │
+                                        │  Engine: triggers here │
+                                        └────────────┬───────────┘
+                                                     │
+                        PATCH {status:'deprecated'} (deactivation)
+                                                     │
+                                        ┌────────────▼───────────┐
+                                        │  deprecated            │
+                                        │  isActive=false        │
+                                        │  Engine: skips         │
+                                        │  Editable again        │
+                                        └────────────┬───────────┘
+                                                     │
+              DELETE /workflows/:id       ┌──────────▼──────────┐
+              sets deletedAt=now()        │  archived            │
+         ─────────────────────────────►  │  isActive=false      │
+                                         │  Immutable forever   │
+                                         └─────────────────────-┘
+
+  Key observations:
+    A) 'active' is already immutable — PATCH returns 422 WORKFLOW_IMMUTABLE_ACTIVE.
+       Admin must PATCH to 'deprecated' first, then edit, then re-activate.
+       This is correct behavior — P3-F established this gate.
+
+    B) The flow draft → active → deprecated → (edit) → active creates a new
+       version in effect — but NO version record is written anywhere.
+       The old steps are permanently overwritten with no recovery path.
+
+    C) 'deprecated' → 'draft' is allowed (PATCH status transitions table):
+         draft → deprecated ✓
+         deprecated → draft ✓
+         active → deprecated ✓
+       This means a workflow can oscillate: draft ↔ deprecated indefinitely,
+       accumulating edits with no history of what each intermediate version looked like.
+
+    D) POST /activate writes to:
+         status = 'active'
+         isActive = true
+         updatedAt = auto-refreshed
+       No version increment. No version record INSERT. No publishedBy attribution.
+
+1.3  What Is Currently Mutable in a Dangerous Way
+──────────────────────────────────────────────────
+
+  DANGEROUS MUTABILITY (no version record created):
+
+  ① workflow_definitions.steps (JSONB)
+     Editable in draft and deprecated status.
+     When re-activated: old steps are GONE. No recovery.
+     P5-A closes the resume-drift risk — but historical interpretation is still broken:
+       "What steps did this execution (from 3 months ago) actually run?" →
+       If the definition was re-activated since, the current steps may be different.
+       The execution has a steps_snapshot — but there's no way to know WHICH named
+       version that snapshot corresponds to, or whether it was intentional.
+
+  ② workflow_definitions.conditions (JSONB)
+     Same as steps — trigger conditions are mutable.
+     If conditions change between activation cycles, old executions that fired
+     under the OLD conditions cannot be explained from the current conditions alone.
+
+  ③ workflow_definitions.triggerEvent (TEXT)
+     The trigger event type is mutable (edit in draft).
+     If changed: "Why did execution X trigger on 'ticket.created' when the
+     workflow now triggers on 'leave.submitted'?" — no historical record.
+
+  ④ workflow_definitions.name / nameAr (TEXT)
+     Mutable. If a workflow is renamed, execution history shows the new name —
+     which may confuse operators reviewing old executions: "I don't remember a
+     workflow called 'Enhanced Leave Approval V2' — what ran on April 1st?"
+
+  NON-DANGEROUS MUTABILITY (acceptable without version tracking):
+
+  ⑤ description, descriptionAr — cosmetic only, no effect on execution.
+  ⑥ archivedAt, deletedAt — lifecycle timestamps, not definition data.
+
+  CURRENTLY IMMUTABLE (correct, must stay immutable):
+
+  ⑦ steps when status='active' — P3-F blocks PATCH on active workflows.
+     This is the most important guard and must NEVER be removed.
+
+  ⑧ workflow_executions.steps_snapshot — immutable by convention (P5-A).
+     No UPDATE path should ever touch this column after INSERT.
+
+1.4  What P5-A Did Not Solve
+──────────────────────────────
+
+  P5-A (execution snapshot) closes the RUNTIME drift risk:
+    → Approval resume uses frozen steps. Live edits have zero effect. ✓
+
+  P5-A does NOT solve the GOVERNANCE drift risks:
+    → Historical audit: "What was version N of workflow W?" → impossible.
+    → Rollback: "Revert to the last known-good configuration" → impossible.
+    → Version correlation: "Which version of the workflow produced these results?" →
+      workflowVersion column is NULL for all current executions.
+    → Diff/compare: "What changed between the March deployment and April deployment?" →
+      impossible; only one copy of steps exists.
+    → Compliance: "Produce the exact workflow configuration that approved request #7421"
+      → possible only via steps_snapshot on that execution; no named version available.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — VERSIONING PROBLEM ANALYSIS: WHY SNAPSHOTS ALONE ARE INSUFFICIENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  The Three Distinct Problems That Need Versioning
+──────────────────────────────────────────────────────
+
+  PROBLEM A — Runtime Drift (execution snapshot)
+    "When this paused execution resumes, will it run the steps that were active
+    when it was triggered, or the steps as currently configured?"
+
+    STATUS: SOLVED by P5-A.
+    Each execution has steps_snapshot. Resume is drift-safe.
+
+  PROBLEM B — Historical Audit (version history table)
+    "What did workflow W look like on 2026-03-15? Who changed it, and to what?"
+
+    STATUS: UNSOLVED. No version history exists.
+    The steps_snapshot on individual executions provides INDIRECT evidence
+    (you can reconstruct what the steps were at a specific execution's trigger time)
+    but there is no named, labeled, human-readable history of definition changes.
+
+  PROBLEM C — Rollback (version reactivation)
+    "Workflow W is producing unexpected results in production. Revert to the
+    configuration from two weeks ago."
+
+    STATUS: IMPOSSIBLE. No prior version is stored.
+    The only recovery path is: remember what the old steps were and manually
+    reconstruct them. This is error-prone and may be impossible if the original
+    creator no longer works at the company.
+
+2.2  Why Execution Snapshots Alone Are Insufficient
+─────────────────────────────────────────────────────
+
+  Snapshots are PER-EXECUTION. They answer: "What did THIS execution run?"
+  They cannot answer: "What were ALL configurations of workflow W, in order?"
+
+  Missing capabilities with snapshot-only model:
+
+  ① Named version history
+     "Show me versions 1, 2, 3 of workflow W side by side."
+     A snapshot tells you what ONE execution ran. It does not give you a
+     consolidated version timeline. To see all versions, you would have to:
+       - Query all executions for workflow W.
+       - Group by identical steps_snapshot content.
+       - Infer version boundaries from startedAt timestamps.
+     This is fragile and does not account for definitions that were activated
+     but triggered no executions.
+
+  ② Rollback as a first-class operation
+     "Revert to version 3."
+     Snapshots are owned by executions, not by the definition.
+     You cannot activate a snapshot — you can only read it.
+     A rollback requires: find the snapshot, copy it into the definition as
+     new draft steps, validate, activate. There is no API for this.
+
+  ③ Publish attribution
+     "Who published version 4 of this workflow, and why?"
+     The snapshot has no publishedBy or publishedAt or changeNotes fields.
+     The definition's updatedAt changes on every PATCH — not just on activate.
+
+  ④ Version-to-execution correlation
+     "How many executions ran under version 3 vs version 4?"
+     workflowVersion is currently NULL on all executions.
+     Even after P7-A populates it, it's an integer — meaningful only when
+     there is a corresponding version row with human-readable context.
+
+  ⑤ Dead definition audit
+     A workflow that was activated, ran zero executions, was deprecated and
+     edited, then re-activated — leaves no trace of the "version 1 activation."
+     If that version had a misconfiguration that was caught and fixed, there is
+     no record of the misconfiguration for post-incident analysis.
+
+2.3  Why Rollback Is Impossible Now
+──────────────────────────────────────
+
+  The current schema has one copy of steps per definition row.
+  Activating a workflow overwrites the state. Deprecating allows editing.
+  Editing overwrites again.
+
+  Timeline of what happens today:
+
+    T=0  Admin creates workflow, sets steps = [A, B, C].  Version: (none)
+    T=1  Admin activates.  Executions run steps [A, B, C].
+    T=2  Admin deprecates.
+    T=3  Admin changes steps to [A, B, X].  Previous [A,B,C]: GONE.
+    T=4  Admin activates.  Executions run steps [A, B, X].
+    T=5  Bug discovered — X was wrong. Need to revert to [A, B, C].
+    T=6  Nobody remembers what C was. Steps [A, B, C]: PERMANENTLY LOST.
+
+  If the platform has executions from T=1 with steps_snapshot=[A,B,C],
+  an operator could manually inspect those snapshots to reconstruct C.
+  But this is a forensic recovery, not a rollback feature.
+
+2.4  Historical Audit Weakness Without Versions
+─────────────────────────────────────────────────
+
+  A compliance auditor asks: "What did the 'Manager Approval Workflow' look like
+  on March 15, 2026 when it approved leave request #7421?"
+
+  Current answer path:
+    1. Find execution for leave request #7421 → execution.id = 892.
+    2. Read execution 892's steps_snapshot (P5-A provides this).
+    3. Report the step configuration from the snapshot.
+
+  This works for the execution-level question. But:
+    - If execution 892 was created BEFORE P5-A (steps_snapshot = NULL),
+      the answer is "unknown — no snapshot was captured for this execution."
+    - The auditor cannot ask: "How many times was this workflow definition changed
+      between January and March 2026?" There is no history to query.
+    - The auditor cannot ask: "Who approved version 3 of this workflow for
+      production use?" No publish attribution exists.
+
+2.5  Schema Evolution Risks Without Versioning
+────────────────────────────────────────────────
+
+  Without a version table, schema evolution (adding new required fields to
+  step types) is reckless:
+
+  Scenario:
+    - April 2026: ApprovalStep.config has { approverType, approverIds, title }.
+    - June 2026: New required field added: { escalationPolicy }.
+    - All NEW activations validate against the new schema.
+    - Old steps_snapshots (from April) still contain the old schema.
+
+  When an April execution resumes:
+    - executor.ts reads the April snapshot.
+    - Snapshot step has no escalationPolicy.
+    - If escalationPolicy is accessed without a default: runtime crash.
+    - If accessed with a default: silent behavior change (escalation silently disabled).
+
+  Without a version table, there is no way to:
+    - Know WHICH schema version the snapshot was created under.
+    - Apply targeted migration logic ("if workflowVersion < 5, default escalationPolicy=none").
+    - Alert on old snapshots that may be incompatible.
+
+2.6  Drift Between Execution and Definition Metadata
+──────────────────────────────────────────────────────
+
+  Even with P5-A, there is metadata drift between the execution record and the
+  definition state at trigger time:
+
+  Columns on workflow_definitions NOT captured in steps_snapshot:
+    - name / nameAr (display name)
+    - description / descriptionAr
+    - triggerEvent (the event type that fired)
+    - conditions (the top-level trigger filter conditions)
+    - module (the domain module)
+
+  The triggerEvent and conditions columns are particularly important:
+    - conditions determines WHETHER an execution fires.
+    - If an admin changes the trigger conditions after an execution completes,
+      an auditor reviewing "why did this workflow fire for this event?" cannot
+      reconstruct the conditions that were active at the time.
+
+  Note: triggerEvent is already denormalized in execution.context.triggerEvent.
+  But top-level conditions are NOT captured in the snapshot or the context.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — IMMUTABLE VERSION MODEL DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  Architectural Principle: Publish Creates a Version
+────────────────────────────────────────────────────────
+
+  CORE INVARIANT:
+    Every time a workflow transitions to 'active' status, an immutable row is
+    written to workflow_definition_versions. This row is NEVER updated.
+    It is the permanent record of "what was deployed at this moment."
+
+  This is the only write point for version rows. No other operation creates versions.
+
+  Consequences:
+    - Drafting, editing, deprecating, naming changes: NO version created.
+    - Only POST /activate → version row created.
+    - Rollback (future): creates a NEW version row (does not delete or modify old ones).
+
+3.2  New Table: workflow_definition_versions
+──────────────────────────────────────────────
+
+  CREATE TABLE workflow_definition_versions (
+    id              SERIAL         PRIMARY KEY,
+
+    -- Parent definition (no CASCADE DELETE — versions must outlive definitions).
+    -- If the definition is soft-deleted (archived), versions are kept forever.
+    -- This is the most important FK decision: versions are immutable audit records.
+    definition_id   INTEGER        NOT NULL
+                    REFERENCES workflow_definitions(id)
+                    ON DELETE RESTRICT,
+
+    workspace_id    INTEGER        NOT NULL
+                    REFERENCES workspaces(id)
+                    ON DELETE CASCADE,
+                    -- Cascade: if the workspace is deleted, all data goes.
+                    -- This is acceptable — workspace deletion is catastrophic anyway.
+
+    version         INTEGER        NOT NULL,
+                    -- Monotonically increasing per definition.
+                    -- First publish: version=1. Second: version=2. Etc.
+                    -- Assigned by the route handler at publish time.
+                    -- UNIQUE constraint: (definition_id, version).
+
+    -- ── Immutable snapshot of the full definition at publish time ───────────
+    steps           JSONB          NOT NULL,
+                    -- Full WorkflowStep[] as-is at the moment of activation.
+                    -- Never updated after INSERT.
+
+    conditions      JSONB          NOT NULL,
+                    -- Top-level trigger conditions at publish time.
+                    -- Captures which events qualified to trigger this version.
+
+    trigger_event   TEXT           NOT NULL,
+                    -- Trigger event string at publish time.
+                    -- Even if the definition's triggerEvent is later changed,
+                    -- this version records what it was when deployed.
+
+    name            TEXT           NOT NULL,
+    name_ar         TEXT,
+                    -- Display name at publish time (for audit readability).
+
+    -- ── Publish attribution ─────────────────────────────────────────────────
+    published_by    INTEGER
+                    REFERENCES users(id)
+                    ON DELETE SET NULL,
+                    -- SET NULL on user delete — record preserved without actor.
+
+    published_at    TIMESTAMPTZ    NOT NULL DEFAULT now(),
+                    -- The moment the activation transition completed.
+                    -- Different from workflow_definitions.updated_at (which changes on
+                    -- every PATCH). This is the authoritative "went live" timestamp.
+
+    -- ── Optional governance metadata ────────────────────────────────────────
+    change_notes    TEXT,
+                    -- Optional human-written description of what changed in this version.
+                    -- "Fixed email template. Changed approver from manager to director."
+                    -- Provided by the activating admin at publish time (UI field).
+                    -- NULL is acceptable — not all teams use this.
+
+    -- ── Deactivation record ─────────────────────────────────────────────────
+    deactivated_at  TIMESTAMPTZ,
+                    -- Set when this version was superseded by a newer activation,
+                    -- or when the workflow was deprecated.
+                    -- NULL = this is the currently active version (or was never deactivated).
+
+    deactivated_by  INTEGER
+                    REFERENCES users(id)
+                    ON DELETE SET NULL,
+                    -- Who deactivated this version (deprecated the workflow).
+  );
+
+  INDEXES:
+    (definition_id, version) UNIQUE     — enforces monotonic versioning per definition.
+    (workspace_id, published_at)        — compliance audit queries: "all publishes in March".
+    (definition_id, deactivated_at)     — find the currently active version:
+                                          WHERE deactivated_at IS NULL.
+
+  CONSTRAINTS:
+    version > 0 — versions start at 1.
+    (definition_id, version) UNIQUE — no two rows for the same version of the same definition.
+
+3.3  Changes to workflow_definitions
+──────────────────────────────────────
+
+  ADD COLUMN version INTEGER NOT NULL DEFAULT 1
+    -- Current version number. Incremented atomically on each activation.
+    -- Initially 1 for all existing rows (default preserves backward compatibility).
+    -- After P7-A is deployed: every activation increments this and inserts a version row.
+
+  ADD COLUMN current_version_id INTEGER REFERENCES workflow_definition_versions(id) ON DELETE SET NULL
+    -- FK to the currently active version row.
+    -- NULL = no version yet (pre-P7-A rows, or draft workflows that were never activated).
+    -- Updated atomically with the version INSERT during activation.
+    -- Makes "get the active version" a single join without a subquery.
+
+  NOTE: Do NOT add published_by or published_at to workflow_definitions.
+    These belong in the version row, not the definition row.
+    The definition is the "container" — the version is the "snapshot."
+    Duplicating attribution on the definition row leads to stale data when
+    the definition is deprecated and a new version is later published.
+
+3.4  Draft Editing Model
+──────────────────────────
+
+  Draft editing behavior is UNCHANGED from the current model:
+    - draft and deprecated definitions are editable.
+    - steps, conditions, triggerEvent, name can all be changed.
+    - No version row is written for draft edits.
+
+  Why this is correct:
+    Drafts are work-in-progress. Writing a version row for every draft save would
+    pollute the version history with incomplete, unreviewed configurations.
+    The version history must contain only production-activated configurations.
+
+  Implication:
+    If a workflow is activated (version 1 written), deprecated, edited 15 times
+    (no version rows), then re-activated (version 2 written): the 15 intermediate
+    edits are not in the version history. This is intentional and correct.
+
+  The version history answers: "What was deployed?" not "What was drafted?"
+
+3.5  Activation Model (Updated)
+─────────────────────────────────
+
+  POST /workflows/:id/activate → updated flow:
+
+    1. Verify workflow exists, is not archived.
+    2. Verify current status is 'draft' or 'deprecated' (not already active).
+    3. Run validateWorkflow(steps, triggerEvent) — full structural + governance validation.
+    4. If validation fails → 422 with error list. NO version row written. Stop.
+    5. If validation passes:
+       a. BEGIN TRANSACTION:
+          - Read current definition.version (e.g., N).
+          - Compute new_version = N + 1  (or 1 if this is the first activation).
+          - INSERT INTO workflow_definition_versions:
+              { definition_id, workspace_id, version=new_version, steps, conditions,
+                trigger_event, name, name_ar, published_by=req.userId, published_at=now(),
+                change_notes=req.body.changeNotes ?? null }
+          - UPDATE workflow_definitions SET:
+              status='active', is_active=true, version=new_version,
+              current_version_id=<new version row id>
+       b. COMMIT TRANSACTION.
+    6. Return 200 with { workflowId, version: new_version, publishedAt }.
+
+  TRANSACTION REQUIREMENT:
+    The version INSERT and the definitions UPDATE must be atomic.
+    If the definitions UPDATE fails (e.g., optimistic lock conflict), the version row
+    must be rolled back. The version table must NEVER have orphaned rows that have no
+    corresponding is_active state on the definition.
+
+3.6  Deprecation Model (Updated)
+──────────────────────────────────
+
+  PATCH /workflows/:id { status: 'deprecated' } → updated flow:
+
+    1. Update workflow_definitions.status = 'deprecated', is_active = false.
+    2. Find the current_version_id row in workflow_definition_versions.
+    3. UPDATE that row: deactivated_at=now(), deactivated_by=req.userId.
+    4. Clear current_version_id on the definition (SET NULL).
+
+  After deprecation:
+    - The version row records EXACTLY when and by whom this configuration was taken offline.
+    - Historical executions that ran under this version are still correctly linked.
+    - The definition can be edited and re-activated as a new version.
+
+3.7  Version Numbering Strategy
+──────────────────────────────────
+
+  Strategy: monotonically increasing integer per definition, starting at 1.
+
+  Rules:
+    ① Version 1 = first activation of this definition.
+    ② Each activation increments by 1: 1, 2, 3, 4, ...
+    ③ Rollback creates a NEW version number, even though steps are reverted.
+       "Rollback to version 3" creates version N+1 (with version 3's steps).
+       Reason: the deployment event is new; the configuration is old.
+       Version numbers must be monotonically increasing — they are not
+       "semantic versions." They are deployment counts.
+    ④ There are no minor/patch versions, no branches.
+       One integer per workflow per activation. Simple.
+    ⑤ Version 0 NEVER appears in workflow_definition_versions.
+       workflow_definitions.version starts at 0 (default) for pre-P7-A rows
+       and is incremented to 1 on first activation after P7-A.
+
+  Concurrency safety:
+    The version INSERT within a transaction uses:
+      WHERE version = (SELECT MAX(version) FROM workflow_definition_versions WHERE definition_id=N) + 1
+    Combined with the UNIQUE(definition_id, version) constraint:
+    If two admins simultaneously activate the same definition (extremely unlikely but possible),
+    exactly one will succeed; the other will get a constraint violation → retry or 409.
+
+3.8  The "Active Version" Concept
+───────────────────────────────────
+
+  At any point in time, a workflow definition has ZERO or ONE active version:
+    - ZERO: status is draft, deprecated, or archived (no active version).
+    - ONE:  status is 'active' (exactly one version row has deactivated_at IS NULL).
+
+  The "active version" is the version that new executions should run.
+  It is referenced by workflow_definitions.current_version_id.
+
+  INVARIANT (must be enforced at all times):
+    IF workflow_definitions.status = 'active'
+    THEN exactly one workflow_definition_versions row for this definition
+         has deactivated_at IS NULL.
+    IF workflow_definitions.status != 'active'
+    THEN zero workflow_definition_versions rows for this definition
+         have deactivated_at IS NULL.
+
+  Violation of this invariant = corrupted state.
+  Must be enforced by:
+    - Wrapping activation in a transaction.
+    - Wrapping deprecation in a transaction.
+    - Never UPDATE version rows outside of these two transactions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — EXECUTION LINKAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  workflowVersion Semantics (P5-A column, P7-A activation)
+───────────────────────────────────────────────────────────────
+
+  workflow_executions.workflow_version was added in P5-A as a nullable INTEGER column.
+  Its current value: NULL for all rows (awaiting P7-A to populate it).
+
+  After P7-A:
+    workflow_version = the version number from workflow_definition_versions that was
+    active at the moment engine.ts created this execution row.
+
+    Written by engine.ts at INSERT time:
+      workflowVersion: def.currentVersion  (read from workflow_definitions.version)
+
+    This is a DENORMALIZED integer — copied from the definition, not a FK.
+    Rationale: the version number must be preserved even if the version row is later
+    deleted (though ON DELETE RESTRICT prevents deletion), or if the definition itself
+    is archived. A FK could become NULL; a denormalized integer is always readable.
+
+  After P7-A, this query becomes meaningful:
+    SELECT COUNT(*) FROM workflow_executions
+    WHERE workflow_id = W AND workflow_version = 3;
+    → "How many executions ran under version 3 of workflow W?"
+
+4.2  Execution → Version Linkage Strategy
+──────────────────────────────────────────
+
+  An execution is linked to its version through TWO independent channels:
+
+  CHANNEL A — workflowVersion (integer, denormalized):
+    workflow_executions.workflow_version = 3
+    → Fast integer join. Survives definition row mutations.
+    → But gives only the integer — need a JOIN to get version metadata.
+
+  CHANNEL B — steps_snapshot (JSONB, immutable, P5-A):
+    workflow_executions.steps_snapshot = [...exact steps...]
+    → Complete step configuration. Survives version row deletion (if ever allowed).
+    → Does NOT give version metadata (publishedBy, publishedAt, changeNotes).
+
+  Together, channels A and B provide:
+    - The exact steps executed (B).
+    - The named version number (A) → join to version row for full metadata (C).
+
+  CHANNEL C — workflow_definition_versions (join via A):
+    SELECT v.* FROM workflow_definition_versions v
+    WHERE v.definition_id = <workflowId>
+    AND v.version = <workflowVersion>
+    → Full audit record: who published, when, what notes.
+
+  The combination A+B+C provides complete execution lineage:
+    "Execution 892 ran version 3 of workflow W (published by Alice on March 5, 2026
+    with notes: 'Updated approver to include directors') using the following steps:
+    [steps from snapshot B]."
+
+4.3  Snapshot + Version Coexistence
+──────────────────────────────────────
+
+  P5-A snapshot and P7-A version rows are COMPLEMENTARY, not redundant.
+
+  steps_snapshot (P5-A):
+    ✓ Runtime safety — prevents drift on resume.
+    ✓ Owned by the execution — survives definition changes.
+    ✗ Not named or attributed.
+    ✗ Cannot be used to reconstruct historical version timelines.
+    ✗ Contains steps only, not conditions or trigger metadata.
+
+  workflow_definition_versions (P7-A):
+    ✓ Named, attributed, timestamped.
+    ✓ Enables rollback.
+    ✓ Enables version comparison.
+    ✓ Contains FULL snapshot (steps + conditions + trigger_event + name).
+    ✗ Does NOT follow individual executions (shared row per version, not per execution).
+    ✗ If version rows were deletable, executions would lose their version reference.
+       (ON DELETE RESTRICT prevents this.)
+
+  Together:
+    - The version row answers: "What was deployed as version 3?"
+    - The execution snapshot answers: "What did THIS execution actually run?"
+    - For post-P7-A executions: these should always match (version row steps == snapshot steps).
+    - For pre-P7-A executions: only the snapshot exists (workflow_version = NULL).
+
+4.4  Snapshot Validation at Resume Time
+─────────────────────────────────────────
+
+  Current behavior (P5-A): executor.ts reads steps_snapshot and uses it without validation.
+  This is correct — the snapshot is frozen and trusted.
+
+  Future enhancement (P7-B, after P7-A):
+    When both steps_snapshot and workflowVersion are present, executor.ts can optionally:
+      1. Read the version row from workflow_definition_versions.
+      2. Compare version_row.steps with execution.steps_snapshot.
+      3. If they differ: emit WARN (should never happen — indicates data corruption).
+
+  This is a consistency check, not a safety mechanism (snapshot is still the source of truth).
+  It detects bugs in the implementation (e.g., a migration that incorrectly updated snapshots).
+
+4.5  Future Replay Compatibility
+──────────────────────────────────
+
+  "Replay" = re-execute a completed execution using its original step configuration.
+  This is not implemented and not in P7-A scope, but the version model enables it:
+
+  Replay requirements:
+    - Original trigger context: execution.context (already stored).
+    - Original step configuration: execution.steps_snapshot (already stored, P5-A).
+    - Original version metadata: workflow_definition_versions.version (available after P7-A).
+
+  The P5-A + P7-A model makes replay POSSIBLE without any additional schema changes.
+  Replay execution would create a new execution row with:
+    status='pending', steps_snapshot=(copied from original), workflow_version=(original's version),
+    context=(re-built from original trigger data).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — PUBLISH GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Current Publish Pipeline Gaps
+──────────────────────────────────────
+
+  Today's POST /activate does:
+    ① Structural validation (validateWorkflow).
+    ② Status transition to 'active'.
+
+  Missing from a production-grade publish pipeline:
+
+  GAP 1: No pre-publish validation scope
+    Current validation: static structural check (step types, content presence).
+    Missing: runtime risk detection (fanout estimates, assignee resolution,
+    recursion risk detection, step dependency validation).
+    See workflow-platform-hardening-review.txt Section 4.2 (TIER 1/2/3 validation).
+
+  GAP 2: No publish attribution
+    updatedAt is the only timestamp available after publish.
+    updatedAt changes on any PATCH — not specifically on activation.
+    "Who published this workflow to production?" is unanswerable today.
+
+  GAP 3: No change notes
+    No structured field for documenting what changed in this activation.
+    Teams either add this to the description (dirty) or document externally (unreliable).
+
+  GAP 4: No publish preview
+    Before going live, an admin cannot see: "If I activate this now, what would
+    executions actually run?" They can read the steps array — but for non-technical
+    workflow builders, a confirmation preview is essential.
+
+  GAP 5: No publish approval role
+    Any user with workflow.manage permission can activate any workflow.
+    There is no "workflow.publish" permission that requires a second person to approve.
+    In regulated environments: the person who configures the workflow should NOT
+    be the same person who publishes it to production.
+
+5.2  Required Publish Pipeline (P7-A scope)
+──────────────────────────────────────────────
+
+  The publish pipeline should have these sequential gates:
+
+  GATE 1 — Validation (current, must be strengthened)
+    ✓ Step type blocklist check (P3-A — existing).
+    ✓ Content validation (notifications, tasks — P3-A — existing).
+    + Add: step index uniqueness (H-08 structural validation).
+    + Add: condition reference validation (onTrue/onFalse point to existing steps).
+    + Add: circular dependency detection (DFS on step graph).
+    + Add: empty workflow warning (0 steps not blocked, but flagged).
+
+  GATE 2 — Runtime Risk Assessment (new)
+    Warning-level checks that do not block publish but are surfaced to the admin:
+    + Fanout estimate: if role-based recipients > threshold, warn with estimate.
+    + Recursion risk: if trigger event matches a step's emitted event, warn.
+    + Schema compatibility: if schema has evolved since last publish, warn.
+
+  GATE 3 — Confirmation with Attribution (new)
+    POST /activate body should accept optional fields:
+    { changeNotes?: string }  — "Why was this version published?"
+    The activating user (req.userId) is always recorded as published_by.
+
+  GATE 4 — Version Row Creation (new — P7-A)
+    INSERT INTO workflow_definition_versions (the atomically-committed immutable record).
+
+  GATE 5 — Definition Update (current, modified in P7-A)
+    UPDATE workflow_definitions SET status='active', version=N, current_version_id=<id>
+
+  Future (Post-P7-A):
+    GATE 6 — Two-Person Approval (optional, workspace-configurable)
+      Requires a second admin with workflow.publish permission to confirm activation.
+      First admin: "proposes" activation (status: 'pending_publish').
+      Second admin: "approves" the proposal → activation proceeds.
+      This requires a new status value and a new table for publish approvals.
+      NOT in P7-A scope. Flagged for P8-A (Governance Enhancement Phase).
+
+5.3  Publish Metadata: What Must Be Captured
+──────────────────────────────────────────────
+
+  Per version row (captured at activation time):
+
+  ALWAYS REQUIRED (non-optional):
+    published_by      INTEGER FK — the activating user. Never null for post-P7-A rows.
+    published_at      TIMESTAMPTZ — the moment activation completed. Server-set.
+    version           INTEGER — monotonically increasing deployment count.
+    steps             JSONB — frozen step configuration.
+    conditions        JSONB — frozen trigger conditions.
+    trigger_event     TEXT — the event type this version responds to.
+    name              TEXT — human-readable name at publish time.
+
+  OPTIONAL (improve auditability):
+    change_notes      TEXT — admin-provided reason for this publish.
+    name_ar           TEXT — Arabic display name at publish time.
+
+  DELIBERATELY EXCLUDED from version rows:
+    description       TEXT — cosmetic, no effect on execution. Not worth versioning.
+    module            TEXT — should not change after creation. Not version-relevant.
+
+5.4  The Immutable Publish Artifact
+──────────────────────────────────────
+
+  The workflow_definition_versions row IS the immutable publish artifact.
+
+  Immutability guarantees:
+    ① No UPDATE should ever modify a version row after INSERT.
+       The only exception is setting deactivated_at and deactivated_by
+       when the workflow is deprecated — these are additive fields.
+       (Columns published_by, published_at, version, steps, conditions,
+       trigger_event, name, name_ar, change_notes: NEVER updated after INSERT.)
+
+    ② ON DELETE RESTRICT on definition_id:
+       A workflow definition cannot be hard-deleted as long as it has version rows.
+       This enforces audit record preservation.
+       Soft-delete (archived status) is always available instead.
+
+    ③ No application code should SELECT ... FOR UPDATE on version rows
+       or apply optimistic lock patterns to them.
+       They are append-only and read-only after INSERT.
+
+    ④ Future: DB-level enforcement.
+       A PostgreSQL ROW SECURITY POLICY or RULE could enforce this at the DB layer:
+         CREATE RULE no_update_versions AS ON UPDATE TO workflow_definition_versions
+         DO INSTEAD NOTHING;
+       This is optional governance hardening — the application layer is sufficient
+       for the current trust model (no direct DB access by tenants).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — ROLLBACK MODEL REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  Rollback Semantics
+────────────────────────
+
+  A "rollback" in this model means:
+    "Activate a previously published version's step configuration as a NEW version."
+
+  It does NOT mean:
+    "Undo the activation of version N." (No version rows are deleted or modified.)
+    "Restore the DB to a prior state." (No time travel.)
+    "Cancel in-flight executions." (In-flight executions use their own snapshot.)
+
+  Rollback creates a new version with higher version number.
+  This is the correct model for an immutable version log:
+    - The deployment history is a forward-only log.
+    - "Rollback to v3" = "Deploy v3's steps as v5."
+    - The version log records: v1 → v2 → v3 → v4 → v5(=v3 steps).
+    - An auditor reading the log can see: "v5 was a rollback to v3's config."
+
+  The change_notes field on the version row makes this explicit:
+    v5.change_notes = "Rollback: reverted to version 3 configuration. v4 had
+    a bug where step 2 was incorrectly assigning tasks to the wrong role."
+
+6.2  Rollback API Design
+──────────────────────────
+
+  POST /workflows/:id/rollback
+  Body: { targetVersion: number, changeNotes?: string }
+
+  Flow:
+    1. Verify workflow exists and is not archived.
+    2. Load target version from workflow_definition_versions:
+       WHERE definition_id=:id AND version=:targetVersion.
+       If not found → 404.
+    3. Run validateWorkflow(targetVersion.steps, targetVersion.trigger_event).
+       This is NOT optional — the target version's steps must be validated
+       against the CURRENT validator, which may have evolved since v3 was published.
+       If validation fails → 422 with error list. Rollback is blocked.
+       The operator must manually fix the steps before re-activating.
+    4. Read current version number N from workflow_definitions.
+    5. BEGIN TRANSACTION:
+       a. INSERT into workflow_definition_versions:
+          { definition_id, workspace_id, version=N+1,
+            steps=targetVersion.steps,       ← copied from target version
+            conditions=targetVersion.conditions,
+            trigger_event=targetVersion.trigger_event,
+            name=targetVersion.name,
+            name_ar=targetVersion.name_ar,
+            published_by=req.userId,
+            published_at=now(),
+            change_notes=changeNotes ?? "Rollback to version ${targetVersion}" }
+       b. UPDATE workflow_definitions:
+          SET status='active', is_active=true, version=N+1,
+              current_version_id=<new version row id>,
+              steps=targetVersion.steps,
+              conditions=targetVersion.conditions,
+              trigger_event=targetVersion.trigger_event
+       c. If current workflow is active:
+          UPDATE workflow_definition_versions
+          SET deactivated_at=now(), deactivated_by=req.userId
+          WHERE definition_id=:id AND deactivated_at IS NULL
+    6. COMMIT.
+    7. Return 200 { rolledBackToVersion: targetVersion, newVersion: N+1 }.
+
+  CONSTRAINT: Can only rollback when current status is 'active' or 'deprecated'.
+  Cannot rollback an 'archived' workflow (archived is terminal).
+
+6.3  Rollback Does NOT Affect In-Flight Executions
+────────────────────────────────────────────────────
+
+  Executions in progress during a rollback:
+    - All use their own steps_snapshot (P5-A).
+    - The rollback changes workflow_definitions.steps.
+    - The executor's resumeExecution() never reads workflow_definitions.steps for
+      post-P5-A executions — it reads steps_snapshot.
+    - In-flight executions continue on their original snapshot. ✓
+
+  New executions triggered AFTER rollback:
+    - engine.ts reads workflow_definitions.steps at trigger time.
+    - workflow_definitions.steps = target version's steps (restored by rollback UPDATE).
+    - New executions snapshot the restored steps. ✓
+
+  Historical executions (completed, timed_out, failed, cancelled):
+    - steps_snapshot preserved in workflow_executions (P5-A). ✓
+    - workflow_version integer preserved in workflow_executions. ✓
+    - Historical audit queries are unaffected. ✓
+
+6.4  Rollback Safety: Validation Is Mandatory
+───────────────────────────────────────────────
+
+  Why re-validate on rollback:
+    If the validator has evolved since v3 was published (e.g., new blocklist entries,
+    new required fields on step configs), v3's steps may no longer pass validation.
+
+    Example:
+      v3 (published March 2026) had a condition step with onTrue=[5].
+      April 2026: validator now BLOCKS condition steps with non-empty onTrue (still blocked).
+      May 2026: rollback to v3 is requested.
+      Result: validation fails. Rollback blocked. Operator must fix the condition step.
+
+    This is the CORRECT behavior. Rolling back to a configuration that the current
+    validator would block is equivalent to publishing a new invalid workflow.
+    The validator is the production safety gate — it must run on every activation.
+
+6.5  Rollback Immutability Invariants
+───────────────────────────────────────
+
+  ① Old version rows are NEVER modified by rollback.
+     Only deactivated_at and deactivated_by are set on the outgoing active version.
+     All other columns (steps, published_by, published_at, change_notes): unchanged.
+
+  ② Rollback creates a new version row — it does not "restore" v3 to current.
+     The version log after rollback: [v1, v2, v3, v4, v5] — five rows, not four.
+     v5's steps happen to equal v3's steps. Both rows exist independently.
+
+  ③ A rollback can itself be rolled back.
+     If v5 (rollback to v3) was a mistake: POST /rollback to v4 → creates v6.
+     The version log always moves forward.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — VERSION COMPATIBILITY REVIEW: WHAT READS VERSIONS AND HOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  How Diagnostics Interprets Version Information
+─────────────────────────────────────────────────────
+
+  GET /workflows/executions/:id (execution detail endpoint):
+    Currently returns: workflowVersion (NULL), snapshotPresent (bool).
+    After P7-A: workflowVersion = integer.
+
+  New addition after P7-A:
+    Include a "versionSummary" object (if workflowVersion != null):
+    {
+      "versionSummary": {
+        "version": 3,
+        "publishedBy": "Alice",
+        "publishedAt": "2026-03-05T09:14:22Z",
+        "changeNotes": "Updated approver to include directors."
+      }
+    }
+
+  Query: JOIN workflow_executions ON workflow_definition_versions
+    WHERE wdv.definition_id = execution.workflow_id
+    AND wdv.version = execution.workflow_version
+
+  This makes the execution detail page answer: "This execution ran version 3
+  of workflow W, which was published by Alice on March 5, 2026."
+
+7.2  How Approvals Reference Versions
+───────────────────────────────────────
+
+  workflow_approvals currently records:
+    executionId, stepIndex, stepName, action, decidedBy, notes, decidedAt.
+
+  After P7-A: no schema change needed on workflow_approvals.
+  The approval record is linked to an execution. The execution has workflowVersion.
+  GET /executions/:id/approvals can JOIN through the execution to the version row.
+
+  Audit query: "Who approved the request under version 3 of workflow W?"
+    SELECT a.*, e.workflow_version
+    FROM workflow_approvals a
+    JOIN workflow_executions e ON a.execution_id = e.id
+    WHERE e.workflow_id = W
+    AND e.workflow_version = 3
+    AND a.action = 'approved'
+
+  The approval record itself is independent of version changes.
+  An approval made under v3 of a workflow remains valid even if the workflow
+  is later upgraded to v4 or rolled back to v2.
+
+7.3  How Execution History Interprets Version
+──────────────────────────────────────────────
+
+  The execution history table (GET /workflows/executions) should include
+  workflowVersion in its list response after P7-A.
+
+  This enables UI groupings:
+    - "10 executions ran under version 3 (now deprecated)."
+    - "50 executions ran under version 4 (current)."
+    - Version breakdown gives operators visibility into how recently the
+      workflow was changed and what proportion of executions used each version.
+
+  For operators debugging an anomaly: "Why did executions from last week
+  behave differently from executions this week?" → version change between weeks.
+
+7.4  How Notifications Reference Versions
+───────────────────────────────────────────
+
+  Notifications generated by workflow steps carry executionId.
+  From executionId → workflow_version (integer) → version row.
+  No direct notification → version FK is needed.
+
+  After P7-A, the notification detail could surface:
+    "This notification was generated by version 3 of workflow W."
+  This is cosmetic but useful for debugging: "Why did I get a notification
+  about leave request #7421 with an unexpected message format?"
+  Answer: "That execution used version 3, which had a different message template."
+
+  (Note: message templates are embedded in step configs, which are in the snapshot.
+   Version 3's steps contain the old template. The current definition may have a
+   different template. The snapshot-based message was generated from the OLD template.
+   This is correct behavior — the execution used its frozen steps.)
+
+7.5  How Audit Logs Reference Versions
+─────────────────────────────────────────
+
+  Activity logs (workspace_event_logs) already capture execution trigger events.
+  After P7-A, the trigger log enrichment in GET /events/:id can include:
+
+  For each triggered workflow execution:
+    { executionId, workflowId, workflowName, workflowVersion,
+      publishedBy, publishedAt }
+
+  This closes the audit loop:
+    event → execution → version → publisher
+    "This event triggered an execution of workflow W version 3, which was
+    published by Alice on March 5th for the purpose of: [changeNotes]."
+
+7.6  How Version Affects Audit Interpretation
+───────────────────────────────────────────────
+
+  The fundamental guarantee after P5-A + P7-A:
+    "Every execution can be fully reconstructed from its own data without
+    reference to the current state of the workflow definition."
+
+  Concretely:
+    An execution has:
+      - steps_snapshot: the EXACT steps it ran (or will run).
+      - workflow_version: the version number it was triggered under.
+      - context: the trigger event data.
+      - step logs: the input and output of every step that ran.
+      - approval records: every human decision made.
+
+    From these fields alone, with no reference to workflow_definitions or
+    workflow_definition_versions, an auditor can fully describe what happened.
+    The version row adds human-readable metadata (who published, why) but is
+    not required for technical reconstruction.
+
+    This is the correct separation: execution data is self-contained;
+    version metadata provides human context.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — SCHEMA EVOLUTION REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1  How New Fields on Step Types Affect Old Snapshots
+───────────────────────────────────────────────────────
+
+  Scenario: NotificationStep.config gains a required field in May 2026.
+    Before: { recipientType, recipientIds, title, message }
+    After:  { recipientType, recipientIds, title, message, priority: "normal"|"urgent" }
+
+  Old snapshots (pre-change): no 'priority' field.
+
+  Impact on execution resume (P5-A path):
+    executor.ts reads the old snapshot → the step config has no priority.
+    executeNotificationStep() reads step.config.priority.
+    If undefined → TypeScript type would flag this if 'priority' is required.
+    At runtime: undefined → the handler must default gracefully.
+
+  RULE: New fields added to step types MUST be optional or have explicit defaults.
+    Required fields are only valid in NEW workflows (new snapshots going forward).
+    Old snapshots may never have the field. The handler must handle absence.
+
+  STRATEGY for optional defaults:
+    executeNotificationStep(step, ctx):
+      const priority = step.config.priority ?? "normal"; // safe default
+
+  ANTI-PATTERN (must never happen):
+    executeNotificationStep(step, ctx):
+      if (!step.config.priority) throw new Error("priority required"); // WRONG
+
+8.2  How Step Type Removal Affects Old Snapshots
+─────────────────────────────────────────────────
+
+  If a step type is fully removed (e.g., 'legacy_task' is discontinued):
+
+  Old snapshots containing 'legacy_task' steps will fail at resume time
+  when executor.ts hits the unknown step handler:
+    default: return { success: false, error: "Unknown step type" }
+
+  STRATEGY:
+    ① Never remove a step type from the executor's switch statement.
+       Mark it as 'deprecated' and implement a no-op or passthrough handler:
+       case "legacy_task": return { success: true, output: { deprecated: true, skipped: true } };
+
+    ② When blocking a step type at the validator (making it inactive for NEW workflows),
+       keep its HANDLER active for old snapshots.
+       Example: the delay step is currently a no-op but not removed — correct pattern.
+
+    ③ The validator's blocklist and the executor's handler set are INDEPENDENT.
+       Blocked at validator = cannot be published in new workflows.
+       Handled in executor = old executions with this step type continue to work.
+
+8.3  How Condition Schema Evolution Affects Old Versions
+─────────────────────────────────────────────────────────
+
+  Trigger conditions (workflow_definitions.conditions, also captured in version row)
+  are evaluated by evaluateConditions(). If the ConditionGroup schema evolves:
+
+  Old version rows retain the old condition schema.
+  If the condition evaluator adds a new operator (e.g., "in_set") and old conditions
+  lack this operator, old conditions still evaluate correctly (they don't use it).
+  If an existing operator is CHANGED or REMOVED, old conditions referencing it
+  would silently evaluate incorrectly.
+
+  RULE: Condition operators are ADDITIVE ONLY.
+    ① New operators: safe to add. Old conditions never use them.
+    ② Existing operator behavior change: DANGEROUS. Requires full migration.
+    ③ Operator removal: NEVER. Would break old conditions in stored versions and snapshots.
+
+8.4  workflowVersion as a Schema Version Discriminator
+───────────────────────────────────────────────────────
+
+  After P7-A, workflowVersion provides a mechanism for targeted schema migration:
+
+  In executor.ts:
+    const snapshot = execution.stepsSnapshot as WorkflowStep[];
+    const workflowVersion = execution.workflowVersion;
+
+    // Version-conditional migration: apply defaults for old step schemas
+    const migratedSteps = migrateStepsForVersion(snapshot, workflowVersion);
+
+  migrateStepsForVersion(steps, version):
+    if (version === null || version < SCHEMA_VERSION_PRIORITY_ADDED) {
+      // This snapshot predates the 'priority' field on notification steps.
+      // Apply the default to ensure runtime safety.
+      return steps.map(step =>
+        step.type === "notification" && !step.config.priority
+          ? { ...step, config: { ...step.config, priority: "normal" } }
+          : step
+      );
+    }
+    return steps; // Modern snapshot — no migration needed.
+
+  SCHEMA_VERSION_PRIORITY_ADDED would be a named constant tracking which version
+  number introduced the breaking change.
+
+  This is pragmatic schema migration: versioned, targeted, backward-compatible.
+  No DB migration needed for old snapshot data. Migration is applied in-memory at
+  resume time. Old snapshots are never modified.
+
+8.5  Compatibility Guarantee: Old Executions Always Runnable
+──────────────────────────────────────────────────────────────
+
+  FORMAL GUARANTEE (post P5-A + P7-A):
+    Any execution created after P5-A deployment can be resumed at any future
+    date, regardless of how many times the workflow definition has been updated,
+    rolled back, or deprecated, PROVIDED that:
+
+    ① The step handlers for all step types in the snapshot still exist in the executor.
+       (Maintained by rule: never remove a step type handler.)
+
+    ② All required config fields either exist in the snapshot or have runtime defaults.
+       (Maintained by rule: all new fields must be optional or defaulted.)
+
+    ③ The execution's steps_snapshot JSONB column has not been corrupted or modified.
+       (Maintained by convention: never UPDATE steps_snapshot after INSERT.)
+
+  EXCEPTIONS (execution may not be resumable):
+    - JSONB corruption in the DB (hardware failure, bug in migration script).
+    - executor.ts throws on a step handler due to a new REQUIRED field without default.
+      (Preventable by following rule ②.)
+    - A new validator blocks the step type, and a code change ALSO removes the handler.
+      (Preventable by following rule ①.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — WHAT NOT TO DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1  Out of Scope for This Platform
+──────────────────────────────────────
+
+  The following patterns are explicitly NOT part of this versioning design.
+  They add complexity without proportional benefit for this platform's use cases.
+
+  ① Git-like branching
+     Model: admins create "branches" of a workflow definition.
+     Why not: the draft/deprecated/active lifecycle already provides the editing
+     sandbox. Multiple concurrent draft branches would require merge semantics,
+     conflict resolution, and a significantly more complex API surface.
+     The enterprise use case is: "one workflow definition, one production version,
+     one editing draft at a time." Branches solve a different problem (parallel
+     feature development), which is not the core use case here.
+
+  ② Semantic versioning (1.0.0, 1.2.1, 2.0.0)
+     Why not: semantic versioning communicates API contract compatibility
+     (major/minor/patch breaking changes). Workflow definitions are not APIs.
+     An integer deployment count is semantically appropriate and simpler to reason about.
+     "Version 4 was deployed after version 3" is sufficient. The change_notes
+     field provides the human description of what changed.
+
+  ③ Multi-user collaborative editing
+     Model: multiple admins edit the same draft simultaneously (Google Docs style).
+     Why not: workflow definitions are configuration, not documents.
+     Simultaneous editing by multiple admins is extremely rare. The complexity
+     of CRDT, operational transform, or optimistic lock resolution is not justified.
+     The correct model: one admin edits the draft at a time (last write wins, which
+     Drizzle's updatedAt tracks). Concurrent edits are a process problem, not a
+     system problem.
+
+  ④ Distributed version control (VCS for workflows)
+     Model: export/import workflow definitions as files, commit to git, diff, etc.
+     Why not: this adds external infrastructure dependency and UX complexity.
+     The version table provides sufficient history for the current compliance needs.
+     If a workspace needs "full change history with blame" at git-level granularity,
+     the correct solution is to export workflows to YAML and commit to an actual git
+     repository — not to rebuild git inside PostgreSQL.
+
+  ⑤ Temporal-style replay
+     Model: re-run a workflow execution deterministically from a recorded event log,
+     replaying all steps with the same inputs.
+     Why not: full replay requires that all step side effects be idempotent, which
+     they are currently not (notification steps insert DB rows on every run;
+     status_update steps could fail if the entity state has changed).
+     Replay would require a side-effect replay gate (dry-run mode per step), which
+     is scope for the simulation feature (Section 5 of hardening review), not versioning.
+
+  ⑥ DAG-based workflow versioning
+     Model: each node in the workflow DAG has its own version. Updating node B
+     creates version N+1 only for B, not for the whole workflow.
+     Why not: the current model treats steps as a linear array (DAG execution is
+     P4-E blocked pending condition branching). Per-step versioning adds graph
+     tracking complexity without benefit for the current linear execution model.
+     If DAG execution is implemented in a future phase, revisit step-level versioning.
+
+9.2  The Right Complexity Level
+──────────────────────────────────
+
+  The target model is:
+    ONE table (workflow_definition_versions).
+    ONE integer counter per definition (version).
+    ONE write point (POST /activate).
+    ONE deactivation path (deprecate → sets deactivated_at).
+    ONE rollback operation (copy old steps → new version row → UPDATE definition).
+
+  This model is:
+    - Understandable by any engineer in 10 minutes.
+    - Implementable in a single pull request.
+    - Queryable with standard SQL (no recursive queries, no graph traversals).
+    - Fully backward compatible with pre-P7-A data.
+    - Sufficient to close H-06 (no rollback) and add production-grade audit history.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — IMPLEMENTATION ROADMAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+10.1  Phase Overview
+──────────────────────
+
+  P7-A  Schema Foundations + Publish Pipeline
+  P7-B  Rollback Support
+  P7-C  Diagnostics Integration + API Enrichment
+  P7-D  UI Governance
+
+  These phases may be collapsed or split depending on priorities.
+  They are presented as logical units of work, not strict sprint boundaries.
+
+10.2  P7-A — Schema Foundations + Publish Pipeline
+────────────────────────────────────────────────────
+
+  Estimated scope: medium (3-5 days of implementation + testing).
+
+  Schema changes:
+    CREATE TABLE workflow_definition_versions (as designed in Section 3.2).
+    ALTER TABLE workflow_definitions ADD COLUMN version INTEGER NOT NULL DEFAULT 0.
+    ALTER TABLE workflow_definitions ADD COLUMN current_version_id INTEGER
+      REFERENCES workflow_definition_versions(id) ON DELETE SET NULL.
+    Run: pnpm --filter @workspace/db run push
+
+  API changes:
+    POST /workflows/:id/activate:
+      - Accept optional body { changeNotes?: string }.
+      - Wrap the activation UPDATE in a transaction.
+      - Insert version row atomically with the definitions UPDATE.
+      - Return { workflowId, version, publishedAt }.
+    PATCH /workflows/:id (deprecation path):
+      - When status transitions to 'deprecated', update deactivated_at on current version row.
+    DELETE /workflows/:id (soft-delete path):
+      - When archiving, update deactivated_at on current version row.
+    GET /workflows/:id (definition detail):
+      - Add version, currentVersionId to response.
+    GET /workflows/:id/versions:
+      - New endpoint: list all version rows for a definition (paginated).
+      - Returns: version, publishedBy, publishedAt, changeNotes, deactivatedAt.
+      - Does NOT return steps (too large; separate endpoint).
+    GET /workflows/:id/versions/:version:
+      - New endpoint: get a specific version's full step config.
+      - Returns: full version row including steps.
+
+  engine.ts change:
+    - Read def.version at trigger time.
+    - Store it in workflowVersion on the execution INSERT (replaces the current `null`).
+
+  OpenAPI spec changes:
+    - Add WorkflowVersion schema to openapi.yaml.
+    - Add version fields to WorkflowDefinition response schema.
+    - Add POST /activate response schema (version, publishedAt).
+    - Add GET /workflows/:id/versions endpoints.
+    - Run: pnpm --filter @workspace/api-spec run codegen
+
+  Tests:
+    - Unit: version row creation logic (pure — no DB).
+    - Unit: version number increment logic.
+    - Unit: workflowVersion population in engine (replace null with integer).
+    - Integration: POST /activate creates version row atomically.
+    - Integration: concurrent activate race → exactly one version row created.
+    - Integration: deprecate sets deactivated_at on version row.
+    - Integration: GET /versions lists version history correctly.
+    - Integration: execution.workflowVersion matches the version active at trigger time.
+
+10.3  P7-B — Rollback Support
+──────────────────────────────
+
+  Estimated scope: small (1-2 days).
+  Depends on: P7-A complete.
+
+  API changes:
+    POST /workflows/:id/rollback:
+      - Body: { targetVersion: number, changeNotes?: string }.
+      - Load target version row. Validate. Create new version. Return.
+    GET /workflows/:id/versions (existing from P7-A):
+      - Each version row should indicate if it was a rollback:
+        isRollback: boolean (change_notes.startsWith("Rollback") or a dedicated column).
+        rollbackFromVersion: number | null (optional — stored in version row).
+
+  Optionally add to workflow_definition_versions:
+    is_rollback      BOOLEAN NOT NULL DEFAULT FALSE
+    rolled_back_to   INTEGER  — the version number that was reverted to (if is_rollback=true)
+
+  Tests:
+    - Unit: rollback version number calculation.
+    - Unit: rollback change_notes generation.
+    - Unit: validation runs on rollback path.
+    - Integration: POST /rollback creates new version row, updates definitions.
+    - Integration: in-flight executions are NOT affected by rollback (snapshot path).
+    - Integration: new executions after rollback use restored steps.
+    - Integration: rollback on outdated validator → 422 validation failure.
+
+10.4  P7-C — Diagnostics Integration + API Enrichment
+───────────────────────────────────────────────────────
+
+  Estimated scope: small-medium (2-3 days).
+  Depends on: P7-A complete.
+
+  Changes:
+    GET /workflows/executions/:id:
+      - Include versionSummary { version, publishedBy, publishedAt, changeNotes }
+        when workflowVersion IS NOT NULL and version row exists.
+    GET /workflows/executions (list):
+      - Include workflowVersion in each row.
+      - Enable filter: ?version=3 (show only executions from a specific version).
+    GET /workflows/executions/:id/approvals:
+      - Include version metadata in approval summary.
+    GET /platform/activity (super_admin):
+      - Include version number in workflow activation events.
+
+  OpenAPI spec: add version-related fields to all affected response schemas.
+  Codegen: pnpm --filter @workspace/api-spec run codegen.
+
+  Tests:
+    - Integration: execution detail includes correct versionSummary after P7-A.
+    - Integration: execution list filterable by version.
+    - Integration: pre-P7-A executions (workflowVersion=NULL) return no versionSummary.
+
+10.5  P7-D — UI Governance
+───────────────────────────
+
+  Estimated scope: medium (3-5 days, frontend).
+  Depends on: P7-C complete (API must be ready).
+
+  UI changes:
+    Workflow Detail Page:
+      - "Current Version: v4 (published by Alice on March 5, 2026)"
+      - Version history tab: list of versions with timestamps, authors, change notes.
+      - "View Version" button: show step config for any historical version (read-only).
+      - "Rollback to this version" button (admin only).
+
+    POST /activate modal:
+      - Add "Change Notes" text field (optional but encouraged).
+      - Preview: "You are about to publish version 4 of 'Manager Approval Workflow'."
+      - Confirmation required for workflows with in-flight executions.
+
+    Execution Detail Page:
+      - "Ran under: Workflow W v3 (Alice, March 5, 2026)"
+      - "snapshotPresent: true" badge (reassures operator that drift-safe resume applies).
+
+    Execution List:
+      - Version column (optional, toggle-able).
+
+10.6  Dependencies and Sequencing
+───────────────────────────────────
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ P5-A  Execution Snapshot (COMPLETE)                        │
+  │   ↓                                                        │
+  │ P7-A  Schema + Publish Pipeline     (populates snapshots   │
+  │         with workflowVersion)                              │
+  │   ↓                                                        │
+  │ P7-B  Rollback Support              (requires version rows)│
+  │   ↓                                                        │
+  │ P7-C  Diagnostics Enrichment        (requires version rows)│
+  │   ↓                                                        │
+  │ P7-D  UI Governance                 (requires P7-C API)    │
+  └────────────────────────────────────────────────────────────┘
+
+  P7-A is the critical path. All other phases require it.
+  P7-B and P7-C can run in parallel after P7-A.
+  P7-D must follow P7-C (API must be stable before UI build).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — CATASTROPHIC RISKS IF VERSIONING IS NOT IMPLEMENTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+11.1  Risk Catalog Without Versioning
+───────────────────────────────────────
+
+  RISK V-01 — Unrecoverable Production Misconfiguration  [CATASTROPHIC]
+    A workflow is misconfigured and deployed to production (e.g., approval step
+    now routes to the wrong department head). Admin discovers the mistake 24 hours
+    later. Without rollback: must manually reconstruct the correct step configuration
+    from memory or old screenshots. The reconstruction may be imperfect.
+    With version history: POST /rollback → restored to the previous version in seconds.
+    Probability of occurrence: HIGH for complex workflows (10+ steps).
+    Time to recover without versioning: hours to days.
+    Time to recover with versioning: < 1 minute.
+
+  RISK V-02 — Compliance Audit Failure  [CATASTROPHIC for regulated industries]
+    A healthcare or financial services customer is audited.
+    Auditor requests: "Show me the exact approval workflow configuration that
+    was in production during Q1 2026."
+    Current answer: "We cannot reconstruct it — the definition was updated and
+    the previous configuration was overwritten."
+    This is a COMPLIANCE FAILURE. In regulated industries (healthcare: HIPAA,
+    finance: SOX, government: various), this can result in fines or loss of certification.
+    With version history: query workflow_definition_versions for published_at in Q1 2026
+    and return the exact steps. Auditor is satisfied.
+    Probability: certain if any regulated-industry customer is onboarded.
+
+  RISK V-03 — Silent Behavior Changes With No Attribution  [HIGH]
+    Workflow W behaves differently in April vs. March. Tickets are being routed
+    incorrectly. Someone changed the workflow — but updatedAt shows only "today"
+    (because it auto-updates on every PATCH). There is no record of WHAT changed
+    or WHO changed it. Root cause investigation is impossible.
+    With version history: compare v2.steps with v3.steps. See who published v3 and
+    when. Identify the change. Fix or rollback.
+    Probability: HIGH in organizations with multiple admins managing workflows.
+
+  RISK V-04 — Inability to Explain Historical Decisions  [HIGH]
+    An approval was granted under workflow W on March 15.
+    A dispute arises: the employee claims the approval was valid; management disagrees.
+    The steps_snapshot on the execution (P5-A) shows what the approval step required.
+    BUT: without a version row, there is no record of WHO published that configuration
+    and whether they had authority to do so, or what the stated purpose was.
+    With version history: "Alice published version 3 on March 1 with change notes:
+    'Delegated approval authority to senior managers per HR policy update #2026-03-01.'
+    This policy authorized the approval." The dispute is resolved with documentation.
+    Probability: MEDIUM in organizations with strict governance requirements.
+
+  RISK V-05 — Schema Evolution Corruption  [MEDIUM-HIGH]
+    A new required field is added to a step type. Old executions (pre-P5-A, no snapshot)
+    are resumed using the live definition. Old executions (post-P5-A, with snapshot)
+    are resumed using the snapshot — which lacks the new required field.
+    Without workflowVersion: no way to apply version-conditional defaults.
+    All affected executions fail with runtime errors.
+    With workflowVersion: migrateStepsForVersion() applies safe defaults.
+    Zero execution failures.
+    Probability: CERTAIN as the platform evolves (new fields will be added).
+
+  RISK V-06 — Enterprise Onboarding Blocker  [CATASTROPHIC for sales]
+    Any enterprise customer with a compliance or procurement team will ask during
+    evaluation: "Can we audit the history of workflow configuration changes?"
+    Without versioning: "No."
+    This is a deal-breaker for most regulated-industry enterprise customers.
+    It blocks the entire enterprise sales pipeline.
+    Probability: CERTAIN if enterprise sales are pursued.
+
+11.2  Severity Matrix
+───────────────────────
+
+  Risk     Without Versioning           With P7-A Versioning
+  ─────────────────────────────────────────────────────────────────────────
+  V-01     Hours/days to recover        < 1 minute rollback
+  V-02     Compliance failure           Full audit trail available
+  V-03     Root cause impossible        Immediate identification + fix
+  V-04     Dispute unresolvable         Documented authorization trail
+  V-05     Runtime crashes at scale     Version-conditional migration
+  V-06     Enterprise sales blocked     Audit capability confirmed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — FINAL RECOMMENDATIONS BEFORE IMPLEMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+12.1  What Is Already Correct and Must Not Change
+──────────────────────────────────────────────────
+
+  ① P3-F: active workflow immutability — CRITICAL. Must remain enforced.
+     Every version system depends on: "active definitions are not editable."
+     If this gate is ever relaxed, the version model breaks.
+
+  ② P5-A: execution snapshot — CRITICAL. Must remain as-is.
+     The snapshot is the runtime safety layer. Version rows are the audit layer.
+     Both are needed. Neither replaces the other.
+
+  ③ P3-E: soft-delete — CRITICAL for version system.
+     Hard-deleting a definition with version rows would violate ON DELETE RESTRICT.
+     Soft-delete (archived) must remain the only deletion path.
+
+  ④ TERMINAL state immutability (P4-D) — no change needed.
+     The version system operates on definitions, not executions.
+     Execution status transitions are unchanged.
+
+12.2  Design Decisions That Must Be Made Before P7-A Implementation
+────────────────────────────────────────────────────────────────────
+
+  DECISION 1: Transaction scope
+    The activation transaction (version INSERT + definitions UPDATE) must be atomic.
+    Drizzle ORM supports transactions via db.transaction(). This must be used.
+    Any error within the transaction must roll back both operations.
+    Recommend: add a transaction wrapper utility if not already present.
+
+  DECISION 2: On DELETE RESTRICT enforcement
+    ON DELETE RESTRICT on workflow_definition_versions.definition_id means:
+    "A definition with version rows cannot be hard-deleted."
+    This is already impossible at the application layer (soft-delete only, P3-E).
+    But the FK constraint enforces it at the DB layer as a safety backstop.
+    This is correct. Do not use ON DELETE CASCADE here.
+
+  DECISION 3: Handling pre-P7-A rows (workflow_definitions.version = 0)
+    Existing workflow_definitions rows will have version=0 after the migration.
+    Their first post-P7-A activation will create version=1 in the version table.
+    Engine.ts will store workflowVersion=1 in new executions from that point.
+    Pre-P7-A executions retain workflowVersion=NULL — no backfill needed or possible
+    (there are no version rows for old activations to reference).
+    This is clean and backward compatible.
+
+  DECISION 4: current_version_id FK on workflow_definitions
+    This column is NULL for all pre-P7-A rows.
+    It is set on first activation post-P7-A.
+    Queries that need "the steps of the current active version" should prefer
+    reading workflow_definitions.steps directly (already the live copy) rather
+    than joining through current_version_id. The current_version_id is primarily
+    for diagnostics and the deprecation update path.
+
+  DECISION 5: Validation before rollback
+    Re-validating the target version's steps on rollback is NON-NEGOTIABLE.
+    The validator may have evolved. Skipping validation to "make rollback instant"
+    risks deploying a configuration that the current engine cannot safely execute.
+    The cost of validation (< 1ms for any real workflow) is negligible.
+
+  DECISION 6: API authentication for /versions and /rollback
+    These endpoints should require the workflow.manage permission (same as /activate).
+    There is no case where a non-admin user should:
+      a) See the full step config of historical versions (sensitive business logic).
+      b) Trigger a rollback.
+    Future: a workflow.publish permission may restrict /activate and /rollback to
+    a subset of admins. Not needed for P7-A (implement as workflow.manage for now).
+
+12.3  The Minimal P7-A Scope That Closes H-06
+───────────────────────────────────────────────
+
+  The minimum viable implementation that fully closes H-06 (no versioning history):
+
+    MUST HAVE:
+      ✓ CREATE TABLE workflow_definition_versions (with all columns in Section 3.2).
+      ✓ ALTER TABLE workflow_definitions ADD COLUMN version, current_version_id.
+      ✓ POST /activate writes version row atomically (transaction).
+      ✓ engine.ts writes workflowVersion to new executions.
+      ✓ GET /workflows/:id/versions endpoint (version list).
+      ✓ GET /workflows/:id/versions/:version endpoint (version detail with steps).
+      ✓ Tests covering activation, versioning, execution linkage.
+
+    NICE TO HAVE (can be deferred to P7-B/P7-C):
+      ○ POST /workflows/:id/rollback.
+      ○ GET /executions/:id enriched with versionSummary.
+      ○ GET /executions list with workflowVersion filter.
+
+    DELIBERATELY EXCLUDED FROM P7-A:
+      ✗ UI governance changes (P7-D).
+      ✗ Two-person publish approval (post-P8-A).
+      ✗ Snapshot vs. version row consistency check (P7-B enhancement).
+      ✗ migrateStepsForVersion() utility (implement when first schema evolution occurs).
+
+12.4  Summary Recommendation
+──────────────────────────────
+
+  Implement P7-A as the next major phase after any remaining CATASTROPHIC risks
+  are addressed (H-02 condition branching, H-03 delay scheduling, H-04 TTL sweeper).
+
+  Priority ordering recommendation:
+    IMMEDIATE:  H-04 (TTL sweeper — executions accumulate forever, operational risk)
+    IMMEDIATE:  H-02 (condition branching — the majority of real workflows need this)
+    MEDIUM:     H-03 (delay scheduling — time-based workflows)
+    THEN:       P7-A (versioning — required before enterprise onboarding)
+
+  P5-A (execution snapshot) was the correct first step:
+    It closed the most dangerous RUNTIME risk (resume drift).
+    The version system (P7-A) now closes the GOVERNANCE risks (audit, rollback).
+    Together they provide the two-layer protection described in Section 3 of
+    workflow-platform-hardening-review.txt.
+
+  The current architecture is well-positioned for P7-A:
+    ① workflow_executions.workflow_version column already exists (P5-A).
+       engine.ts already passes workflowVersion=null — one line to change to the real integer.
+    ② workflow_definitions.status='active' immutability already enforced (P3-F).
+       The version system builds directly on this guard.
+    ③ Soft-delete already in place (P3-E).
+       ON DELETE RESTRICT on version FK is safe — no hard-delete path exists.
+    ④ createExecutionContext() and steps_snapshot are already clean separation.
+       No architectural rework needed in engine.ts or executor.ts for P7-A.
+
+  The marginal implementation cost of P7-A is LOW.
+  The risk cost of NOT implementing P7-A is CATASTROPHIC for enterprise readiness.
+  This is the correct next governance investment after H-02, H-03, H-04 are closed.
+
+══════════════════════════════════════════════════════════════════════════════════
+END — workflow-phase-5b-versioning-review.txt
+══════════════════════════════════════════════════════════════════════════════════

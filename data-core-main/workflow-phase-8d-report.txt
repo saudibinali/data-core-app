@@ -1,0 +1,447 @@
+WORKFLOW PHASE 8-D REPORT
+Predictive Trend Projection & Operational Forecast Foundations
+===============================================================
+
+Date:        2026-05-14
+Phase:       P8-D (follows P8-A topology, P8-B dependency, P8-C operational correlation)
+Status:      COMPLETE — all tests green
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-D converts the historical operational intelligence built in P8-C into
+deterministic forward-looking forecasts.  Where P8-C answers "what is the
+current runtime pressure on this workflow?", P8-D answers "if the current
+trend continues, where will that pressure be in N days?"
+
+Core problem being solved: historical rollup data (P7-C) and historical
+correlation scores (P8-C) already describe the past — but without
+forward projection, operators cannot act proactively.  P8-D makes the
+trajectory visible without introducing any ML, stochastic models, or
+autonomous actions.
+
+Forbidden scope (explicitly excluded):
+  • ML models / neural forecasting
+  • Stochastic or probabilistic black-box models
+  • Anomaly detection AI
+  • Automatic remediation
+  • Realtime prediction streams
+  • Distributed forecasting infrastructure
+
+Implemented scope: minimal deterministic statistical projection engine.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/trend-forecast.ts  (~350 lines)
+  Pure deterministic forecast engine.  No DB, no async, no ML, no side effects.
+  Single public entry point:
+    computeWorkflowForecast(
+      input:   ForecastInput,     // data points + window + structural params
+      context? ForecastContext,   // optional for observability
+    ) → WorkflowOperationalForecast
+
+artifacts/api-server/src/lib/workflows/__tests__/trend-forecast.test.ts
+  T1–T10 test groups, 56 individual assertions.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/routes/workflows.ts
+  • Added static import: computeWorkflowForecast, ForecastDataPoint
+  • Registered GET /workflows/:id/forecast BEFORE GET /workflows/:id/operational
+    and GET /workflows/:id to prevent the :id segment from shadowing "forecast"
+  • Route supports ?window=1-90 (default 7) and ?granularity=daily|hourly
+
+lib/api-spec/openapi.yaml
+  • New endpoint:    GET /workflows/{id}/forecast
+  • New schemas (4): WorkflowMetricProjection, WorkflowForecastMetrics,
+                     WorkflowOperationalForecast, WorkflowForecastResponse
+
+Auto-generated (by `pnpm --filter @workspace/api-spec run codegen`):
+  lib/api-client-react/src/generated/  — new hook: useGetWorkflowForecast
+  lib/api-zod/src/generated/api.ts     — new Zod schemas for all 4 types
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FORECAST ENGINE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Input: ForecastInput
+  Built by the route handler from governance_snapshot_rollups rows
+  (ordered ASC by bucketStart — oldest first, index 0):
+
+    dataPoints[]        — array of ForecastDataPoint (oldest first)
+    forecastWindowDays  — days to project forward (1–90, default 7)
+    structuralComplexity — from P8-B: fixed for this workflow definition (0-100)
+    approvalDensity      — from P8-A: fraction of steps that are approvals (0-1)
+    delayDensity         — from P8-A: fraction of steps that are delays (0-1)
+
+  ForecastDataPoint fields (one per rollup bucket):
+    avgErrorRate        — arithmetic mean of workflowErrorRate (0-1)
+    avgApprovalBacklog  — arithmetic mean of approvalBacklogCount (raw)
+    avgDelayBacklog     — arithmetic mean of delayBacklogCount (raw)
+    avgStuckCount       — arithmetic mean of stuckCount (raw)
+    stormFrequency      — fraction of source snapshots with storm != none (0-1)
+    snapshotCount       — source records in this bucket
+
+4.2 Normalization (mirrors P8-C exactly for cross-phase consistency)
+  For each ForecastDataPoint, the engine computes a NormalizedPoint:
+    normApproval        = min(avgApprovalBacklog / 50,  1.0)
+    normDelay           = min(avgDelayBacklog    / 50,  1.0)
+    normStuck           = min(avgStuckCount      / 20,  1.0)
+    alp (approvalLatencyPressure) = min(normApproval × approvalDensity × 3.0, 1.0)
+    ddp (delayDurationPressure)   = min(normDelay   × delayDensity   × 3.0, 1.0)
+    fp  (failurePressure)         = min(errorRate   × 0.7 + normStuck × 0.3, 1.0)
+    backlogPressure               = min((normApproval + normDelay) / 2, 1.0)
+
+  rWC per bucket (mirrors P8-C weights):
+    rWC = min(100, round(
+      structuralComplexity × 0.40   +  (max 40)
+      errorRate            × 25     +  (max 25)
+      alp                  × 20     +  (max 20)
+      ddp                  × 10     +  (max 10)
+      fp                   × 5      ))  (max  5)
+
+  This produces four time series (oldest first):
+    errorSeries   — avgErrorRate per bucket
+    backlogSeries — backlogPressure per bucket
+    stormSeries   — stormFrequency per bucket
+    rWCSeries     — runtimeWeightedComplexity per bucket
+
+4.3 Projection method selection
+  n = 0           → "no_data"
+    Returns structural complexity as projected complexity.
+    All pressures = 0.  confidenceLevel = "low".
+  n = 1           → "last_known_value"
+    No slope extrapolation.  Projected = current.
+  2 ≤ n < 7       → "weighted_moving_average"
+    Slope from first-to-last delta / (n-1).
+    Projected = last + slope × forecastWindowDays.
+  n ≥ 7           → "weighted_linear_regression"
+    Full WLS slope (triangular weights, recent = heavier).
+    Projected = last + slope × forecastWindowDays.
+
+4.4 Weighted linear regression slope (n ≥ 7)
+  Triangular weights: w_i = i + 1  (index 0 = oldest, weight 1 = lightest)
+  W     = Σ w_i = n(n+1)/2
+  μ_x   = Σ(w_i × i)      / W        (weighted mean index)
+  μ_y   = Σ(w_i × y_i)    / W        (weighted mean value)
+  cov   = Σ(w_i × (i - μ_x) × (y_i - μ_y))
+  var_x = Σ(w_i × (i - μ_x)²)
+  slope = cov / var_x   (or 0 if var_x < 1e-10)
+
+  Projection: projected = y[n-1] + slope × forecastWindowDays
+  (extrapolates from the last observed value, preserving the most recent state)
+
+4.5 Volatility
+  Unweighted standard deviation of each metric series:
+    σ = sqrt(Σ(y_i - μ)² / n)
+  Used for confidence reduction and returned in MetricProjection.volatility.
+  rWC volatility is used for confidence level computation.
+
+4.6 Projection bounds (all values clamped)
+  projectedComplexity:       clamp([0, 100]), rounded to integer
+  projectedFragility:        projectedComplexity / 100, clamp([0, 1])
+  projectedBacklogPressure:  clamp([0, 1])
+  projectedStormRisk:        clamp([0, 1])
+  MetricProjection.slope:    unbounded (raw slope value, positive = degrading)
+  MetricProjection.volatility: always ≥ 0
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. TREND DIRECTION CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TrendDirection is derived from the rWC (runtimeWeightedComplexity) slope.
+rWC is on the 0–100 scale; slope units are rWC-points per time period.
+
+  slope ≥ 2.0              → "critically_degrading"
+    rWC growing > 2 points/period; at window=7d: +14 points projected
+  0.5 ≤ slope < 2.0        → "degrading"
+    rWC growing measurably but not at critical rate
+  -0.5 < slope < 0.5       → "stable"
+    rWC trend within noise band
+  slope ≤ -0.5             → "improving"
+    rWC measurably decreasing
+
+Rationale for rWC-based classification (not raw error rate):
+  rWC already integrates structural complexity + all pressure signals.
+  A workflow with high structural complexity but improving historical
+  pressures can still be classified "improving" even if raw error rate
+  is non-zero — because the structural contribution is fixed.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. CONFIDENCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ForecastConfidence is computed in three stages:
+
+Stage 1 — Base level from sample count:
+  n < 3           → level 0 = "low"    (too sparse for any extrapolation)
+  3 ≤ n < 7       → level 0 = "low"    (enough for moving average but unreliable slope)
+  7 ≤ n < 14      → level 1 = "moderate"  (regression enabled, limited history)
+  n ≥ 14          → level 2 = "high"   (sufficient history for reliable slope)
+
+Stage 2 — Volatility penalty:
+  rWC standard deviation > 20 (out of 0–100 scale)
+    → level = max(0, level – 1)
+  Rationale: high variance means the trend slope is unstable and
+  extrapolation becomes unreliable.
+
+Stage 3 — Window penalty:
+  forecastWindowDays > 14
+    → level = max(0, level – 1)
+  Rationale: extrapolating further into the future amplifies uncertainty.
+  A slope that is reliable for 7-day projection becomes less reliable at 30 days.
+
+Final mapping: 0 → "low", 1 → "moderate", 2 → "high"
+
+Examples:
+  n=14, volatility=0, window=7   → high (no penalties)
+  n=14, volatility=0, window=30  → moderate (window penalty)
+  n=14, volatility=25, window=7  → moderate (volatility penalty)
+  n=14, volatility=25, window=30 → low (both penalties)
+  n=7,  volatility=5,  window=7  → moderate (base=moderate, no penalties)
+  n=2,  any,           any       → low (forced sparse)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. API ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workflows/:id/forecast
+  Auth:        requireAuth + requirePermission("workflow.view")
+  Query params:
+    ?window=7        (1–90 days, default 7)
+    ?granularity=daily  (daily|hourly, default daily)
+
+  Data strategy:
+    • granularity=daily:   queries last 30 days of daily rollup buckets
+    • granularity=hourly:  queries last 7 days of hourly rollup buckets
+    • Rows ordered ASC by bucketStart (oldest → index 0)
+    • Falls back cleanly to "no_data" if governance rollups are absent
+
+  Response: WorkflowForecastResponse
+  {
+    workflowId:     number,
+    workflowName:   string,
+    stepCount:      number,
+    granularity:    "daily" | "hourly",
+    lookbackDays:   number,          // 30 for daily, 7 for hourly
+    dataPointsUsed: number,
+    forecast: {
+      projectedComplexity:      number,   // 0-100 integer
+      projectedFragility:       number,   // 0-1
+      projectedBacklogPressure: number,   // 0-1
+      projectedStormRisk:       number,   // 0-1
+      trendDirection:           string,   // 4-value enum
+      confidenceLevel:          string,   // 3-value enum
+      forecastWindowDays:       number,
+      projectionMethod:         string,   // 4-value enum
+      metrics: {
+        errorRate:  { currentValue, projectedValue, slope, volatility },
+        backlog:    { currentValue, projectedValue, slope, volatility },
+        stormRisk:  { currentValue, projectedValue, slope, volatility },
+        complexity: { currentValue, projectedValue, slope, volatility },
+      }
+    }
+  }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. OPENAPI SCHEMAS (4 new)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkflowMetricProjection     — 4 properties (currentValue, projectedValue, slope, volatility)
+WorkflowForecastMetrics      — 4 properties (errorRate, backlog, stormRisk, complexity)
+WorkflowOperationalForecast  — 9 properties (projectedComplexity, projectedFragility,
+                                              projectedBacklogPressure, projectedStormRisk,
+                                              trendDirection, confidenceLevel,
+                                              forecastWindowDays, projectionMethod, metrics)
+WorkflowForecastResponse     — 7 properties (workflowId, workflowName, stepCount,
+                                              granularity, lookbackDays, dataPointsUsed,
+                                              forecast)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. OBSERVABILITY EVENTS (4 per call)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events emitted via logger.info with structured fields:
+workflowId, workspaceId, workflowVersion, projectedComplexity,
+projectedFragility, confidenceLevel, trendDirection, action.
+
+A) workflow_forecast_computed (always)
+   Emitted for every forecast call, including no-data path.
+   Includes: projectionMethod, dataPointsUsed, forecastWindowDays.
+
+B) workflow_degradation_projection_detected
+   Emitted when trendDirection ∈ {"degrading", "critically_degrading"}.
+   Includes: rWCSlope (raw slope value for alerting thresholds).
+
+C) workflow_forecast_confidence_reduced
+   Emitted when confidenceLevel ∈ {"low", "moderate"} (i.e., not "high").
+   Includes: dataPointsUsed, rWCVolatility, forecastWindowDays.
+
+D) workflow_hotspot_growth_detected
+   Emitted when backlogSlope > 0.01 OR stormSlope > 0.01
+   (i.e., backlog or storm risk growing in the historical time series).
+   Includes: backlogSlope, stormSlope, projectedBacklogPressure, projectedStormRisk.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-D test groups (22nd test file in suite):
+  T1  moving-average projection deterministic     (6 assertions)
+  T2  weighted trend slope stable                 (6 assertions)
+  T3  degrading trend classification              (5 assertions)
+  T4  improving trend classification              (5 assertions)
+  T5  confidence reduction on sparse history      (6 assertions)
+  T6  volatility reduces confidence               (5 assertions)
+  T7  forecast projection bounded safely          (6 assertions)
+  T8  forecast serialization stable               (6 assertions)
+  T9  no live runtime dependency required         (5 assertions)
+  T10 forecast engine remains read-only           (6 assertions)
+
+Full test suite result (22 test files):
+  Tests:      1294 passed (1294)
+  Test Files: 22 passed (22)
+  Duration:   ~8.6s
+
+Cumulative test counts by phase:
+  P8-A (topology)      +45  →  ~1140 (baseline + 45)
+  P8-B (dependency)    +50  →   1186
+  P8-C (correlation)   +52  →   1238
+  P8-D (forecast)      +56  →   TOTAL: 1294
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The forecast endpoint integrates cleanly with the existing P7-P8 stack:
+
+  P7-C governance_snapshot_rollups → ForecastDataPoint[] (route handler)
+  P8-A TopologyAnalytics           → approvalDensity, delayDensity (ForecastInput)
+  P8-B analyzeDependencies         → structuralComplexity (ForecastInput)
+  P8-C rWC formula                 → replicated in normalizePoint() for per-bucket rWC
+  P8-D forecast                    → GET /workflows/:id/forecast response
+
+The per-bucket rWC formula in trend-forecast.ts is an exact copy of the
+P8-C weight formula, ensuring that historical rWC values used in the
+trend projection are numerically consistent with live P8-C computations.
+
+Cross-endpoint consistency guarantee:
+  For any workflow W at time T:
+    P8-C.runtimeWeightedComplexity ≈ P8-D.metrics.complexity.currentValue
+  (exact when the most recent rollup bucket fully covers period T)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. SAFETY INVARIANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • READ-ONLY: engine never mutates governance history, rollup rows, or DB
+  • No autonomous actions: forecast never triggers alerts, emails, or remediations
+  • Input mutation guard: input.dataPoints array is never mutated (T10)
+  • Deterministic: identical inputs always produce identical outputs (T1, T10)
+  • Bounded outputs: all projected values clamped to valid ranges (T7)
+  • JSON-safe: result round-trips through JSON losslessly (T8)
+  • Graceful degradation: empty series → "no_data" path, no crash (T9)
+  • Overflow protection: max data values (9999 backlogs) do not produce invalid output (T9)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. KNOWN LIMITATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) Workspace-level historical data
+   The governance rollup tables are workspace-scoped, not workflow-scoped.
+   The forecast reflects the workspace's operational pressure, then mapped
+   onto the workflow's structural features (via approvalDensity, delayDensity).
+   Two workflows in the same workspace will see the same historical pressure
+   signals but different projected complexity if they differ structurally.
+
+B) Linear extrapolation assumption
+   Weighted linear regression assumes trends continue in their current direction.
+   Abrupt trend reversals (e.g., a backlog spike that then resolves) are not
+   captured — the slope flattens toward the recent data thanks to triangular
+   weights, but cyclical patterns require seasonal decomposition (out of scope).
+
+C) Rollup granularity gap
+   Daily rollups are populated only after P7-C rollup pipeline runs.
+   In development environments with no rollup data, all forecasts return
+   "no_data" projectionMethod with confidenceLevel="low".  This is correct
+   behavior — it does not degrade gracefully to raw snapshots.
+
+D) Structural complexity is fixed
+   structuralComplexity is treated as a static input (from P8-B).  If the
+   workflow definition changes between rollup periods, historical rWC values
+   will reflect old structural complexity while the current forecast uses the
+   new value.  This creates a discontinuity in the time series at the
+   definition-change boundary.
+
+E) No intra-day granularity
+   Finest granularity is hourly rollups.  Sub-hourly pressure spikes are
+   averaged out.  The forecast is suitable for day-level operational planning,
+   not minute-level incident response.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. READINESS ASSESSMENT FOR ADVANCED PREDICTIVE INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is now in place (P8-A through P8-D):
+  ✅ Structural topology graph (P8-A)
+  ✅ Static dependency & pressure analysis (P8-B)
+  ✅ Historical operational correlation, runtime-weighted complexity (P8-C)
+  ✅ Deterministic trend projection, confidence modeling, trend direction (P8-D)
+
+What is needed before advanced predictive intelligence:
+  → P8-E: Cross-workflow ranking — compare runtimeWeightedComplexity and
+     forecast trendDirection across all workflows in a workspace to produce
+     a risk heat-map and alert prioritization ranking.
+
+  → P8-F: GOV-* proactive alert surfacing — emit governance alert codes
+     when projectedComplexity crosses thresholds (e.g., forecast → critical
+     within 7 days), integrated with the P7 governance alert system.
+
+  → Workflow-level rollup data — currently rollups are workspace-scoped.
+     Per-workflow execution error rate and backlog tracking would make
+     forecasts workflow-specific rather than workspace-proxy.
+
+  → Trend change detection — detect when a trend reverses (e.g., was
+     "degrading", now first three consecutive "improving" days), to alert
+     on recovery as well as degradation.
+
+  → Frontend WorkflowIntelligencePanel — surface topology + dependency +
+     operational + forecast scores in a unified workflow detail panel
+     with trend sparklines and projected complexity gauge.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. COMPLETE P8 INTELLIGENCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Endpoint                             Phase  Description
+  ─────────────────────────────────────────────────────────────────────────
+  GET /workflows/:id/topology          P8-A   Structural topology graph
+  GET /workflows/:id/dependency        P8-B   Static dependency + pressure
+  GET /workflows/:id/operational       P8-C   Runtime-weighted historical correlation
+  GET /workflows/:id/forecast          P8-D   Deterministic trend projection ← NEW
+
+  Combined query for full intelligence:
+    1. /topology      → understand structure
+    2. /dependency    → identify static risks (bottlenecks, convergence)
+    3. /operational   → see current runtime-weighted pressure
+    4. /forecast      → project pressure trajectory N days forward

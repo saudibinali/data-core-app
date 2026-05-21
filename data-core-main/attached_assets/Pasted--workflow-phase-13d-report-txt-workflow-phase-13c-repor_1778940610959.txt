@@ -1,0 +1,476 @@
+راجع:
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- tenant_entitlement_overrides table
+- tenant_subscriptions table
+- PLAN_ENTITLEMENT_MAP
+- FEATURE_LIMIT_REGISTRY
+- tenant-entitlements.ts
+- tenant-registry.ts
+- tenants.ts routes
+- super-admin-tenants.tsx
+- platform-entitlements-config.ts
+- tenant-registry-hooks.ts
+- activity_logs audit pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-E — Usage Limits, Quotas & Capacity Intelligence
+
+ولا تنفّذ:
+- payment provider integration
+- overage billing
+- invoice generation
+- automatic suspension
+- hard enforcement across modules
+- data deletion
+- tenant self-service billing
+- external email/legal notices
+- HR module implementation
+
+عنوان المهمة:
+WORKFLOW PHASE 13-E — Usage Limits, Quotas & Capacity Intelligence
+
+المهمة الحالية:
+تأسيس طبقة قراءة وتحليل لاستخدام المستأجر مقابل حدود الخطة والـ entitlements.
+
+الهدف:
+تمكين السوبر أدمن من رؤية:
+- seat usage
+- storage usage
+- API usage
+- document usage
+- workflow usage
+- integration usage
+- AI usage readiness
+- limit utilization percentage
+- approaching/exceeded signals
+- capacity risk summary
+
+بطريقة:
+read-only capacity intelligence foundation
+بدون billing أو enforcement
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT USAGE / LIMIT SOURCES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- TenantUsageSummary من P13-A
+- FeatureLimitCode من P13-D
+- PLAN_ENTITLEMENT_MAP defaultLimits
+- tenant_entitlement_overrides limit_override
+- existing users/workspaces/documents/tables
+- هل يوجد API usage counters؟
+- هل يوجد storage usage fields؟
+- هل يوجد workflow/integration counters؟
+- هل يوجد background job metrics؟
+
+حدّد:
+- أي usage يمكن حسابه الآن من DB
+- أي usage غير متوفر ويجب إرجاعه unknown
+- كيف نربط usage بالـ limits derived من entitlements
+- كيف نعرض unknown بدون استنتاج خاطئ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — USAGE METRIC MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure config/lib:
+
+tenant-usage-metrics.ts
+
+UsageMetricCode:
+- seats
+- storage_gb
+- monthly_api_calls
+- documents
+- workflows
+- custom_reports
+- integrations
+- ai_actions
+- audit_retention_days
+- workspaces
+
+لكل metric:
+- label
+- unit
+- description
+- order
+- sourceType:
+  - live_db
+  - derived
+  - configured
+  - unavailable
+- supportsLimitComparison: boolean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — USAGE STATUS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+UsageLimitStatus:
+- unknown
+- normal
+- approaching
+- exceeded
+- unlimited
+- not_applicable
+
+Rules:
+- unknown: usage غير متوفر أو limit غير معروف
+- unlimited: limit null ومعناه unlimited
+- not_applicable: metric غير مستخدم لهذه الخطة
+- normal: < 80%
+- approaching: >= 80% and < 100%
+- exceeded: >= 100%
+
+مهم:
+thresholds تكون constants:
+- USAGE_APPROACHING_THRESHOLD = 0.8
+- USAGE_EXCEEDED_THRESHOLD = 1.0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — USAGE DERIVATION LIB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ:
+
+tenant-usage-intelligence.ts
+
+Exports:
+- deriveUsageLimitStatus(usage, limit)
+- calculateUsagePercentage(usage, limit)
+- deriveTenantUsageProfile(rawUsage, entitlementProfile)
+- deriveCapacityRiskLevel(usageProfile)
+- buildUsageMetricRows(...)
+- summarizeUsageWarnings(...)
+- isUsageApproachingLimit(...)
+- isUsageLimitExceeded(...)
+
+TenantUsageProfile:
+- tenantId
+- workspaceId
+- metrics[]
+- warningCount
+- exceededCount
+- unknownCount
+- capacityRiskLevel
+- derivedAt
+
+Metric row:
+- metricCode
+- usageValue
+- limitValue
+- percentage
+- status
+- sourceType
+- lastCalculatedAt
+- notes
+
+RiskLevel:
+- none
+- low
+- medium
+- high
+- critical
+- unknown
+
+Suggested mapping:
+- any exceeded critical metric → high/critical
+- multiple approaching → medium
+- all unknown → unknown
+- normal → none/low
+
+لكن:
+لا تطلق أحكام مالية أو قانونية.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — RAW USAGE COLLECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف function:
+
+collectTenantRawUsage(workspaceId)
+
+يحاول يحسب:
+- seats: count active users in workspace إن كان واضح
+- documents: count documents إن كان table موجود
+- storage_gb: إذا موجود field استخدمه، وإلا unknown
+- monthly_api_calls: unknown إذا لا يوجد counter
+- workflows: count إن وجد
+- integrations: count إن وجد
+- ai_actions: unknown
+- custom_reports: unknown
+- audit_retention_days: configured من limits وليس usage فعلي
+- workspaces: 1 غالبًا
+
+مهم:
+- لا تضف jobs
+- لا تعمل queries ثقيلة
+- استخدم counts بسيطة فقط
+- unknown أفضل من حساب خاطئ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+GET /platform/tenants/:tenantId/usage
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- read subscription planCode
+- read entitlement overrides
+- derive entitlement profile
+- collect raw usage
+- derive usage profile
+- return:
+  - usageProfile
+  - entitlementProfile summary
+  - rawUsageSources
+  - warnings
+
+مهم:
+- read-only
+- no mutation
+- no enforcement
+- no billing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث TenantUsageSummary و TenantRiskSignalSummary:
+
+TenantUsageSummary:
+- activeUsers
+- seatLimit
+- storageUsed
+- storageLimit
+- monthlyApiUsage
+- apiLimit
+- documentsUsed
+- documentsLimit
+- lastCalculatedAt
+- usageWarningCount
+- usageExceededCount
+- capacityRiskLevel
+
+TenantRiskSignalSummary:
+- usageLimitApproaching
+- usageLimitExceeded
+- riskLevel يأخذ usage risk بالحسبان
+
+لكن:
+لا تغير workspace status تلقائيًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- USAGE_METRIC_CONFIG
+- USAGE_STATUS_CONFIG
+- CAPACITY_RISK_CONFIG
+- USAGE_SAFETY_CONTRACT
+
+مع:
+- deterministic ordering
+- no billing/payment wording
+- no automatic enforcement wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantUsage(tenantId)
+
+GET hook فقط.
+لا تضف mutation.
+
+مع:
+- loading/error/empty states
+- staleTime مناسب
+- invalidation من entitlements/subscription updates إن أمكن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Usage & Capacity Intelligence
+
+يعرض:
+- capacity risk badge
+- warning/exceeded/unknown counts
+- metric rows/table:
+  - metric
+  - usage
+  - limit
+  - percentage
+  - status
+  - source
+- progress bars بسيطة
+- unknown states محترمة
+- warnings panel
+
+في Tenant Registry table:
+اعرض مختصر:
+- seats usage
+- storage usage
+- capacity risk
+- usage warning count
+
+مهم:
+- read-only
+- لا أزرار enforce
+- لا billing/charge/upgrade wording
+- لا legal warning
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured log:
+- tenant_usage_profile_read
+
+Fields:
+- actorId
+- tenantId
+- workspaceId
+- warningCount
+- exceededCount
+- unknownCount
+- capacityRiskLevel
+
+بدون بيانات حساسة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Usage Intelligence MUST:
+- remain super-admin only
+- remain read-only
+- never charge customers
+- never generate invoices
+- never auto-suspend workspace
+- never delete data
+- never enforce module access globally
+- never send legal/email notices
+- prefer unknown over unsafe inference
+- fail closed on invalid tenant
+
+أي:
+capacity visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+usage metric config stable
+
+T2:
+usage status thresholds stable
+
+T3:
+percentage calculation stable
+
+T4:
+unknown/unlimited/not_applicable behavior
+
+T5:
+normal/approaching/exceeded derivation
+
+T6:
+tenant usage profile derivation
+
+T7:
+capacity risk derivation
+
+T8:
+raw usage collector returns unknown safely
+
+T9:
+usage API super-admin only
+
+T10:
+usage API read-only no mutation
+
+T11:
+tenant registry usage summary updated
+
+T12:
+risk signals reflect usage warnings/exceeded
+
+T13:
+frontend usage config stable
+
+T14:
+frontend usage hook read-only
+
+T15:
+usage panel renders unknown/normal/exceeded states
+
+T16:
+no billing/payment/enforcement/legal/email wording exists
+
+T17:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- billing overage
+- payment provider
+- invoice generation
+- automatic suspension
+- hard limit enforcement
+- data deletion
+- cleanup jobs
+- email/legal notices
+- tenant self-service upgrade
+- HR module logic
+- background usage aggregation jobs
+
+خلك:
+read-only usage and capacity intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13e-report.txt
+
+ويحتوي:
+- usage metric model
+- usage status model
+- usage derivation library
+- raw usage collection behavior
+- backend API surface
+- tenant registry profile updates
+- frontend usage/capacity UI
+- observability behavior
+- safety guarantees
+- tests results
+- remaining usage gaps
+- readiness assessment قبل Subscription Expiry & Renewal Automation

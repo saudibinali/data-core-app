@@ -1,0 +1,212 @@
+WORKFLOW PHASE 6-A REPORT
+Scheduling Infrastructure & Delayed Workflow Execution Foundations
+==================================================================
+Date:      2026-05-14
+Phase:     6-A
+Status:    COMPLETE
+Tests:     547 / 547 passing (22 new in delay-scheduling.test.ts)
+TypeCheck: Clean (0 errors)
+DB Push:   Applied (4 new columns + 1 new index)
+
+
+OBJECTIVE
+─────────
+Add a `waiting_delay` lifecycle state, a persisted wake-up model, a
+single-process polling scheduler, and delay step governance on top of
+the existing P4-D guarded transition safety model.  Lift WG-04.
+
+
+DELIVERABLES
+────────────
+
+T001 — Schema: delay columns + index (lib/db/src/schema/workflows.ts)
+  Added to workflowExecutionsTable:
+    wake_at             TIMESTAMPTZ   — absolute time to resume execution
+    waiting_reason      TEXT          — "delay" (extensible for future types)
+    scheduled_step_index INTEGER      — cursor+1; step to resume FROM after wake-up
+    resumed_at          TIMESTAMPTZ   — when the scheduler acquired the execution
+
+  Added index:
+    idx_wf_exec_wake ON (status, wake_at)
+    → enables the scheduler's SELECT … WHERE status='waiting_delay' AND wake_at <= now()
+      to be sub-second at scale.
+
+  NULL semantics: all four columns are NULL for executions not in waiting_delay.
+  They persist after resume as an immutable historical record.
+
+T002 — Types: extended DelayStep + StepResult (types.ts)
+  DelayStep.config now accepts exactly one of:
+    delayForMinutes?:     number    — relative delay (N minutes from step execution)
+    delayUntilTimestamp?: string    — absolute delay (ISO 8601 timestamp)
+
+  StepResult extended with:
+    waitForDelay?: boolean  — signal to executor: transition to waiting_delay
+    wakeAt?:       Date     — the computed absolute wake-up time
+
+T003 — Delay step handler (steps/delay.ts)
+  computeWakeAt(config, now?) → { wakeAt: Date } | { error, code }
+    Pure function exported for unit tests.  Handles both relative and absolute
+    configs.  Returns structured error codes for runtime config failures.
+
+  executeDelayStep(step, ctx, executionId, workflowVersion?, now?)
+    Resolves wakeAt, emits execution_delay_started audit event, returns
+    { success: true, waitForDelay: true, wakeAt, output: { wakeAt, delayMs, ... } }.
+    Never writes to DB — all transitions happen in executor.ts.
+
+  MAX_DELAY_MINUTES = 43_200 (30 days)
+    Shared constant used by both the handler and the validator.
+
+T004 — Validator: WG-04 LIFTED (validator.ts)
+  WG-04_DELAY_BLOCKED removed.  Replaced with specific configuration rules:
+
+  ERRORS (block activation):
+    WG-04_DELAY_NO_CONFIG          — config object entirely absent
+    WG-04_DELAY_NO_DURATION        — neither field specified
+    WG-04_DELAY_AMBIGUOUS          — both fields specified simultaneously
+    WG-04_DELAY_INVALID_MINUTES    — delayForMinutes is not a finite number
+    WG-04_DELAY_NON_POSITIVE_MINUTES — delayForMinutes ≤ 0
+    WG-04_DELAY_EXCESSIVE_MINUTES  — delayForMinutes > 43 200 (30 days)
+    WG-04_DELAY_INVALID_TIMESTAMP  — delayUntilTimestamp is not valid ISO 8601
+
+  WARNINGS (allow activation, surface in publish response):
+    WG-04_DELAY_PAST_TIMESTAMP     — delayUntilTimestamp is in the past at publish time
+    WG-04_DELAY_EXCESSIVE_TIMESTAMP — delayUntilTimestamp is more than 30 days out
+
+T005 — Executor: waitForDelay pause + resumeDelayedExecution (executor.ts)
+  Dispatch switch: "delay" case now calls executeDelayStep() instead of no-op.
+
+  runStepLoop: added guarded running → waiting_delay transition after
+  the waitForApproval block (mirrors P4-D model exactly):
+    UPDATE SET status='waiting_delay', wakeAt, waitingReason='delay',
+               scheduledStepIndex=cursor+1
+    WHERE id=$id AND status='running'
+    RETURNING id
+  On empty return: transition_race_lost → log + return.
+  On success: logs execution_delay_paused + returns (stops the loop).
+
+  resumeDelayedExecution(executionId, now?) → string code
+  New public export called by the scheduler.  Governance order:
+    1. Fetch execution (SELECT)
+    2. Pre-check: terminal → "already_terminal"
+    3. Pre-check: status ≠ waiting_delay → "not_waiting_delay"
+    4. Pre-check: cancelRequested=true → guarded → cancelled → "cancel_requested"
+    5. Pre-check: TTL expired → guarded → timed_out → "ttl_expired"
+    6. Pre-check: wakeAt > now → "wake_at_not_reached" (scheduler guard)
+    7. Snapshot-first step resolution (P5-A model)
+    8. Reconstruct ExecutionContext (JSONB + completed step rows)
+    9. Guarded acquisition: waiting_delay → running (sets resumedAt=now)
+       WHERE status='waiting_delay' → RETURNING id
+       On empty: "transition_race_lost"
+   10. void runStepLoop(…, scheduledStepIndex, …) → "ok"
+
+T006 — Scheduler: WorkflowScheduler + singleton (scheduler.ts)
+  Class WorkflowScheduler:
+    start()    — starts the setTimeout polling loop (idempotent)
+    stop()     — clears the timer, sets running=false (idempotent)
+    pollOnce(now?) → { found, resumed, skipped }
+      SELECT id, wakeAt FROM workflow_executions
+      WHERE status='waiting_delay' AND wake_at <= now
+      LIMIT 10
+      → for each: resumeDelayedExecution(id, now)
+      → emit scheduler_poll_cycle log with counters
+
+  Design decisions:
+    • setTimeout loop (not setInterval) — next cycle starts AFTER current
+      completes, preventing overlapping poll cycles under load.
+    • No per-execution timer IDs — all timing lives in DB (wake_at).
+    • Guarded acquisition in resumeDelayedExecution ensures exactly-once
+      wake-up even if two scheduler instances race (future-safe).
+    • POLL_INTERVAL_MS = 15 000 (15 seconds) — bounded staleness, low DB load.
+    • BATCH_SIZE = 10 — prevents large backlogs from flooding the event loop.
+
+  Exported singleton: workflowScheduler
+
+T007 — Engine: start scheduler (engine.ts)
+  WorkflowEngine.start() now calls workflowScheduler.start() alongside
+  the eventDispatcher.on() registration.  Scheduler lifecycle is tied to
+  the engine lifecycle.
+
+T008 — DB push
+  Applied cleanly.  New columns are nullable — zero migration risk on
+  existing rows (all existing workflow_executions have NULL for all four
+  columns).
+
+T009 — Tests (delay-scheduling.test.ts): 22 new tests
+  T1-T7:   computeWakeAt pure function (relative, absolute, error codes)
+  T8-T14:  Validator WG-04 rules (lift, no-duration, ambiguous, negative,
+           excessive, invalid timestamp, past timestamp as warning)
+  T15-T16: executeDelayStep handler (success + failure paths)
+  T17-T19: WorkflowScheduler (counters, non-ok results, start/stop idempotency)
+  T20:     scheduledStepIndex formula (cursor+1 invariant)
+  T20b:    wakeAt future guard (computeWakeAt relative → future timestamp)
+
+
+GOVERNANCE MODEL
+────────────────
+
+New state added to the lifecycle:
+
+  pending → running → waiting_delay → running (wake) → completed
+                    ↘ failed        ↗ cancelled (if cancelRequested at wake time)
+                                     timed_out (if TTL expired before wake-up)
+
+Guarded transitions (P4-D model, exactly-once):
+  running → waiting_delay   WHERE status='running'
+  waiting_delay → cancelled  WHERE status='waiting_delay'   (cancelRequested path)
+  waiting_delay → timed_out  WHERE status='waiting_delay'   (TTL path)
+  waiting_delay → running   WHERE status='waiting_delay'   (scheduler acquisition)
+
+RESTART SAFETY:
+  wakeAt + scheduledStepIndex persisted atomically in the running→waiting_delay
+  transition.  On server restart: scheduler reads from DB on first poll cycle.
+  No timer re-registration, no in-memory state.
+
+IDEMPOTENCY:
+  Scheduler SELECT + resumeDelayedExecution guarded UPDATE: if two processes
+  race, exactly one wins.  The loser's UPDATE returns empty → transition_race_lost
+  → skip silently.  This is already safe for future multi-replica deployments.
+
+
+AUDIT EVENTS ADDED
+──────────────────
+  execution_delay_started      — delay step resolved wakeAt (step handler)
+  execution_delay_paused       — running→waiting_delay succeeded (executor)
+  execution_delay_resumed      — scheduler acquired execution (resumeDelayedExecution)
+  execution_delay_cancelled    — cancelRequested=true at wake time
+  execution_delay_ttl_expired  — TTL expired before scheduler wake-up
+  scheduler_started            — engine started the scheduler
+  scheduler_stopped            — scheduler stopped
+  scheduler_poll_cycle         — each poll cycle (found/resumed/skipped counters)
+  execution_delay_resume_blocked — scheduler skipped an execution (non-race reason)
+
+
+PRIOR PHASE COMPATIBILITY
+─────────────────────────
+  • TERMINAL_STATUSES unchanged — waiting_delay is non-terminal (correct).
+  • notTerminal() guard covers waiting_delay (correct — can still be cancelled/timed_out).
+  • P5-A snapshot-first model used identically in resumeDelayedExecution.
+  • P5-F TTL pre-check pattern used identically.
+  • All 522 pre-existing tests continue to pass.
+
+
+WHAT THIS PHASE DOES NOT ADDRESS
+─────────────────────────────────
+  • No distributed lock / advisory lock (FOR UPDATE SKIP LOCKED) — single process.
+  • No cron expression language / schedule syntax.
+  • No retry scheduling (failed step re-run after delay).
+  • No reminder escalation policies.
+  • No UI exposure of waiting_delay state (P6-B).
+  • No API endpoint for manual wake-up override (P6-B).
+
+
+FILES CHANGED
+─────────────
+  lib/db/src/schema/workflows.ts                              (T001)
+  artifacts/api-server/src/lib/workflows/types.ts             (T002)
+  artifacts/api-server/src/lib/workflows/steps/delay.ts       (T003, NEW)
+  artifacts/api-server/src/lib/workflows/validator.ts         (T004)
+  artifacts/api-server/src/lib/workflows/executor.ts          (T005)
+  artifacts/api-server/src/lib/workflows/scheduler.ts         (T006, NEW)
+  artifacts/api-server/src/lib/workflows/engine.ts            (T007)
+  artifacts/api-server/src/lib/workflows/__tests__/
+    delay-scheduling.test.ts                                   (T009, NEW)

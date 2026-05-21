@@ -1,0 +1,658 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 12-E
+Governance Analytics UI & Compliance Intelligence Visualization Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date           : 2026-05-16
+Phase          : P12-E (frontend-only governance analytics visualization UI)
+Prior phase    : P12-D (workflow lifecycle review UI — 393/393 tests)
+Final Status   : P12-E COMPLETE
+Backend tests  : 2399 / 2399 (42 files — unchanged)
+Frontend tests : 441 / 441 (7 files — 48 new assertions across 10 groups)
+Typecheck      : Pre-existing isActive errors in workflows.tsx — unchanged; zero new errors
+New files      : 4 (3 chart/table components, 1 test file)
+Modified files : 2 (governance-console-config.ts, super-admin-governance-analytics.tsx)
+Backend changes: NONE
+DB migrations  : NONE
+Chart library  : Recharts v2 (already installed — no new dependency)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — GOVERNANCE ANALYTICS UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-E converts the P12-A placeholder analytics page into a full compliance
+intelligence visualization experience. Architecture remains frontend-only,
+read-only, and super-admin-restricted. No backend routes were modified.
+
+Layer additions (P12-E only):
+
+  governance-console-config.ts  (extended — pure TS constants)
+    + ANALYTICS_METRIC_MAP              (13 entries: label, unit, tier, description, order)
+    + ALL_ANALYTICS_METRIC_KEYS         (readonly key tuple)
+    + WORKFLOW_EFFECTIVENESS_SCORE_MAP  (5 score levels)
+    + WORKFLOW_EFFECTIVENESS_SCORE_ORDER (5-entry canonical order tuple)
+    + ANALYTICS_TIME_RANGE_OPTIONS      (4 options: 7d, 30d, 90d, all)
+    + POLICY_EFFECTIVENESS_COLUMNS      (8 column definitions)
+    + TREND_SEVERITY_COLOURS            (6 hex colour entries)
+    + ANALYTICS_UI_SAFETY_CONTRACT      (10 boolean invariants — all true)
+    + ANALYTICS_EMPTY_STATE             (4 empty/error text blocks)
+
+  governance-violation-trend-chart.tsx  (new shared component)
+    Recharts AreaChart with total-only or stacked-severity mode.
+    Toggle via showBreakdown prop.
+    Empty state when data array is empty.
+    data-testid: violation-trend-chart | violation-trend-chart-empty
+
+  governance-escalation-distribution-chart.tsx  (new shared component)
+    Recharts BarChart with per-level colour coding from ESCALATION_LEVEL_MAP.
+    Custom tooltip showing count + percentage.
+    Empty state when data array is empty.
+    data-testid: escalation-distribution-chart | escalation-distribution-chart-empty
+
+  governance-policy-effectiveness-table.tsx  (new shared component)
+    Sortable table (unresolvedFrequency desc → escalationFrequency desc).
+    Attention highlighting: amber for rates above threshold.
+    StabilityBadge colour-coded by effectiveness tier.
+    AlertTriangle icon on cells above attention threshold.
+    Loading skeleton (6 rows).
+    Empty state when profiles array is empty.
+    data-testid: policy-effectiveness-table | policy-effectiveness-table-loading |
+                 policy-effectiveness-table-empty | policy-eff-row-{i}
+
+  super-admin-governance-analytics.tsx  (full rewrite from P12-A)
+    7 sections:
+    1. Header + time-range toggle
+    2. GovernanceReadOnlyNotice
+    3. Analytics overview banner (attention highlighting when critical/worsening)
+    4. 7 key metric cards (border-colour by tier)
+    5. Violation trend chart + escalation distribution chart (side-by-side)
+    6. Workflow effectiveness score + escalation trend (side-by-side)
+    7. Unresolved critical panel
+    8. All 13 metrics compact grid
+    9. Per-policy effectiveness table
+   10. Safety annotation footer
+
+Dependency graph (P12-E additions):
+
+  governance-console-config.ts  (pure TS — no deps)
+         ↓
+  governance-violation-trend-chart.tsx       (Recharts AreaChart)
+  governance-escalation-distribution-chart.tsx (Recharts BarChart)
+  governance-policy-effectiveness-table.tsx  (pure HTML table)
+         ↓
+  super-admin-governance-analytics.tsx
+    ← useGovernanceAnalytics()
+    ← useGovernanceAnalyticsEffectiveness()
+    ← useGovernancePolicyEffectiveness()
+
+Chart library in use:
+  recharts@^2.15.2 — already in ops-platform/package.json.
+  No new dependency was added.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — ANALYTICS METRIC VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: ANALYTICS_METRIC_MAP (13 entries)
+
+2.1  Metric tier → left border colour mapping
+
+  Tier      Colour              Example metrics
+  ──────────────────────────────────────────────────────────────────────────────
+  neutral   border-l-slate-300  totalWorkflows, dismissedWorkflows
+  status    border-l-blue-400   activeWorkflows
+  elevated  border-l-orange-400 escalatedWorkflows, escalationRate, escalationToResolutionRatio
+  good      border-l-emerald-400 resolvedWorkflows, throughputRate
+  critical  border-l-red-500    unresolvedCriticalCount, criticalUnresolvedDurationMs
+
+2.2  Unit types and formatting
+
+  count   → displayed as plain number
+  percent → formatted as X.X% via pct()
+  ms      → formatted as Xms / X.Xs / X.Xm / X.Xh via ms()
+  ratio   → formatted as X.XX (2 decimal places)
+
+2.3  All 13 metrics (order 0–12)
+
+  0  totalWorkflows              neutral  count    Platform-wide total
+  1  activeWorkflows             status   count    Open + investigating
+  2  escalatedWorkflows          elevated count    Elevated for review
+  3  resolvedWorkflows           good     count    Concluded with findings
+  4  dismissedWorkflows          neutral  count    Closed without resolution
+  5  unresolvedCriticalCount     critical count    Critical awaiting resolution
+  6  escalationRate              elevated percent  Proportion escalated
+  7  throughputRate              good     percent  Proportion resolved
+  8  dismissalFrequency          neutral  percent  Proportion dismissed
+  9  escalationToResolutionRatio elevated ratio    Escalations per resolution
+  10 averageResolutionDurationMs neutral  ms       Avg creation→resolution
+  11 averageAcknowledgmentDurationMs neutral ms    Avg creation→acknowledgment
+  12 criticalUnresolvedDurationMs critical ms      Avg duration of critical unresolved
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — WORKFLOW EFFECTIVENESS SCORE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: WORKFLOW_EFFECTIVENESS_SCORE_MAP (5 entries)
+Order: WORKFLOW_EFFECTIVENESS_SCORE_ORDER (unstable→highly_effective)
+
+  Score             Tier       Order  Display colour   Label
+  ──────────────────────────────────────────────────────────────────────────────
+  unstable          critical   0      red              "Unstable"
+  inconsistent      attention  1      amber            "Inconsistent"
+  acceptable        neutral    2      slate            "Acceptable"
+  effective         good       3      emerald          "Effective"
+  highly_effective  excellent  4      teal             "Highly Effective"
+
+Design principles:
+  - No "failing" or "bad" labels — the lowest tier is "Unstable" (operational, not punitive).
+  - Descriptions use governance process language, not disciplinary language.
+  - "highly_effective" is the aspirational target — no "perfect" or "compliant" wording.
+  - EffectivenessBadge renders a 2xl bold headline + description in tier colour.
+  - Badge variant also available via colour map for inline use.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — CHART COMPONENT DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  GovernanceViolationTrendChart
+
+  File: artifacts/ops-platform/src/components/governance/governance-violation-trend-chart.tsx
+
+  Props:
+    data:            ViolationTrendPoint[]  (date, total?, critical?, high?, medium?, low?, informational?)
+    showBreakdown?:  boolean                (default false — total only)
+    data-testid?:    string
+
+  Rendering modes:
+    Total-only: Single AreaChart with one "Total violations" area in indigo (#6366f1)
+    Breakdown:  Stacked AreaChart with 5 severity areas (critical→informational)
+                using TREND_SEVERITY_COLOURS hex values.
+
+  Toggle control: "By severity" / "Total only" button rendered in the page (not in component).
+
+  Date formatting: dd MMM (e.g. "15 May") via Intl.DateTimeFormat.
+
+  ResponsiveContainer: width=100%, height=208px.
+
+  Empty state (data.length === 0):
+    TrendingUp icon (20% opacity) + "No trend data available for the selected period."
+    data-testid: violation-trend-chart-empty
+
+  Note: The analytics API returns aggregate scalars, not time-series arrays.
+  The trend chart currently renders the empty state until a time-series
+  endpoint is wired (deferred to P12-F or backend phase). The toggle button
+  and component are fully functional — they will display correctly once
+  time-series data is available.
+
+4.2  GovernanceEscalationDistributionChart
+
+  File: artifacts/ops-platform/src/components/governance/governance-escalation-distribution-chart.tsx
+
+  Props:
+    data:            EscalationDistributionPoint[]  (level, count, percent?)
+    data-testid?:    string
+
+  Rendering: BarChart with Cell-per-bar colour coding from LEVEL_COLOURS map.
+  Custom Tooltip: background card showing level label + count + share percent.
+  Labels on X-axis use ESCALATION_LEVEL_MAP for display name.
+
+  Colour per level:
+    L1_automated / informational  → blue    (#3b82f6)
+    L2_operator  / standard       → amber   (#f59e0b)
+    L3_management / elevated      → orange  (#f97316)
+    L4_executive / critical       → red     (#ef4444)
+
+  Data derivation (current): deriveEscalationDistribution() computes a
+  two-bucket distribution (L1 non-escalated / L3 escalated) from
+  escalatedWorkflows + totalWorkflows in the analytics profile.
+  When per-level escalation data is available from the API, the function
+  can be replaced without changing the component interface.
+
+  ResponsiveContainer: width=100%, height=192px.
+
+  Empty state: BarChart3 icon + "No escalation data available."
+  data-testid: escalation-distribution-chart-empty
+
+4.3  GovernancePolicyEffectivenessTable
+
+  File: artifacts/ops-platform/src/components/governance/governance-policy-effectiveness-table.tsx
+
+  Props:
+    profiles:    PolicyEffectivenessProfile[]
+    isLoading?:  boolean
+    data-testid? string
+
+  Sort order: unresolvedFrequency desc, then escalationFrequency desc.
+  This ensures highest-urgency policies appear at the top regardless of API order.
+
+  Column headers rendered from POLICY_EFFECTIVENESS_COLUMNS constant.
+
+  Attention highlighting:
+    confirmedViolationRate ≥ 0.70  → amber text + AlertTriangle icon
+    falsePositiveRate      ≥ 0.40  → amber text + AlertTriangle icon
+    escalationFrequency    ≥ 0.50  → amber text + AlertTriangle icon
+
+  StabilityBadge renders WORKFLOW_EFFECTIVENESS_SCORE_MAP label in tier colour.
+  Unknown score keys render as plain muted text.
+
+  Loading state: 6× Skeleton rows.
+  Empty state:  BookOpen icon + guidance text.
+  data-testid: policy-effectiveness-table-loading | policy-effectiveness-table-empty |
+               policy-eff-row-{i}
+
+  No edit controls. No policy tuning. No auto-recommendation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — TIME-RANGE FILTER BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: ANALYTICS_TIME_RANGE_OPTIONS
+
+  Value   Label           Description
+  ────────────────────────────────────────────────────────────────
+  7d      Last 7 days     Most recent 7-day window
+  30d     Last 30 days    Most recent 30-day window (default)
+  90d     Last 90 days    Quarter-level review window
+  all     All time        Full platform history
+
+Implementation:
+  - TimeRangeToggle component renders 4 buttons in a pill-style bar.
+  - Active option renders with "secondary" variant (highlighted).
+  - data-testid: time-range-toggle, time-range-{value}
+  - Default: "30d"
+  - State is local (useState) — not in URL, not in query params.
+
+Current behavior:
+  The analytics API returns aggregate scalars (not arrays with timestamps),
+  so the time-range filter currently labels the chart description only.
+  When a time-range param is added to the analytics API in a future phase,
+  the selected value can be passed directly to the hook: `useGovernanceAnalytics({ timeRange })`.
+  No backend routes were modified. No query keys were broken.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — ANALYTICS OVERVIEW BANNER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The banner always shows 3 stat blocks:
+  1. Total workflows (platform-wide coverage)
+  2. Unresolved critical count (with pulsing red icon when > 0)
+  3. Escalation trend label (with TrendIcon)
+
+Attention upgrade conditions (either triggers the red border):
+  a) unresolvedCriticalCount > 0
+  b) escalationTrend is "worsening" or "critical"
+
+When either condition is true:
+  - 2px red border (border-red-400)
+  - Red tinted background
+  - "Attention required" badge (red, AlertTriangle icon) shown in top-right
+
+data-testid: analytics-overview-banner
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — UNRESOLVED CRITICAL PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+data-testid: unresolved-critical-panel
+
+Three states:
+
+  LOADING:
+    Skeleton h-10 w-full
+
+  ZERO UNRESOLVED:
+    CheckCircle2 (emerald) + "No unresolved critical workflows — all critical workflows are resolved."
+    data-testid: unresolved-critical-empty
+
+  HAS UNRESOLVED:
+    - Large count in red (3xl bold)
+    - Average duration (criticalUnresolvedDurationMs) beside a vertical separator
+    - Guidance text: "Review these workflows on the Governance Workflows page.
+      Filter by escalation level L4 or status 'escalated' to prioritise."
+    - Inline link to /super-admin/governance/workflows
+
+What is NOT in this panel:
+  No "Escalate" button.
+  No "Resolve" button.
+  No auto-escalation trigger.
+  No legal warning wording.
+  Guidance text explicitly states: "This panel is read-only — no escalation
+  or resolution actions are available here."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — POLICY EFFECTIVENESS VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1  Sort order (priority)
+
+  1st: unresolvedFrequency (highest first)
+  2nd: escalationFrequency (tiebreaker, highest first)
+
+  This ensures policies with the most unresolved violations bubble to the top,
+  giving platform operators immediate visibility into attention areas without
+  requiring any filtering.
+
+8.2  Attention threshold thresholds (empirical starting points)
+
+  confirmedViolationRate ≥ 0.70  → amber highlight
+    Rationale: 70%+ of violations confirmed means the policy is frequently
+    being breached. Not necessarily a policy failure — may indicate a high-
+    activity area requiring closer review.
+
+  falsePositiveRate ≥ 0.40  → amber highlight
+    Rationale: 40%+ false positives indicates potential policy over-sensitivity,
+    noisy triggers, or unclear policy scope.
+
+  escalationFrequency ≥ 0.50  → amber highlight
+    Rationale: 50%+ of violations escalating suggests violations are consistently
+    reaching review thresholds.
+
+  NOTE: These are display thresholds only. No automated action is triggered
+  when a threshold is exceeded. The operator reviews and decides.
+
+8.3  Stability score in context of policy table
+
+  The policyStabilityScore field uses the same WORKFLOW_EFFECTIVENESS_SCORE_MAP
+  keys as the workflow-level score. The StabilityBadge component renders the
+  human-readable tier label (e.g. "Acceptable") with tier colouring.
+
+8.4  No policy edit controls
+
+  The table has no edit buttons, no tuning controls, no auto-recommendation
+  links. A read-only note below the table explains the attention threshold
+  display logic.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — UI STATES (ALL 8 REQUIRED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1.  LOADING
+      - Overview banner: Skeleton in all 3 stat blocks
+      - Metric cards: Skeleton h-6 w-16 per card
+      - Trend chart: Skeleton h-52 w-full
+      - Escalation chart: Skeleton h-48 w-full
+      - Effectiveness score: Skeleton h-12 w-40
+      - Escalation trend: Skeleton h-12 w-32
+
+  2.  EMPTY (no analytics data)
+      - Metric cards: all values display "—"
+      - Overview banner: 0 total, 0 critical, "—" trend
+      data-testid: analytics-overview-banner (no separate empty-state node)
+
+  3.  ERROR
+      - GovernanceErrorState ("Could not load governance analytics data…")
+
+  4.  UNAUTHORIZED
+      - SuperAdminRoute blocks before any page component mounts.
+      - Redirect to /sign-in.
+
+  5.  READ-ONLY NOTICE
+      - GovernanceReadOnlyNotice always visible below the page header.
+      data-testid: governance-read-only-notice
+
+  6.  NO TREND DATA
+      - GovernanceViolationTrendChart empty state
+      - TrendingUp icon + "No trend data available for the selected period."
+      data-testid: violation-trend-chart-empty
+
+  7.  NO POLICY EFFECTIVENESS DATA
+      - GovernancePolicyEffectivenessTable empty state
+      - BookOpen icon + guidance text
+      data-testid: policy-effectiveness-table-empty
+
+  8.  NO UNRESOLVED CRITICAL
+      - UnresolvedCriticalPanel zero state
+      - CheckCircle2 (emerald) + "No unresolved critical workflows…"
+      data-testid: unresolved-critical-empty
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ANALYTICS_UI_SAFETY_CONTRACT (10 boolean invariants — all true):
+
+  noAutoEscalation         true   No button or trigger escalates a workflow.
+  noPolicyAutoTuning       true   No policy edit, tune, or adjustment control.
+  noAnalyticsMutation      true   No mutation of any analytics metric.
+  noRecommendationEngine   true   No recommendation card or auto-suggestion.
+  noLegalConclusions       true   No legal verdict, legal risk, or compliance ruling.
+  noAiPredictions          true   No AI prediction widget.
+  noAiSummaries            true   No AI-generated narrative.
+  noExportRendering        true   No PDF, XLSX, or CSV export trigger.
+  noRegulatorSubmission    true   No "submit to regulator" or similar control.
+  superAdminOnly           true   Enforced by SuperAdminRoute.
+
+Bottom-of-page annotation (derived from contract booleans, always visible):
+  "Governance console — read-only analytics visualization
+   · No auto-escalation · No policy tuning · No recommendations
+   · No legal conclusions"
+
+The UnresolvedCriticalPanel when count > 0 explicitly states:
+  "This panel is read-only — no escalation or resolution actions are available here."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+11.1  Backend tests — unchanged
+
+  Command: pnpm --filter @workspace/api-server run test --run
+  Result:  2399 / 2399 (42 files) — EXIT:0
+
+11.2  Frontend tests — P12-E additions
+
+  Command: pnpm --filter @workspace/ops-platform run test --run
+  Result:  441 / 441 (7 files) — EXIT:0
+
+  File breakdown:
+    governance-utils.test.ts                128 assertions (P11, unchanged)
+    governance-console-shell.test.ts         54 assertions (P12-A, unchanged)
+    governance-audit-integrity.test.ts       68 assertions (P12-B, unchanged)
+    governance-violations-policy.test.ts     70 assertions (P12-C, unchanged)
+    governance-workflows-lifecycle.test.ts   73 assertions (P12-D, unchanged)
+    governance-analytics-visualization.test.ts 48 assertions (P12-E new)
+    (governance-trend-utils.test.ts            0 assertions, pre-existing)
+
+11.3  New test groups (T1–T10) — 48 assertions
+
+  T1   Analytics metric map stable                                 6 assertions
+  T2   Workflow effectiveness score map stable                     7 assertions
+  T3   Analytics page super-admin scoped                           5 assertions
+  T4   Time range options stable                                   3 assertions
+  T5   Chart config deterministic                                  4 assertions
+  T6   Policy effectiveness columns stable                         5 assertions
+  T7   No mutation/AI/legal/export labels                          4 assertions
+  T8   Analytics safety contract all true                          3 assertions
+  T9   Hooks remain read-only                                      4 assertions
+  T10  Config shapes correct                                       7 assertions
+  ─────────────────────────────────────────────────────────────────────────────
+  Total new assertions:                                           48
+
+  Total P12 assertions accumulated: 313
+  (182 P12-A + 68 P12-B + 70 P12-C + 73 P12-D + 48 P12-E cumulative new)
+  Total cross-phase frontend assertions: 441
+
+11.4  Test fix note (T3 base contract)
+
+  Initial T3 tested `GOVERNANCE_CONSOLE_SAFETY_CONTRACT.noPublicAccess` and
+  `noTicketCreation` — properties that don't exist on the base contract.
+  Fixed to use the actual properties: `readOnly`, `noMutationControls`,
+  `noAutoEnforcement`, `superAdminOnly`.
+
+11.5  Typecheck status
+
+  pnpm --filter @workspace/ops-platform run typecheck
+  EXIT:2 — same 2 pre-existing isActive errors. Zero new errors from P12-E.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — FILE MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New files (4):
+
+  artifacts/ops-platform/src/components/governance/governance-violation-trend-chart.tsx
+    Recharts AreaChart. Total-only or stacked-severity mode.
+    Exports: GovernanceViolationTrendChart, ViolationTrendPoint
+    Empty state when data.length === 0.
+    data-testid: violation-trend-chart | violation-trend-chart-empty
+
+  artifacts/ops-platform/src/components/governance/governance-escalation-distribution-chart.tsx
+    Recharts BarChart with Cell colouring per escalation level.
+    Custom tooltip: level label + count + share percent.
+    Exports: GovernanceEscalationDistributionChart, EscalationDistributionPoint
+    data-testid: escalation-distribution-chart | escalation-distribution-chart-empty
+
+  artifacts/ops-platform/src/components/governance/governance-policy-effectiveness-table.tsx
+    Sortable HTML table. Amber attention highlighting via RateCell.
+    StabilityBadge per WORKFLOW_EFFECTIVENESS_SCORE_MAP.
+    Exports: GovernancePolicyEffectivenessTable, PolicyEffectivenessProfile
+    data-testid: policy-effectiveness-table | policy-effectiveness-table-loading |
+                 policy-effectiveness-table-empty | policy-eff-row-{i}
+
+  artifacts/ops-platform/src/lib/__tests__/governance-analytics-visualization.test.ts
+    48 assertions across T1–T10.
+    Pure node-environment — no React/DOM imports.
+    Imports only from governance-console-config.ts.
+
+Modified files (2):
+
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added: ANALYTICS_METRIC_MAP (13 entries, unit/tier/description/order)
+    Added: ALL_ANALYTICS_METRIC_KEYS
+    Added: WORKFLOW_EFFECTIVENESS_SCORE_MAP (5 levels, tiers, order)
+    Added: WORKFLOW_EFFECTIVENESS_SCORE_ORDER
+    Added: ANALYTICS_TIME_RANGE_OPTIONS (4 options)
+    Added: POLICY_EFFECTIVENESS_COLUMNS (8 column defs)
+    Added: TREND_SEVERITY_COLOURS (6 hex values)
+    Added: ANALYTICS_UI_SAFETY_CONTRACT (10 boolean invariants)
+    Added: ANALYTICS_EMPTY_STATE (4 text blocks)
+    Type exports: AnalyticsMetricKey, WorkflowEffectivenessScoreKey, AnalyticsTimeRangeKey
+
+  artifacts/ops-platform/src/pages/super-admin-governance-analytics.tsx
+    Full rewrite (P12-A placeholder → P12-E full analytics visualization)
+    9 display sections, 3 hooks, client-side time-range state
+    Sub-components: MetricCard, TrendIcon, EffectivenessBadge,
+                    TimeRangeToggle, AnalyticsOverviewBanner, UnresolvedCriticalPanel
+    Reuses: GovernanceViolationTrendChart, GovernanceEscalationDistributionChart,
+            GovernancePolicyEffectivenessTable, GovernanceReadOnlyNotice,
+            GovernanceSectionHeader, GovernanceErrorState
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — REMAINING ANALYTICS UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What P12-E provides:
+  - 13-metric ANALYTICS_METRIC_MAP with unit/tier/description/order
+  - 5-level WORKFLOW_EFFECTIVENESS_SCORE_MAP with colour tiers
+  - 4-option time-range toggle (client-side, no backend param yet)
+  - AreaChart for violation trends (empty state — awaiting time-series API)
+  - BarChart for escalation distribution (derived from aggregate totals)
+  - Policy effectiveness table with attention highlighting and sort order
+  - Analytics overview banner with attention upgrade (critical/worsening)
+  - Unresolved critical panel (count + avg duration + guidance link)
+  - All 8 UI states implemented
+  - 10-property ANALYTICS_UI_SAFETY_CONTRACT — no AI, no export, no legal
+
+What P12-E does NOT provide (deferred):
+
+─────────────────────────────────────────────────────────────────────────────
+A)  TIME-SERIES TREND DATA
+─────────────────────────────────────────────────────────────────────────────
+  The GovernanceViolationTrendChart renders the empty state because the
+  current analytics API returns aggregate scalars, not time-bucketed arrays.
+  Future: `GET /platform/governance/analytics/trends?period=30d` →
+  `{ points: { date, total, critical, high, medium, low, informational }[] }`.
+  The GovernanceViolationTrendChart interface already accepts this shape — no
+  component changes needed, only a new hook wiring.
+
+─────────────────────────────────────────────────────────────────────────────
+B)  TIME-RANGE PARAM TO API
+─────────────────────────────────────────────────────────────────────────────
+  The time-range toggle is wired to a local useState but does not yet pass
+  the selected value to the analytics hooks. Future: when the API supports
+  `?period=30d`, pass `timeRange` to `useGovernanceAnalytics({ period: timeRange })`.
+  No query-key breakage — the query key already accepts workspaceId as a variadic.
+
+─────────────────────────────────────────────────────────────────────────────
+C)  PER-LEVEL ESCALATION DISTRIBUTION
+─────────────────────────────────────────────────────────────────────────────
+  The escalation distribution chart currently shows a two-bucket split
+  (non-escalated / escalated) from aggregate totals. Future: if the API
+  returns escalation counts by level, the deriveEscalationDistribution()
+  function can be updated to produce 4 bars (L1–L4) without touching the
+  chart component.
+
+─────────────────────────────────────────────────────────────────────────────
+D)  POLICY COMPARISON VIEW
+─────────────────────────────────────────────────────────────────────────────
+  The policy effectiveness table shows all policies in a flat list. Future:
+  a comparison panel or sparkline column for trend-per-policy.
+
+─────────────────────────────────────────────────────────────────────────────
+E)  WORKSPACE-SCOPED ANALYTICS
+─────────────────────────────────────────────────────────────────────────────
+  `useGovernanceAnalytics(workspaceId?)` accepts a workspaceId. The page
+  does not currently expose a workspace filter — it shows platform-wide
+  aggregates only. Future: add a workspace selector to the filter bar.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — READINESS ASSESSMENT BEFORE TOPOLOGY & READINESS UI (P12-F)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE PLATFORM IS READY FOR P12-F (Topology & Readiness UI) BECAUSE:
+
+  ✓ /super-admin/governance/topology route exists and is protected
+  ✓ /super-admin/governance/readiness route exists and is protected
+  ✓ SuperAdminGovernanceTopology page is mounted and rendering
+  ✓ SuperAdminGovernanceReadiness page is mounted and rendering
+  ✓ useGovernanceTopology() hook is wired and tested
+  ✓ useGovernanceTopologyBoundaries() hook is wired and tested
+  ✓ useGovernanceTopologySnapshot() hook is wired and tested
+  ✓ useGovernanceReadiness() hook is wired and tested
+  ✓ VIOLATION_SEVERITY_MAP, WORKFLOW_STATUS_MAP, ESCALATION_LEVEL_MAP available
+  ✓ All shared governance components available (ReadOnlyNotice, SectionHeader, ErrorState)
+  ✓ Navigation links active (Network icon "Topology", ShieldCheck icon "Readiness")
+  ✓ Backend GET /platform/governance/topology implemented (P11-E)
+  ✓ Backend GET /platform/governance/topology/boundaries implemented (P11-E)
+  ✓ Backend GET /platform/governance/topology/snapshot implemented (P11-E)
+  ✓ Backend GET /platform/governance/readiness implemented (P11-E)
+  ✓ All backend tests pass (2399/2399)
+
+What P12-F will need to add (frontend-only):
+  - Policy topology graph / boundary map visualization
+  - Readiness health card grid (per-dimension readiness scores)
+  - Topology snapshot diff view
+  - Boundary summary table
+  - TOPOLOGY_UI_SAFETY_CONTRACT + READINESS_UI_SAFETY_CONTRACT
+
+No backend changes required for P12-F.
+No DB migrations required for P12-F.
+The entire P12-F scope is frontend-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOSURE STATEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12-E is COMPLETE.
+
+  - 4 new files (3 chart/table components, 1 test file)
+  - 2 modified files (config extended, analytics page fully rewritten)
+  - 0 backend changes
+  - 0 DB migrations
+  - 0 new package dependencies (Recharts already installed)
+  - 441/441 frontend tests passing (7 files, 48 new assertions)
+  - 2399/2399 backend tests passing
+  - Analytics metric visual model: 13 metrics, 5 tiers, 4 units
+  - Workflow effectiveness score: 5 levels, no disciplinary wording
+  - Time-range toggle: 7d / 30d / 90d / all (client-side, ready for API wiring)
+  - Violation trend chart: AreaChart (empty state until time-series API)
+  - Escalation distribution chart: BarChart with per-level colour coding
+  - Policy effectiveness table: sorted, attention-highlighted, read-only
+  - Unresolved critical panel: count + duration + guidance link, no action buttons
+  - Analytics overview banner: attention upgrade when critical > 0 or trend worsening
+  - 10-property ANALYTICS_UI_SAFETY_CONTRACT — no AI, no auto-escalation,
+    no policy tuning, no recommendations, no legal conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 12-E REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

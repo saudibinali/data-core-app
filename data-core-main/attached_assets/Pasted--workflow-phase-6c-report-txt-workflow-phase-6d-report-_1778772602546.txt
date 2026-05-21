@@ -1,0 +1,280 @@
+راجع:
+- workflow-phase-6c-report.txt
+- workflow-phase-6d-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- governance API surface
+- tenant health model
+- governance alerts
+- stuck execution semantics
+- operational metrics contracts
+
+ثم نفّذ فقط:
+P6-E — Governance Dashboard Foundations
+
+ولا تنفّذ:
+- realtime websockets
+- drag/drop dashboard builders
+- Grafana embedding
+- AI insights
+- cross-workspace super-admin dashboards
+- alert acknowledgment workflows
+
+عنوان المهمة:
+WORKFLOW PHASE 6-E — Governance Dashboard & Operational Console Foundations
+
+المهمة الحالية:
+تحويل:
+governance APIs
+
+إلى:
+operational admin experience
+
+الهدف:
+تمكين:
+- workspace admins
+- operations teams
+- platform governance visibility
+
+بطريقة:
+minimal enterprise operational console
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE SURFACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- /governance/health
+- /governance/metrics
+- /governance/stuck
+- /governance/alerts
+
+حدّد:
+- ما الذي يمكن عرضه مباشرة
+- أين توجد UX ambiguity
+- أين توجد payload truncation implications
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE DASHBOARD LAYOUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم layout واضح يحتوي:
+
+A)
+Health severity overview
+
+B)
+Execution metrics cards
+
+C)
+Governance alerts panel
+
+D)
+Stuck executions table
+
+E)
+Operational indicators
+
+المطلوب:
+minimal operational clarity
+وليس analytics overload.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — HEALTH OVERVIEW PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- severity badge
+- storm severity
+- active execution pressure
+- approval backlog
+- delay backlog
+- workflow error rate
+
+مع:
+color semantics واضحة:
+healthy / warning / degraded / critical
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ALERTS PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- GOV-* codes
+- severity
+- title
+- description
+- recommendedAction
+- affected counts
+
+مع:
+sorting by severity.
+
+لكن:
+لا تضف acknowledgment actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — STUCK EXECUTIONS TABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- executionId
+- workflowId
+- stuckReason
+- overdue duration
+- severity
+
+مع:
+visual differentiation:
+running_too_long
+approval_overdue
+delay_overdue
+
+واحترام:
+truncated=true semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — METRICS VISUALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- active executions
+- waiting approval
+- waiting delay
+- completed
+- failed
+- timed out
+- cancelled
+
+لكن:
+بدون charts معقدة.
+
+التركيز:
+operational readability.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DASHBOARD SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Dashboard MUST remain:
+READ-ONLY.
+
+لا تضف:
+- force timeout buttons
+- cancel execution
+- alert dismissal
+- workflow mutation actions
+
+هذه مرحلة:
+visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — POLLING MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+polling refresh model بسيط.
+
+المطلوب:
+- 30s refresh interval
+- loading states
+- stale-data indication باستخدام capturedAt
+- no realtime streaming
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_dashboard_loaded
+
+B)
+governance_dashboard_refreshed
+
+C)
+governance_alert_viewed
+
+D)
+governance_stuck_table_viewed
+
+كلها تحتوي:
+- workspaceId
+- actorId
+- visibleAlertCount
+- visibleStuckCount
+- dashboardSeverity
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+health severity renders correctly
+
+T2:
+alert severity ordering stable
+
+T3:
+stuck table respects truncation flag
+
+T4:
+metrics cards display correct values
+
+T5:
+dashboard remains read-only
+
+T6:
+polling refresh updates state safely
+
+T7:
+capturedAt stale indication works
+
+T8:
+severity color mapping deterministic
+
+T9:
+empty workspace renders healthy state
+
+T10:
+governance API failures handled safely
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- realtime push infra
+- drag/drop dashboards
+- advanced charting suites
+- workflow editing from dashboard
+- admin override actions
+- alert workflows
+
+خلك:
+minimal operational console.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-6e-report.txt
+
+ويحتوي:
+- dashboard architecture
+- governance visualization model
+- polling strategy
+- read-only guarantees
+- observability additions
+- UX governance decisions
+- tests results
+- remaining operational UX gaps
+- readiness assessment قبل enterprise scaling phase

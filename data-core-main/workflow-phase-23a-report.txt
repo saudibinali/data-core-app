@@ -1,0 +1,66 @@
+P23-A — ERP Platform Administration & Multi-Tenant Governance Refactor
+Final report (2026-05-20)
+
+Executive summary
+- P23-A delivers an additive platform governance control plane: lifecycle execution service, governance audit tables, module governance, support session governance, ops overview API, Platform Operations Center UI, five platform JSON reports with explicit export authorization, and stricter separation between platform scope and tenant configuration reads.
+- No destructive migrations, no billing provider integrations, no ERP redesign, no external IAM replacement, and no production tenant rewrites were performed as part of this phase.
+
+Platform governance — PARTIAL
+- Implemented: governance audit service + tables, ops overview service/route, platform RBAC codes, export gating for platform.* reports, documentation.
+- Remaining: enterprise-grade MFA enforcement, full “view as” impersonation UX (sessions are audit-first), richer signed-approval workflows.
+
+Multi-tenant governance — PARTIAL
+- Implemented: lifecycle event stream, configuration read façade, module dependency governance, support session isolation metadata.
+- Remaining: deeper data-plane guards review per route family, automated cross-tenant regression suite beyond smoke tests.
+
+Workspace lifecycle — GO (non-destructive scope)
+- Implemented: WorkspaceLifecycleService with activation/suspension/archival paths mapped to existing statuses, finance enablement hook optional on activate, route delegation from tenants lifecycle PATCH.
+- Note: No hard deletes; archival remains status-based (disabled/discontinued semantics per existing model).
+
+Support governance — PARTIAL
+- Implemented: allowlisted scopes, TTL, single active session, break-glass + consent reference fields, audit for start/end, API routes.
+- Remaining: product integration for scoped read APIs honoring session scopes, tenant consent workflow automation.
+
+RBAC — PARTIAL
+- Implemented: new permission codes + matrix updates (server + ops UI config), platform report authorization path, module/support route gates.
+- Remaining: finance/HR/workspace role taxonomy documentation sync with HR payroll phases, granular “read-only operator” expansion if product requires.
+
+Module governance — GO (within current schema)
+- Implemented: ModuleGovernanceService with dependency validation and audit on toggle, API route.
+
+Audit / observability — PARTIAL
+- Implemented: append-only platform_governance_audit_logs, lifecycle events table, ops center alert feed subset, optional HMAC on audit rows.
+- Remaining: centralized metrics exporter / SIEM mapping, long-term retention policies.
+
+Reporting foundation — GO
+- Implemented: five platform.* definitions, JSON generators, integration with report job pipeline and assertExportAuthorization.
+
+Smoke tests — PARTIAL
+- Implemented: focused unit/smoke tests under api-server for governance helpers (see p23a-governance.smoke.test.ts).
+- Note: Full CI run not recorded in this workspace session; run package test scripts locally.
+
+Recommended next phase
+- P23-B — ERP Identity, SSO & Enterprise Access Governance (explicitly NOT started in P23-A).
+
+Confirmations
+- No destructive migration.
+- No billing provider rewrite.
+- No ERP redesign.
+- No external IAM replacement.
+- No production tenant rewrites.
+
+Smoke test results
+- Vitest: `artifacts/api-server/src/lib/platform/__tests__/p23a-governance.smoke.test.ts` — 5 tests passed.
+- Vitest: `artifacts/ops-platform` permission smoke (`platform-permissions-config.test.ts`, `platform-access.test.ts`) — 68 tests passed.
+- Vitest: `artifacts/api-server/src/lib/__tests__/platform-permissions.test.ts` — updated for 59-code catalog; re-run locally after pull.
+
+Remaining blockers
+- MFA / enterprise SSO governance (P23-B).
+- Product-level impersonation token semantics if “view as” becomes a requirement.
+
+GO / PARTIAL / BLOCKED (required summary)
+- platform governance: PARTIAL
+- multi-tenant governance: PARTIAL
+- workspace lifecycle: GO (non-destructive status model only)
+- support governance: PARTIAL
+- ERP platform readiness: PARTIAL

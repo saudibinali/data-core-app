@@ -1,0 +1,273 @@
+راجع:
+- workflow-phase-8a-report.txt
+- workflow-phase-6b-report.txt
+- workflow-phase-7d-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- topology graph model
+- conditionallyExecutedCount
+- terminalPathCount
+- simulation semantics
+- governance analytics gaps
+
+ثم نفّذ فقط:
+P8-B — Dependency Intelligence Foundations
+
+ولا تنفّذ:
+- AI recommendations
+- auto-remediation
+- runtime tracing
+- graph databases
+- distributed graph analytics
+- automatic workflow rewriting
+
+عنوان المهمة:
+WORKFLOW PHASE 8-B — Advanced Workflow Analytics & Dependency Intelligence Foundations
+
+المهمة الحالية:
+تحويل:
+workflow topology graphs
+
+إلى:
+dependency-aware operational intelligence
+
+الهدف:
+تمكين:
+- dependency analysis
+- convergence visibility
+- bottleneck detection
+- execution-pressure estimation
+- operational dependency insights
+
+بطريقة:
+deterministic static dependency engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TOPOLOGY ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- WorkflowTopologyGraph
+- extractWorkflowTopology()
+- computeTopologyAnalytics()
+- assessTopologyRisk()
+
+حدّد:
+- أين dependency semantics غير مرئية
+- أين convergence غير محسوب
+- أين bottlenecks غير واضحة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN DEPENDENCY GRAPH MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+WorkflowDependencyGraph
+
+ليحتوي:
+- upstreamDependencies
+- downstreamDependents
+- convergenceNodes
+- divergenceNodes
+- bottleneckNodes
+- conditionalNodes
+- synchronizationCandidates
+
+مع:
+pure static graph semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — CONVERGENCE DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+detectConvergenceNodes()
+
+التعريف:
+node reachable from ≥2 structurally distinct paths.
+
+المطلوب:
+- deterministic detection
+- no runtime assumptions
+- branch-merge awareness
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — BOTTLENECK DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+detectBottlenecks()
+
+أمثلة:
+- approval-heavy choke points
+- high fan-in nodes
+- delay concentration
+- excessive downstream dependency hubs
+
+المطلوب:
+stable scoring model.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — EXECUTION PRESSURE ESTIMATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ExecutionPressureEstimate
+
+يحتوي:
+- estimatedFanoutPressure
+- approvalWaitPressure
+- delayAccumulationPressure
+- dependencyCriticality
+- operationalComplexityScore
+
+مع:
+deterministic formulas فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — DEPENDENCY RISK ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+DependencyRiskAssessment
+
+يحتوي:
+- low / moderate / high / critical
+- dependencyCyclesRisk
+- bottleneckRisk
+- convergenceComplexity
+- operationalFragilityIndicators
+
+لكن:
+بدون runtime execution state.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+dependency intelligence
+
+داخل:
+- topology APIs
+- governance dashboards
+- workflow analytics
+- simulation insights
+
+لكن:
+بدون mutation لأي workflow.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_dependency_graph_extracted
+
+B)
+workflow_convergence_detected
+
+C)
+workflow_bottleneck_detected
+
+D)
+workflow_execution_pressure_estimated
+
+كلها تحتوي:
+- workflowId
+- workflowVersion
+- workspaceId
+- convergenceCount
+- bottleneckCount
+- complexityScore
+- riskLevel
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Dependency engine MUST:
+- remain READ-ONLY
+- never mutate workflow definitions
+- never invoke runtime execution
+- never trigger scheduler
+- never depend on live execution state
+
+أي:
+pure dependency intelligence layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+convergence node detection
+
+T2:
+divergence node detection
+
+T3:
+bottleneck scoring stability
+
+T4:
+approval bottleneck classification
+
+T5:
+delay accumulation pressure calculation
+
+T6:
+execution pressure deterministic behavior
+
+T7:
+dependency graph serialization stable
+
+T8:
+risk classification deterministic
+
+T9:
+no runtime dependencies required
+
+T10:
+dependency engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- graph visualization UI
+- AI optimization
+- automatic restructuring
+- runtime tracing
+- distributed graph engines
+- workflow mutation systems
+
+خلك:
+minimal deterministic dependency intelligence engine.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-8b-report.txt
+
+ويحتوي:
+- dependency graph architecture
+- convergence detection model
+- bottleneck scoring formulas
+- execution pressure estimation semantics
+- dependency risk assessment model
+- governance integration points
+- observability additions
+- tests results
+- remaining dependency intelligence gaps
+- readiness assessment قبل advanced operational intelligence

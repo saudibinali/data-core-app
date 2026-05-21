@@ -1,0 +1,200 @@
+================================================================================
+PHASE P15-A-FIX — Commercial Model Alignment
+Fix Report
+Date: 2026-05-16
+================================================================================
+
+SCOPE
+─────
+Targeted corrections to P15-A implementation only.
+No role matrix changes. No custom permission system changes.
+(Role matrix / per-user custom permissions intentionally deferred to a later phase.)
+
+SAFETY CONTRACT (unchanged — all true)
+───────────────────────────────────────
+  noElectronicPayment, noStripe, noCheckout, noCardStorage, noAutoCharge,
+  noPaymentGateway, noInvoicePdfGeneration, noTaxCalculation, noZatcaIntegration,
+  noTenantSideVisibility, noEmailSending, noDeleteContact, permissionGated,
+  auditCommercialChanges.
+
+  No payment, Stripe, checkout, card storage, invoice PDF, ZATCA/tax,
+  email sending, or delete-contact logic was added.
+
+────────────────────────────────────────────────────────────────────────────────
+1. CommercialAccountStatus — CONFIRMED CORRECT (no change needed)
+────────────────────────────────────────────────────────────────────────────────
+
+Status enum was already correct in P15-A:
+  draft | active | under_review | inactive
+
+"suspended" was never used as a commercial account status.
+Confirmed in:
+  - DB schema   (lib/db/src/schema/commercial-accounts.ts): default("draft") ✓
+  - Backend     (VALID_STATUSES constant in routes/commercial.ts) ✓
+  - Frontend    (commercial-config.ts: COMMERCIAL_ACCOUNT_STATUS_CONFIG) ✓
+  - Tests       (commercial-config.test.ts) ✓
+
+────────────────────────────────────────────────────────────────────────────────
+2. BillingContactRole — CONFIRMED CORRECT (no change needed)
+────────────────────────────────────────────────────────────────────────────────
+
+Role enum was already correct in P15-A:
+  finance_contact | procurement_contact | contract_owner | executive_sponsor | other
+
+"primary" was never a role code — it was and remains the isPrimary boolean.
+Confirmed in:
+  - DB schema   (contact_role text, default "other") ✓
+  - Backend     (VALID_ROLES constant in routes/commercial.ts) ✓
+  - Frontend    (commercial-config.ts: BILLING_CONTACT_ROLE_CONFIG) ✓
+  - Tests       (commercial-config.test.ts) ✓
+  - New route tests: "primary" as contactRole → falls back to "other" ✓
+
+────────────────────────────────────────────────────────────────────────────────
+3. Audit Event Names — CONFIRMED CORRECT (no change needed)
+────────────────────────────────────────────────────────────────────────────────
+
+Audit event action codes were already using the unified names in P15-A:
+  commercial_account_created
+  commercial_account_updated
+  commercial_billing_contact_created       ← unified name ✓
+  commercial_billing_contact_updated       ← unified name ✓
+  commercial_billing_contact_primary_changed ← unified name ✓
+  commercial_access_denied
+
+Old short names (commercial_contact_created, etc.) were never used.
+Confirmed in:
+  - artifacts/api-server/src/lib/platform-audit-events.ts ✓
+  - artifacts/api-server/src/routes/commercial.ts (audit inserts) ✓
+  - commercial-audit-events.test.ts ✓
+
+────────────────────────────────────────────────────────────────────────────────
+4. Route Improvements — NEW IN THIS FIX
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/routes/commercial.ts
+
+Added:
+
+a) Email format validation (RFC-5322 subset regex):
+   - PUT  /commercial-account: billingEmail, contractOwnerEmail
+   - POST /commercial-contacts: contactEmail (required + validated)
+   - PATCH /commercial-contacts/:id: contactEmail (optional, validated if provided)
+   → Returns 400 with descriptive error if format is invalid.
+
+b) accountManagerUserId / financeOwnerUserId handling:
+   - Both fields now accepted in PUT /commercial-account body
+   - Validated: must be a positive integer, 0 to clear, or omitted to leave unchanged
+   - Non-integer, negative, or float values → 400 "Invalid accountManagerUserId"
+   - Value 0 → null (clears the FK)
+   - Positive integer → stored as-is
+
+c) No new payment, Stripe, or tax logic was introduced.
+
+────────────────────────────────────────────────────────────────────────────────
+5. API Route Tests — NEW IN THIS FIX
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/routes/__tests__/commercial.test.ts
+Setup: supertest + vi.mock (no real DB, no real JWT)
+       Separate mock fn per table (wsFind, acctFind, contactFind, contactMany)
+       vi.resetAllMocks() before each test — no bleed between queued values
+
+Test groups and coverage:
+
+  GET /commercial-account
+    ✓ 403 when permission denied
+    ✓ 400 for non-numeric tenantId
+    ✓ 404 when tenant not found
+    ✓ 200 with commercialAccount when account exists
+    ✓ 200 with commercialAccount:null when no account yet
+    ✓ Response never includes contacts (contacts = separate endpoint)
+
+  PUT /commercial-account — create (201)
+    ✓ 403 when permission denied
+    ✓ 201 on successful create
+    ✓ 201 with default status=draft when status omitted
+
+  PUT /commercial-account — update (200)
+    ✓ 200 on successful update
+    ✓ 400 for invalid status "suspended"
+    ✓ 200 for each of: draft, active, under_review, inactive
+    ✓ 400 for invalid billingEmail format
+    ✓ 200 for valid billingEmail
+    ✓ 200 when billingEmail="" (clears field)
+    ✓ 400 for invalid contractOwnerEmail format
+    ✓ 200 for valid contractOwnerEmail
+    ✓ 400 for non-integer accountManagerUserId ("not-a-number")
+    ✓ 400 for negative accountManagerUserId (-5)
+    ✓ 400 for float accountManagerUserId (1.5)
+    ✓ 200 for valid positive accountManagerUserId (7)
+    ✓ 200 for accountManagerUserId=0 (clear field)
+
+  GET /commercial-contacts
+    ✓ 403 when permission denied (contacts hidden without commercial.contacts.read)
+    ✓ 200 with empty array when no commercial account exists
+    ✓ 200 with contacts list when account exists
+
+  POST /commercial-contacts
+    ✓ 403 when permission denied
+    ✓ 404 when no commercial account exists for tenant
+    ✓ 400 when contactName is missing
+    ✓ 400 when contactEmail is missing
+    ✓ 400 when contactEmail has invalid format
+    ✓ 201 on valid create
+    ✓ 201 with role="other" when unknown role like "primary" is provided
+    ✓ 201 for each valid role: finance_contact, procurement_contact,
+          contract_owner, executive_sponsor, other
+
+  PATCH /commercial-contacts/:contactId
+    ✓ 403 when permission denied
+    ✓ 404 when no commercial account exists
+    ✓ 404 when contact not found
+    ✓ 200 on successful update
+    ✓ 400 for invalid contactEmail format
+    ✓ 200 for valid contactEmail update
+
+  PATCH /commercial-contacts/:contactId/primary
+    ✓ 403 when permission denied
+    ✓ 404 when no commercial account exists
+    ✓ 404 when contact not found
+    ✓ 200 on success
+    ✓ dbUpdate called TWICE (clear-all then set-one)
+    ✓ First update: set({ isPrimary: false }) on all contacts
+    ✓ Second update: set({ isPrimary: true }) on target only
+    ✓ Only one primary guaranteed by the clear-then-set pattern
+
+  Safety
+    ✓ GET /commercial-account response has no Stripe/payment/invoice fields
+    ✓ GET /commercial-contacts response has no Stripe/payment/invoice fields
+
+────────────────────────────────────────────────────────────────────────────────
+6. Test Installation
+────────────────────────────────────────────────────────────────────────────────
+
+Added to artifacts/api-server devDependencies:
+  supertest        — HTTP assertions against Express app
+  @types/supertest — TypeScript types
+
+────────────────────────────────────────────────────────────────────────────────
+7. Final Test Results
+────────────────────────────────────────────────────────────────────────────────
+
+Backend  (api-server):   59 test files  /  3347 tests  — ALL PASSED ✓
+Frontend (ops-platform): 24 test files  /  1209 tests  — ALL PASSED ✓
+
+TypeScript:
+  Backend  typecheck:  PASSED (0 errors) ✓
+  Frontend typecheck:  PASSED (0 new errors; 4 pre-existing governance/workflow
+                        errors unchanged and intentionally ignored) ✓
+
+────────────────────────────────────────────────────────────────────────────────
+8. Deferred (out of scope for this fix)
+────────────────────────────────────────────────────────────────────────────────
+
+  - Role permission matrix redesign → next phase
+  - Custom per-user permission system → next phase
+  - Workspace admin access to commercial data (if ever needed) → next phase
+
+================================================================================
+STATUS: P15-A-FIX COMPLETE
+================================================================================

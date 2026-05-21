@@ -1,0 +1,789 @@
+WORKFLOW PHASE 8-F REPORT
+Proactive Governance Signals & Advisory Intelligence Foundations
+================================================================
+
+Date:        2026-05-15
+Phase:       P8-F (follows P8-A topology, P8-B dependency, P8-C correlation, P8-D forecast, P8-E comparative)
+Status:      COMPLETE — all tests green, typecheck clean
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-F converts the passive operational intelligence layer (P8-A through P8-E)
+into a proactive governance advisory system.
+
+Where P8-E answers "which workflows are riskiest right now?",
+P8-F answers: "what should operators be aware of, and why, right now?"
+
+Core problem being solved: operators cannot act on raw scores and rankings
+alone — they need structured, named advisory signals with deterministic human-
+readable messages, expiry times, and categorized severity levels to make
+informed governance decisions.
+
+P8-F introduces:
+  • 6 named GovernanceSignal codes with deterministic generation rules
+  • 4-level deduplication strategy (within-evaluation + external cooldown)
+  • 5-level GovernanceAdvisoryLevel derived from worst signal severity
+  • Signal TTL per code (expiresAt) for staleness detection
+  • 4 structured observability events per evaluation
+  • GET /api/workflows/governance/signals — production endpoint
+
+Forbidden scope (explicitly excluded):
+  • AI-generated advisory text
+  • Autonomous remediation actions
+  • Automatic execution blocking or gating
+  • Realtime governance streams
+  • Self-healing orchestration
+  • Cross-workspace signal federation
+  • Predictive ML or adaptive thresholds
+
+Implemented scope: minimal deterministic proactive governance advisory layer.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/governance-signals.ts  (~370 lines)
+  Pure deterministic governance advisory engine.
+  No DB, no async, no ML, no side effects.
+  Single public entry point:
+    generateGovernanceSignals(
+      input:   GovernanceSignalInput,
+      context? GovernanceSignalContext,
+    ) → GovernanceSignalResult
+
+artifacts/api-server/src/lib/workflows/__tests__/governance-signals.test.ts
+  T1–T10 test groups, 50 individual assertions, all passing.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/routes/workflows.ts
+  • Added imports: generateGovernanceSignals, WorkflowForecastSummary
+  • Registered GET /workflows/governance/signals BEFORE GET /workflows/executions/*
+    and GET /workflows/:id
+  • Route runs full P8-A → P8-D → P8-E → P8-F pipeline in 2 DB queries (same
+    pattern as /comparative), additionally collecting projectedStormRisk and
+    projectedBacklogPressure from P8-D per workflow for storm risk signals
+
+lib/api-spec/openapi.yaml
+  • New endpoint:    GET /workflows/governance/signals
+  • New schemas (2): GovernanceSignal, WorkflowGovernanceSignalResponse
+
+Auto-generated (by `pnpm --filter @workspace/api-spec run codegen`):
+  lib/api-client-react/src/generated/  — new hook: useGetWorkflowGovernanceSignals
+  lib/api-zod/src/generated/api.ts     — new Zod schemas for GovernanceSignal
+                                         and WorkflowGovernanceSignalResponse
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. GOVERNANCE SIGNAL ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Input: GovernanceSignalInput
+
+  Built by the route handler from P8-E output + optional P8-D forecast summaries:
+
+    rankedWorkflows        — WorkflowComparativeIntelligence[] from P8-E
+                             (already scored, ranked, and priority-classified)
+    hotspotConcentration   — WorkspaceHotspotConcentration from P8-E
+    workspaceId            — workspace primary key
+    totalWorkflows         — total active workflow count
+    workflowForecasts?     — WorkflowForecastSummary[] from P8-D
+                             (projectedStormRisk, projectedBacklogPressure per workflow)
+                             Required to emit GOV-STORM-RISK-GROWTH signals.
+                             If absent, storm signals are skipped gracefully.
+    priorSignalFingerprints? — ReadonlySet<string>
+                             External cooldown window enforcement.
+                             Fingerprints of signals already active in the workspace.
+                             The route handler can populate from a DB table of
+                             recently emitted signals to prevent advisory storms.
+
+4.2 Engine pipeline (pure, deterministic)
+
+  Step 1: Generate candidate signals — 6 generators run in order:
+    generateCriticalSignals()        → GOV-WORKFLOW-CRITICAL per critical workflow
+    generateUrgentSignals()          → GOV-WORKFLOW-URGENT per urgent workflow
+    generateEscalatingSignals()      → GOV-WORKFLOW-ESCALATING per critically_degrading workflow
+    generateFragilitySignals()       → GOV-FRAGILITY-GROWTH per high/critical fragility workflow
+    generateStormRiskSignals()       → GOV-STORM-RISK-GROWTH per workflow with storm risk > 0.15
+    generateConcentrationSignal()    → GOV-HOTSPOT-CONCENTRATION if workspace ratio > 0.25
+
+  Step 2: Deduplicate candidates
+    deduplicateSignals(candidates, priorSignalFingerprints)
+    → { emitted, deduplicatedCount }
+
+  Step 3: Sort emitted signals
+    Primary:   severity DESC (critical first)
+    Secondary: signalCode ASC (stable)
+    Tertiary:  affectedWorkflowId ASC nulls-last (workspace signals last)
+
+  Step 4: Compute advisory level
+    computeAdvisoryLevel(emitted) → GovernanceAdvisoryLevel
+
+  Step 5: Emit 4 structured observability events
+
+4.3 Dependency graph
+
+  governance-signals.ts → comparative-intelligence.ts  (types only: no runtime dep)
+  governance-signals.ts → logger.ts                    (observability events)
+
+  The engine is a pure consumer of P8-E output.
+  It does NOT import topology.ts, dependency.ts, operational-correlation.ts,
+  or trend-forecast.ts — those are invoked by the route handler before the
+  engine is called.  This keeps the engine independently testable with
+  synthetic P8-E fixtures.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. SIGNAL CODE REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GOV-WORKFLOW-CRITICAL
+  Trigger:    operationalPriority = "critical" (P8-E)
+  Severity:   critical
+  Category:   operational_priority
+  Scope:      per-workflow  (affectedWorkflowId = workflowId)
+  TTL:        60 minutes
+  Message:    "Workflow '${name}' is ranked #${rank} in the workspace with a
+               critical risk score of ${score}/100. Immediate operator review
+               is recommended."
+  Indicators: comparativeRiskScore, operationalPriority:critical, workspaceRank,
+              fragilityLevel, trendDirection
+
+GOV-WORKFLOW-URGENT
+  Trigger:    operationalPriority = "urgent" (P8-E)
+  Severity:   high
+  Category:   operational_priority
+  Scope:      per-workflow
+  TTL:        120 minutes
+  Message:    "Workflow '${name}' is ranked #${rank} in the workspace with an
+               urgent risk score of ${score}/100. Operator attention is
+               recommended."
+  Indicators: comparativeRiskScore, operationalPriority:urgent, workspaceRank,
+              fragilityLevel, trendDirection
+
+GOV-WORKFLOW-ESCALATING
+  Trigger:    trendDirection = "critically_degrading" (P8-D via P8-E)
+  Severity:   high
+  Category:   degradation
+  Scope:      per-workflow
+  TTL:        240 minutes
+  Message:    "Workflow '${name}' (rank #${rank}, score ${score}/100) has a
+               critically degrading operational trend. Projected complexity is
+               accelerating beyond stable thresholds."
+  Indicators: trendDirection:critically_degrading, comparativeRiskScore,
+              fragilityLevel, projectedComplexity, confidenceLevel
+  NOTE:       Fires independently from GOV-WORKFLOW-CRITICAL — a critical
+              workflow can emit both: CRITICAL for the current risk level,
+              ESCALATING for the trend acceleration dimension.
+
+GOV-FRAGILITY-GROWTH
+  Trigger:    fragilityLevel ∈ {"high", "critical"} (P8-C via P8-E)
+  Severity:   critical (if fragilityLevel = "critical")
+              high     (if fragilityLevel = "high")
+  Category:   fragility
+  Scope:      per-workflow
+  TTL:        360 minutes
+  Message:    "Workflow '${name}' has reached ${level} operational fragility
+               (runtime-weighted complexity: ${rwc}/100). Structural and
+               runtime pressures are compounding."
+  Indicators: fragilityLevel, runtimeWeightedComplexity, hotspotCount,
+              comparativeRiskScore, trendDirection
+
+GOV-HOTSPOT-CONCENTRATION
+  Trigger:    concentrationRatio > 0.25 (P8-E workspace analytics)
+  Severity:   critical (if concentrationRatio >= 0.50)
+              high     (if concentrationRatio > 0.25 and < 0.50)
+  Category:   hotspot_concentration
+  Scope:      workspace-level  (affectedWorkflowId = null)
+  TTL:        240 minutes
+  Message:    "${dominantCount} of ${total} workflows (${pct}%) are operating
+               at dominant risk levels (score ≥ 70). Workspace operational
+               risk is heavily concentrated."
+  Indicators: concentrationRatio, dominantWorkflowCount, urgentOrCriticalCount,
+              chronicHotspotWorkflowCount, criticallyDegradingCount
+  NOTE:       At most one concentration signal per evaluation regardless of
+              workspace size.
+
+GOV-STORM-RISK-GROWTH
+  Trigger:    projectedStormRisk > 0.15 (P8-D WorkflowOperationalForecast)
+  Severity:   high   (if projectedStormRisk >= 0.30)
+              medium (if projectedStormRisk > 0.15 and < 0.30)
+  Category:   storm_risk
+  Scope:      per-workflow
+  TTL:        480 minutes
+  Message:    "Workflow '${name}' has an elevated projected storm risk of
+               ${pct}% within the 7-day forecast window. Governance alert
+               volume may increase."
+  Indicators: projectedStormRisk, workspaceRank, trendDirection,
+              comparativeRiskScore, projectedBacklogPressure
+  NOTE:       Only emitted when workflowForecasts is provided to the engine.
+              Gracefully absent when the route handler omits forecast data.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ADVISORY LEVEL CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GovernanceAdvisoryLevel is derived from the worst SignalSeverity across all
+emitted signals:
+
+  Severity mapping:
+    critical → critical advisory level
+    high     → urgent advisory level
+    medium   → elevated advisory level
+    low      → advisory advisory level
+    (none)   → informational
+
+Relationship to P8-E OperationalPriority:
+  OperationalPriority (P8-E) is a per-workflow measure derived from
+  comparativeRiskScore (individual workflow risk).
+
+  GovernanceAdvisoryLevel (P8-F) is a workspace measure derived from the
+  worst severity across all active signals (blends workflow + workspace signals).
+
+  A workspace can have advisoryLevel = "critical" from a
+  GOV-HOTSPOT-CONCENTRATION signal even if every individual workflow is
+  only "urgent" — the concentration itself escalates the workspace advisory.
+
+Signal severity weights (internal, for advisory computation):
+  low=1, medium=2, high=3, critical=4
+  Advisory level = max severity weight → enum value
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. DEDUPLICATION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1 Signal fingerprint
+
+  Format:  "${signalCode}:${affectedWorkflowId ?? 'workspace'}:${workspaceId}"
+  Examples:
+    "GOV-WORKFLOW-CRITICAL:42:7"
+    "GOV-HOTSPOT-CONCENTRATION:workspace:7"
+    "GOV-STORM-RISK-GROWTH:15:7"
+
+  The fingerprint uniquely identifies one (concern, workflow, workspace) tuple.
+  Two signals with the same fingerprint represent the same operational concern
+  and should not both be active simultaneously.
+
+7.2 Within-evaluation deduplication (Layer A)
+
+  Purpose: prevent the same fingerprint from appearing twice in one call.
+  Mechanism: `seenThisEval: Set<string>` tracked as candidates are processed.
+  Outcome: each fingerprint appears at most once in the emitted list.
+
+7.3 External cooldown (Layer B)
+
+  Purpose: prevent advisory storms when the same condition persists across
+  multiple /governance/signals evaluations (e.g. every 5 minutes).
+  Mechanism: `priorSignalFingerprints: ReadonlySet<string>` passed by caller.
+  Outcome: any candidate whose fingerprint is in this set is suppressed and
+  counted in deduplicatedCount.
+
+  Caller responsibility:
+    The route handler today does NOT load prior fingerprints from the DB
+    (the P8-F engine is stateless). To fully enable cooldown, a future phase
+    can persist emitted signal fingerprints to a governance_signal_log table
+    and query the last N minutes before calling generateGovernanceSignals.
+    See Section 11 (Known Limitations) for details.
+
+7.4 deduplicatedCount
+
+  Counts all suppressed candidates from both layers A and B.
+  Exposed in the response so operators can see how many signals were
+  prevented from being emitted — high deduplicatedCount with low totalSignals
+  indicates the cooldown mechanism is working as designed.
+
+7.5 Signal storm prevention properties
+
+  • Same (code, workflow) pair never duplicated within one evaluation.
+  • Workspace concentration signal emitted at most once per evaluation.
+  • External cooldown set (B) suppresses signals already in the advisory feed.
+  • Emitted signal count is bounded by: 6 codes × N workflows + 1 workspace signal.
+    For 200 workflows worst-case: 6×200 + 1 = 1201 candidates (before dedup).
+    After dedup, each fingerprint is unique: at most 1201 emitted signals.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. ADVISORY MESSAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All advisory messages are deterministic template strings. There is no AI
+involvement, no freeform text generation, and no LLM calls.
+
+Template variables per signal:
+  ${name}   → workflowName from WorkflowComparativeIntelligence
+  ${rank}   → workspaceRank (1-based integer)
+  ${score}  → comparativeRiskScore (integer 0–100)
+  ${rwc}    → runtimeWeightedComplexity (integer 0–100)
+  ${level}  → fragilityLevel (one of: low, moderate, high, critical)
+  ${pct}    → integer percentage (e.g. Math.round(ratio * 100))
+  ${dominantCount} → WorkspaceHotspotConcentration.dominantWorkflowCount
+  ${total}  → totalWorkflows passed to the engine
+
+All template variables are integers or short strings — no floating-point
+values exposed in messages (they are in supportingIndicators instead).
+
+Advisory messages are in English. Future localization would replace the
+template strings, not the engine logic.
+
+Examples of emitted messages:
+
+  GOV-WORKFLOW-CRITICAL (workflowId=4, rank=1, score=90):
+    "Workflow 'Critical WF' is ranked #1 in the workspace with a critical
+     risk score of 90/100. Immediate operator review is recommended."
+
+  GOV-WORKFLOW-ESCALATING (workflowId=5, rank=2, score=40):
+    "Workflow 'Escalating WF' (rank #2, score 40/100) has a critically
+     degrading operational trend. Projected complexity is accelerating
+     beyond stable thresholds."
+
+  GOV-FRAGILITY-GROWTH (fragilityLevel=critical, rwc=85):
+    "Workflow 'Critical WF' has reached critical operational fragility
+     (runtime-weighted complexity: 85/100). Structural and runtime
+     pressures are compounding."
+
+  GOV-HOTSPOT-CONCENTRATION (3 dominant of 5, ratio=0.60):
+    "3 of 5 workflows (60%) are operating at dominant risk levels
+     (score ≥ 70). Workspace operational risk is heavily concentrated."
+
+  GOV-STORM-RISK-GROWTH (projectedStormRisk=0.40):
+    "Workflow 'Urgent WF' has an elevated projected storm risk of 40%
+     within the 7-day forecast window. Governance alert volume may
+     increase."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. SIGNAL TTL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every signal carries a generatedAt and expiresAt timestamp pair.
+expiresAt = generatedAt + TTL (per signal code).
+
+TTL design rationale:
+
+  GOV-WORKFLOW-CRITICAL     60 min
+    Highest urgency — stale very quickly. Operators should re-evaluate within
+    an hour. If the condition persists, the next evaluation re-emits.
+
+  GOV-WORKFLOW-URGENT       120 min
+    High urgency, slightly more stable than critical.
+
+  GOV-WORKFLOW-ESCALATING   240 min
+    Trend acceleration changes slowly. 4h before re-evaluation.
+
+  GOV-FRAGILITY-GROWTH      360 min
+    Fragility is structural + historical — changes slowly. 6h TTL.
+
+  GOV-HOTSPOT-CONCENTRATION 240 min
+    Workspace distribution changes at moderate pace. 4h TTL.
+
+  GOV-STORM-RISK-GROWTH     480 min
+    Storm risk is a 7-day projection — changes even more slowly. 8h TTL.
+
+TTL ordering (shortest → longest):
+  CRITICAL (60m) < URGENT (120m) < ESCALATING (240m) = CONCENTRATION (240m)
+  < FRAGILITY (360m) < STORM (480m)
+
+Signals with the shortest TTL (< 2h) are reported in the
+governance_signal_expired observability event to aid monitoring of
+high-churn signal codes.
+
+The evaluationTime parameter in GovernanceSignalContext makes expiresAt
+deterministic for testing. In production, evaluationTime defaults to new Date().
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. API ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workflows/governance/signals
+  Auth:        requireAuth + requirePermission("workflow.view")
+  No query params
+
+  Internal execution plan (2 DB queries + CPU):
+    1. Query active workflow definitions (limit 200)           — 1 DB query
+    2. Query governance_snapshot_rollups (last 7 days, hourly) — 1 DB query
+    3. Per workflow (pure CPU, no DB):
+       a. extractWorkflowTopology + computeTopologyAnalytics   (P8-A)
+       b. analyzeDependencies                                   (P8-B)
+       c. computeOperationalCorrelation                        (P8-C)
+       d. computeWorkflowForecast (7-day window)               (P8-D)
+       e. Build WorkflowIntelligenceSnapshot + WorkflowForecastSummary
+    4. computeComparativeIntelligence(snapshots[])             (P8-E)
+    5. generateGovernanceSignals({...})                        (P8-F)
+    6. Return WorkflowGovernanceSignalResponse
+
+  DB query count: always 2, regardless of number of active workflows.
+
+  Response: WorkflowGovernanceSignalResponse
+  {
+    workspaceId:       number,
+    signals:           GovernanceSignal[],    // sorted: critical first
+    advisoryLevel:     GovernanceAdvisoryLevel,
+    totalSignals:      number,
+    deduplicatedCount: number,
+    evaluatedAt:       string,                // ISO 8601
+  }
+
+  GovernanceSignal fields per item:
+    signalCode,           // GOV-* code (enum, 6 values)
+    severity,             // low | medium | high | critical
+    category,             // operational_priority | degradation | fragility |
+                          // hotspot_concentration | storm_risk
+    affectedWorkflowId,   // integer (workflow-scoped) or null (workspace-scoped)
+    workspaceId,
+    advisoryMessage,      // deterministic human-readable template string
+    supportingIndicators, // string[] of "metric:value" pairs
+    generatedAt,          // ISO 8601
+    expiresAt             // ISO 8601 (generatedAt + TTL per signal code)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. OPENAPI SCHEMAS (2 new)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GovernanceSignal
+  9 properties — all required.
+  signalCode:          enum (6 values: GOV-WORKFLOW-CRITICAL, GOV-WORKFLOW-URGENT,
+                       GOV-WORKFLOW-ESCALATING, GOV-HOTSPOT-CONCENTRATION,
+                       GOV-FRAGILITY-GROWTH, GOV-STORM-RISK-GROWTH)
+  severity:            enum (4 values: low, medium, high, critical)
+  category:            enum (5 values: operational_priority, degradation,
+                       fragility, hotspot_concentration, storm_risk)
+  affectedWorkflowId:  integer, nullable (null for workspace-level signals)
+  workspaceId:         integer
+  advisoryMessage:     string (deterministic, template-based)
+  supportingIndicators: string[] ("metric:value" format)
+  generatedAt:         string (date-time)
+  expiresAt:           string (date-time)
+
+WorkflowGovernanceSignalResponse
+  6 properties — all required.
+  workspaceId, signals (GovernanceSignal[]), advisoryLevel (enum, 5 values),
+  totalSignals, deduplicatedCount, evaluatedAt (date-time).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-F consumes all prior phases and provides integration points for the
+governance dashboard, operational consoles, and workflow detail pages.
+
+Upstream dependency:
+  P8-E (comparative) → P8-F (signals)
+  P8-D (forecast)    → P8-F (storm risk only)
+
+Integration use cases:
+
+A) Governance dashboard header — advisory level badge
+   advisoryLevel = "critical" → red banner
+   advisoryLevel = "urgent"   → orange banner
+   advisoryLevel = "elevated" → yellow badge
+   advisoryLevel ∈ {advisory, informational} → green / gray
+
+B) Workflow list view — signal badges per workflow
+   For each workflow, filter signals by affectedWorkflowId = workflowId.
+   Show the highest-severity badge (GOV-WORKFLOW-CRITICAL, GOV-FRAGILITY-GROWTH, etc.)
+
+C) Workflow detail page — advisory panel
+   List all signals for this workflow.
+   Show advisoryMessage, supportingIndicators, expiresAt.
+   Group by category for clarity.
+
+D) Comparative ranking panel — annotate ranked list with GOV-* codes
+   The /governance/signals endpoint is complementary to /comparative.
+   Both share the same P8-A → P8-E pipeline.
+   UI can call both in parallel and join on workflowId.
+
+E) Notification center — governance advisory notifications
+   totalSignals > 0 → mark workspace as having active governance advisories
+   Any critical signal → generate a platform notification (advisory-only, no action)
+
+F) Platform-level health gauge
+   GOV-HOTSPOT-CONCENTRATION with severity=critical → workspace health = critical
+   concentrationRatio > 0.5 threshold drives the workspace health indicator
+
+G) Operator triage queue size
+   totalSignals with severity ∈ {critical, high} → "immediate advisory queue" count
+   deduplicatedCount → "suppressed by cooldown" for signal health monitoring
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. OBSERVABILITY EVENTS (4 per call)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events emitted via logger.info with structured fields.
+Prefix: "[governance] P8-F:"
+
+A) governance_signal_generated  (always)
+   Fields: workspaceId, evaluationId, totalSignals, deduplicatedCount,
+           advisoryLevel, criticalCount, highCount, signalCodes (deduplicated list)
+
+B) governance_signal_escalated  (when severity high or critical detected)
+   Fields: workspaceId, evaluationId, count, advisoryLevel,
+           signals[0..4] { signalCode, severity, affectedWorkflowId, advisoryLevel }
+
+C) governance_signal_deduplicated  (when deduplicatedCount > 0)
+   Fields: workspaceId, evaluationId, deduplicatedCount, totalCandidates, emittedCount
+   Used for monitoring cooldown window effectiveness and signal storm detection.
+
+D) governance_signal_expired  (when any signal has TTL < 2h)
+   Fields: workspaceId, evaluationId, shortLivedCount, signalCodes
+   These are GOV-WORKFLOW-CRITICAL signals (60m TTL).
+   Used for monitoring high-churn signal patterns.
+
+Route-level event (additional, via req.log.info):
+   workflow_governance_signals_requested — workspaceId, totalSignals,
+   deduplicatedCount, advisoryLevel, actorId.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. SAFETY INVARIANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • READ-ONLY: engine never mutates workflow definitions, governance data, or DB
+  • ADVISORY-ONLY: no autonomous actions, no execution blocking, no scheduling
+  • Never mutates input.rankedWorkflows array or workflow objects (T10)
+  • Deterministic: identical inputs + evaluationTime → identical outputs (T10)
+  • JSON-safe: result round-trips losslessly through JSON.stringify (T8)
+  • Graceful degradation: empty input → empty signals, informational level (T9)
+  • Overflow protection: deduplication prevents combinatorial signal storms
+  • Storm prevention: external cooldown via priorSignalFingerprints suppresses
+    advisory churn across repeated evaluations (T4)
+  • Type-safe: TypeScript strict mode, zero errors in full api-server check
+  • No AI involvement: all advisory messages are deterministic templates
+  • No class instances: all output is plain JSON-serializable objects (T10)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-F test groups (24th test file in suite):
+
+  T1   urgent governance signal generation                  (5 assertions)
+       - GOV-WORKFLOW-URGENT emitted for operationalPriority=urgent
+       - advisory level at least urgent
+       - not emitted for informational/watch workflows
+       - message contains workflow name and score
+       - supporting indicators include workspaceRank and operationalPriority
+
+  T2   critical degradation escalation signal               (5 assertions)
+       - GOV-WORKFLOW-ESCALATING emitted for critically_degrading trend
+       - fires independently from GOV-WORKFLOW-CRITICAL (different dimensions)
+       - advisory level at least elevated
+       - not emitted for stable or degrading trends
+       - message describes trend acceleration
+
+  T3   signal deduplication stability                       (4 assertions)
+       - each (signalCode, workflowId) pair emitted at most once per evaluation
+       - two calls with identical inputs yield same deduplication result
+       - concentration signal never duplicated
+       - signals sorted: critical severity first, then high, then by code ASC
+
+  T4   cooldown windows prevent advisory storms              (5 assertions)
+       - prior fingerprints suppress matching signals
+       - suppressed signals counted in deduplicatedCount
+       - non-matching prior fingerprints don't suppress unrelated signals
+       - empty prior set behaves same as no prior set
+       - suppressing all signals yields informational advisory level
+
+  T5   fragility-growth advisory generation                 (5 assertions)
+       - GOV-FRAGILITY-GROWTH emitted for fragilityLevel=high with severity=high
+       - emitted for fragilityLevel=critical with severity=critical
+       - not emitted for low or moderate fragility
+       - message contains fragilityLevel and rWC
+       - supporting indicators include fragilityLevel and hotspotCount
+
+  T6   hotspot concentration advisory generation            (5 assertions)
+       - GOV-HOTSPOT-CONCENTRATION emitted when ratio > 0.25
+       - severity=critical when ratio >= 0.50
+       - not emitted below threshold
+       - message cites dominantCount and totalWorkflows
+       - supporting indicators include concentrationRatio and urgentOrCriticalCount
+
+  T7   signal expiration handled correctly                  (6 assertions)
+       - expiresAt strictly after generatedAt for every signal
+       - GOV-WORKFLOW-CRITICAL expires in exactly 60 minutes
+       - GOV-STORM-RISK-GROWTH expires later than CRITICAL (longer TTL)
+       - generatedAt = evaluationTime for all signals
+       - evaluatedAt = evaluationTime
+       - expiresAt values are valid ISO 8601 strings
+
+  T8   advisory serialization stable                        (4 assertions)
+       - JSON round-trip safe
+       - every signal has all required fields
+       - advisoryLevel always a valid enum value
+       - no undefined values in result
+
+  T9   no live runtime dependency required                  (7 assertions)
+       - runs with empty workflow list without crashing
+       - handles all-zero/all-low-risk input gracefully
+       - handles 20 worst-case workflows without throwing
+       - storm risk signals skipped when workflowForecasts absent
+       - GOV-STORM-RISK-GROWTH emitted when high storm risk forecast provided
+       - GOV-STORM-RISK-GROWTH has severity=high for projectedStormRisk >= 0.30
+       - not emitted for low projected storm risk
+
+  T10  advisory engine remains read-only                    (5 assertions)
+       - input rankedWorkflows array not mutated
+       - input workflow objects not mutated
+       - two calls with same input+time yield identical JSON output
+       - output signal arrays from two calls are independent
+       - result contains only plain data (no functions, class instances, circular refs)
+
+Full test suite result (24 test files):
+  Tests:      1395 passed (1395)
+  Test Files: 24 passed (24)
+  Duration:   ~11.4s
+  TypeScript: clean (zero errors in api-server, typecheck:libs clean)
+
+Cumulative test counts by phase:
+  P8-A (topology)             +45  →  ~1140
+  P8-B (dependency)           +50  →   1186
+  P8-C (correlation)          +52  →   1238
+  P8-D (forecast)             +56  →   1294
+  P8-E (comparative)          +51  →   1345
+  P8-F (governance signals)   +50  →   TOTAL: 1395
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. KNOWN LIMITATIONS & PROACTIVE GOVERNANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) No signal persistence (stateless evaluation)
+   The P8-F engine is stateless — it does not store emitted signals to the DB.
+   Every call to /governance/signals is a fresh evaluation.
+   Consequence: the external cooldown mechanism (Layer B dedup) is only
+   effective if the route handler populates priorSignalFingerprints.
+   Currently the route handler does NOT query a governance_signal_log table
+   (no such table exists yet). Advisory storms are prevented only by
+   within-evaluation dedup (Layer A) for now.
+
+B) No signal history or rank-change detection
+   Signals are not persisted, so "this workflow entered critical priority
+   3 evaluations ago" cannot be expressed.
+   A governance_signal_log table with (fingerprint, generatedAt, expiresAt,
+   workspaceId) would enable cooldown enforcement and signal history queries.
+
+C) No quantitative signal escalation
+   Escalation between signal codes is not supported.
+   If GOV-WORKFLOW-URGENT for workflow 3 persists for 5 evaluations, it does
+   NOT automatically become GOV-WORKFLOW-CRITICAL.
+   Escalation is always based on current operational state, not duration.
+
+D) Signal ordering is by severity DESC — not by workspaceRank
+   Within the same severity level, signals are ordered by signalCode ASC then
+   workflowId ASC. Operators may prefer to see signals from the highest-ranked
+   workflow first. A future enhancement could add workspaceRank as a secondary
+   sort key within same-severity groups.
+
+E) No per-signal acknowledgment
+   There is no mechanism for operators to acknowledge a signal (mark as seen)
+   without suppressing it for all operators.
+   A governance_signal_ack table would enable per-user acknowledgment.
+
+F) GOV-STORM-RISK-GROWTH requires forecast data
+   The route currently provides forecast data (projectedStormRisk from P8-D).
+   If the P8-D forecast pipeline returns zero projectedStormRisk for all
+   workflows (e.g. no historical data), no storm signals are emitted.
+   This is by design — the signal requires P8-D data to be meaningful.
+
+G) priorSignalFingerprints not yet populated by route
+   The route calls generateGovernanceSignals without priorSignalFingerprints.
+   This means Layer B cooldown is currently inactive.
+   Enabling it requires:
+     1. A governance_signal_log table (signalCode, workflowId, workspaceId,
+        generatedAt, expiresAt)
+     2. A route query: SELECT fingerprint FROM governance_signal_log WHERE
+        workspaceId = ? AND expiresAt > NOW()
+     3. Pass the result as priorSignalFingerprints to generateGovernanceSignals
+
+H) Fixed concentration threshold (0.25)
+   The GOV-HOTSPOT-CONCENTRATION threshold (0.25) is hardcoded.
+   Different workspace sizes or risk profiles may warrant different thresholds.
+   A future phase could expose workspace-level threshold configuration.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. READINESS ASSESSMENT BEFORE AUTONOMOUS GOVERNANCE RESEARCH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is now in place (P8-A through P8-F):
+
+  ✅ Structural topology graph, analytics, risk classification (P8-A)
+  ✅ Static dependency + bottleneck + execution pressure (P8-B)
+  ✅ Runtime-weighted complexity, fragility index, hotspot detection (P8-C)
+  ✅ Deterministic trend projection, confidence modeling, trend direction (P8-D)
+  ✅ Cross-workflow ranking, operational priority, hotspot concentration (P8-E)
+  ✅ Proactive governance advisory signals, deduplication, advisory level (P8-F)
+
+The governance advisory foundation is now operational.
+All layers are READ-ONLY, deterministic, and advisory-only.
+No autonomous actions have been introduced at any phase.
+
+What P8-F enables for next phases:
+
+A) Signal persistence layer (prerequisite for full cooldown enforcement)
+   Create governance_signal_log table, persist emitted signals per evaluation,
+   query on the next call to populate priorSignalFingerprints.
+
+B) Operator acknowledgment system
+   Allow operators to acknowledge GOV-* signals with notes.
+   Acknowledged signals are suppressed from the active advisory feed.
+
+C) Signal-driven notification center
+   GOV-WORKFLOW-CRITICAL → platform notification (advisory-only)
+   GOV-HOTSPOT-CONCENTRATION (critical severity) → workspace health alert
+
+D) Governance dashboard panels (frontend integration)
+   The /governance/signals endpoint + /comparative endpoint together drive:
+     - Workspace health banner (advisoryLevel)
+     - Workflow risk heat-map (comparativeRiskScore + operationalPriority)
+     - Active advisory feed (GovernanceSignal[] sorted by severity)
+     - Signal code distribution chart (by category and severity)
+
+E) Governance gate research (future — NOT in scope for P8-F)
+   Before implementing autonomous governance gates, the following questions
+   must be answered through research:
+   - What signal persistence pattern avoids DB write amplification?
+   - What cooldown windows are appropriate per signal code for the workspace's
+     workflow update frequency?
+   - What acknowledgment UX prevents operator alert fatigue?
+   - How should conflicting signals (CRITICAL from score + ESCALATING from trend)
+     be communicated without confusion?
+   These are human-guidance design questions, not engineering problems.
+   The P8-F engine provides the deterministic foundation to explore them safely.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. COMPLETE P8 INTELLIGENCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Endpoint                              Phase  Scope        Description
+  ─────────────────────────────────────────────────────────────────────────────
+  GET /workflows/:id/topology           P8-A   per-workflow  Structural topology graph
+  GET /workflows/:id/dependency         P8-B   per-workflow  Static dependency + pressure
+  GET /workflows/:id/operational        P8-C   per-workflow  Runtime-weighted historical correlation
+  GET /workflows/:id/forecast           P8-D   per-workflow  Deterministic trend projection
+  GET /workflows/comparative            P8-E   workspace     Cross-workflow risk ranking
+  GET /workflows/governance/signals     P8-F   workspace     Proactive advisory signals ← NEW
+
+  Recommended call pattern for full governance console:
+    Parallel:
+      GET /workflows/governance/signals  → advisoryLevel + active signal feed
+      GET /workflows/comparative         → workspace risk ranking + hotspot analytics
+    On demand (after user selects a workflow):
+      GET /workflows/:id/operational     → current rWC + fragility
+      GET /workflows/:id/forecast        → 7-day projection
+      GET /workflows/:id/topology        → structural graph
+      GET /workflows/:id/dependency      → bottleneck analysis

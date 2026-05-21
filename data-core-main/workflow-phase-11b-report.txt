@@ -1,0 +1,655 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 11-B REPORT
+Policy Governance Foundations & Compliance Rule Intelligence Architecture
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date         : 2026-05-15
+Phase        : P11-B
+Status       : COMPLETE
+Tests        : 2159 passed / 2159 total (38 files)
+New tests    : 53 (T1–T10)
+Typecheck    : CLEAN (zero errors)
+DB migration : NONE — pure analytics layer, no new tables
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Convert the immutable audit governance infrastructure from P11-A into an
+enterprise policy-governance intelligence layer.
+
+P11-A gave us the data layer: tamper-detectable SHA-256 audit chains, retention
+classification, forensic timeline reconstruction.
+
+P11-B adds the evaluation layer above it: what the data means from a governance
+policy perspective, which policies are violated, what the evidence is, and how
+severe the overall governance risk is at any point in time — without ever writing
+back to the database or triggering enforcement actions.
+
+Compliance gaps closed by P11-B (from P11-A "Remaining Compliance Gaps"):
+
+  ✓ No policy-governance modeling        → 8 built-in GovernancePolicies
+  ✓ No rule evaluation engine            → evaluateGovernancePolicies() (8 detectors)
+  ✓ No violation intelligence            → GovernanceViolation with evidence linking
+  ✓ No governance policy lifecycle       → GOVERNANCE_POLICIES with status/category/scope
+  ✓ Governance rules not unified         → Single source of truth (GOVERNANCE_POLICIES[])
+  ✓ Compliance expectations implicit     → Explicit policyId/description per rule
+  ✓ Violations not classifiable          → 8 GovernanceViolationTypes, severity-ordered
+
+Safety constraints upheld (all from the task specification):
+  ✓ READ-ONLY: engine never writes to DB
+  ✓ NO ENFORCEMENT: violations are intelligence only, never trigger actions
+  ✓ NO AI: all rule evaluation is deterministic keyword + status checks
+  ✓ NO AUTONOMOUS ACTIONS: no disciplinary enforcement, no auto-remediation
+  ✓ NO EXTERNAL INTEGRATIONS: no regulator sync, no legal automation
+  ✓ FAIL-CLOSED: ambiguous states produce a violation, never silently pass
+  ✓ DETERMINISTIC: same inputs → same violations, same order, every time
+  ✓ APPEND-ONLY: violation history is not modified by the engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. GOVERNANCE POLICY ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  Design Decision: Policies as Code, Not Database
+
+  Governance policies are defined as immutable constants in
+  `governance-policy-intelligence.ts`, NOT stored in a database table.
+
+  Rationale:
+  - Policy definitions are business logic, not user-configurable data
+  - Storing policies in DB creates migration risk (schema changes, data drift)
+  - In-code policies are version-controlled, auditable, and deterministic
+  - Enforcement semantics are deliberately absent from P11-B — a "policy CRUD"
+    surface would imply the ability to add, modify, or delete policies at runtime,
+    which is out of scope until a future phase with proper review workflows
+
+  Future path: if policy CRUD is needed (e.g., workspace-specific policy overrides,
+  policy suspension with audit trail), a `governance_policy_overrides` table could
+  store deltas on top of the built-in constants without replacing them.
+
+2.2  GovernancePolicy Model
+
+  interface GovernancePolicy {
+    policyId:       string;   // "POL-001" through "POL-008"
+    policyName:     string;   // human-readable name
+    policyCategory: PolicyCategory;    // 5 categories (see 2.3)
+    policySeverity: PolicySeverity;    // critical | high | medium | low
+    policyScope:    PolicyScope;       // workspace | platform | entity
+    evaluationMode: "automated" | "manual";
+    policyStatus:   PolicyStatus;      // active | inactive | under_review
+    createdBy:      string;   // "platform" for built-in policies
+    createdAt:      string;   // ISO 8601 — policy effective date
+    lastReviewedAt: string;   // ISO 8601 — last human review timestamp
+    description:    string;   // full policy description with intent + rationale
+    violationType:  GovernanceViolationType;  // the violation type this policy detects
+  }
+
+2.3  PolicyCategory — 5 Domains
+
+  audit_integrity         Policies governing the immutable audit chain itself
+                          (completeness, continuity, tamper detection)
+
+  execution_governance    Policies governing the lifecycle of remediation
+                          execution attempts (confirmation, orchestration linkage)
+
+  retention_compliance    Policies governing correct classification of audit events
+                          by their compliance retention tier
+
+  forensic_coverage       Policies ensuring high-severity events (rollbacks, critical
+                          incidents) are fully represented in the forensic audit log
+
+  operational_continuity  Reserved for future operational health governance policies
+
+2.4  The 8 Built-In Governance Policies
+
+  ┌──────────┬──────────────────────────────────────┬───────────┬──────────────────────────┐
+  │ policyId │ policyName                           │ severity  │ violationType            │
+  ├──────────┼──────────────────────────────────────┼───────────┼──────────────────────────┤
+  │ POL-001  │ Audit Chain Completeness             │ critical  │ missing_audit_chain      │
+  │ POL-002  │ Integrity Chain Continuity           │ high      │ orphaned_integrity_chain │
+  │ POL-003  │ Rollback Confirmation Requirement    │ critical  │ rollback_without_        │
+  │          │                                      │           │   confirmation           │
+  │ POL-004  │ Retention Classification Accuracy    │ medium    │ retention_               │
+  │          │                                      │           │   misclassification      │
+  │ POL-005  │ Integrity Tamper Detection           │ critical  │ governance_policy_breach │
+  │ POL-006  │ Forensic Coverage for Rollback Events│ high      │ compliance_gap_detected  │
+  │ POL-007  │ Unresolved Critical Compliance Events│ high      │ unresolved_critical_     │
+  │          │                                      │           │   incident               │
+  │ POL-008  │ Execution Orchestration Linkage      │ medium    │ execution_without_       │
+  │          │                                      │           │   orchestration          │
+  └──────────┴──────────────────────────────────────┴───────────┴──────────────────────────┘
+
+  All policies:
+    - evaluationMode: "automated"
+    - policyStatus:   "active"
+    - policyScope:    "entity"
+    - createdBy:      "platform"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. POLICY EVALUATION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  evaluateGovernancePolicies(input, now) → GovernanceViolation[]
+
+  Input:
+    executionRecords:  ReadonlyArray<ExecutionRecord & { actionId?: string }>
+    auditEntries:      ReadonlyArray<AuditChainEntry>
+    workspaceIdFilter?: number   // if set, only violations for this workspace returned
+
+  Process:
+    1. Run all 8 detectors in sequence (order does not affect output)
+    2. Concatenate all violations from all detectors
+    3. If workspaceIdFilter is set, remove violations whose workspaceId is neither
+       the filter value nor null (null = platform-level, workspace-agnostic)
+    4. Sort violations by severity ASC (critical=0, high=1, medium=2, low=3),
+       then by detectedAt ASC as a tiebreaker
+    5. Return sorted list
+
+  Pure: no DB, no async, no side effects. Deterministic.
+  The now: Date parameter is used for detectedAt timestamps and evaluatedAt,
+  ensuring reproducible test results with a fixed clock.
+
+3.2  Severity Ordering (Fail-Closed Principle)
+
+  critical > high > medium > low
+
+  The engine never outputs a "pass" or "compliant" status. The absence of
+  violations IS the compliant state. If any violations are detected, the
+  GovernanceSummary.overallRiskLevel reflects the worst severity.
+
+  This is a fail-closed design: it is safer to over-report a medium violation
+  than to silently miss a critical one.
+
+3.3  workspaceIdFilter Scoping
+
+  When workspaceIdFilter is provided:
+  - Violations whose workspaceId === filter: INCLUDED
+  - Violations whose workspaceId === null: INCLUDED (platform-level events)
+  - Violations whose workspaceId !== filter: EXCLUDED
+
+  The per-workspace route (GET /platform/governance/violations/:workspaceId) queries
+  only workspace-specific audit and execution rows, then applies workspaceIdFilter
+  as a secondary guard. The platform route loads all rows then filters in-engine.
+
+3.4  Determinism Guarantee
+
+  For the same set of auditEntries and executionRecords with the same now timestamp:
+  - Same violations are produced
+  - In the same order
+  - With the same violationId (format: "viol:<policyId>:<entityId>-<nowMs>")
+
+  The violationId incorporates now.getTime() to make IDs unique across evaluation
+  runs but stable within a single run.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. VIOLATION INTELLIGENCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  GovernanceViolation Model
+
+  interface GovernanceViolation {
+    violationId:        string;   // "viol:<policyId>:<entityId>-<nowMs>"
+    policyId:           string;   // "POL-001" — "POL-008"
+    workspaceId:        number | null;  // from the violating entity/record
+    entityId:           string;   // executionId, chainId, or entityId of the offender
+    violationType:      GovernanceViolationType;  // one of 8 types
+    severity:           PolicySeverity;           // from the policy definition
+    detectedAt:         string;   // ISO 8601 (= now.toISOString() at evaluation time)
+    evidenceReferences: string[]; // chainIds or executionIds that triggered the violation
+    violationStatus:    ViolationStatus;  // always "open" — status management not in P11-B
+    description:        string;   // human-readable violation description with entity details
+  }
+
+4.2  GovernanceViolationType — 8 Types
+
+  missing_audit_chain
+    A remediation execution attempt has no corresponding audit chain entry.
+    Detected by: detectMissingAuditChains()
+    Policy:      POL-001 (critical)
+    Data used:   Set(auditEntries.entityId) vs executionRecords.executionId
+
+  orphaned_integrity_chain
+    An audit chain entry's previousAuditHash references a non-existent predecessor.
+    Detected by: detectOrphanedIntegrityChains()
+    Policy:      POL-002 (high)
+    Data used:   auditEntries where integrityStatus="orphaned"
+
+  rollback_without_confirmation
+    An execution was rolled_back but confirmedBy is null or empty.
+    Detected by: detectRollbackWithoutConfirmation()
+    Policy:      POL-003 (critical)
+    Data used:   executionRecords where status="rolled_back" AND confirmedBy=null
+
+  retention_misclassification
+    An audit entry's stored retentionClassification ≠ classifyRetention(entityType, eventType).
+    Detected by: detectRetentionMisclassification()
+    Policy:      POL-004 (medium)
+    Data used:   recomputed classification via compliance-audit-integrity.classifyRetention()
+
+  governance_policy_breach
+    An audit chain entry has integrityStatus="compromised" — hash mismatch confirmed.
+    Detected by: detectTamperedIntegrityChains()
+    Policy:      POL-005 (critical)
+    Data used:   auditEntries where integrityStatus="compromised"
+
+  compliance_gap_detected
+    A rolled-back execution has no forensic_critical audit chain entry for its entityId.
+    Detected by: detectForensicCoverageGaps()
+    Policy:      POL-006 (high)
+    Data used:   Cross-check between execution rollbacks and forensic_critical audit entries
+
+  unresolved_critical_incident
+    A forensic_critical audit entry has integrityStatus != "verified".
+    Detected by: detectUnresolvedCriticalIncidents()
+    Policy:      POL-007 (high)
+    Data used:   auditEntries where retentionClassification="forensic_critical"
+                 AND integrityStatus != "verified"
+
+  execution_without_orchestration
+    An execution attempt has an empty or absent actionId (not linked to orchestration).
+    Detected by: detectExecutionOrchestrationGaps()
+    Policy:      POL-008 (medium)
+    Data used:   executionRecords where actionId="" or actionId=null/undefined
+
+4.3  ViolationStatus — Three States
+
+  open          Default state for all violations detected by the engine.
+                P11-B does not implement status management (no PATCH route).
+                All engine-detected violations are "open" by design.
+
+  acknowledged  Reserved for future use: a governance operator has noted the violation
+                but has not yet resolved it. Would require a status-update route
+                with operator attribution and audit logging.
+
+  resolved      Reserved for future use: the underlying condition has been corrected
+                and the violation is closed. Would require human confirmation,
+                not automatic state change.
+
+4.4  Evidence Linking
+
+  resolveEvidenceReferences(violation, auditEntries, executionRecords)
+  → { auditEvidence, executionEvidence, unresolved }
+
+  Takes a violation's evidenceReferences array (strings) and resolves each:
+  - If it matches an auditEntry.chainId → auditEvidence
+  - If it matches an executionRecord.executionId → executionEvidence
+  - If neither → unresolved (ghost reference)
+
+  Pure: no DB. Returns separate arrays for each evidence type.
+  Used by callers to surface full evidence context for a violation.
+  Deterministic: same violation + same input arrays → same evidence resolution.
+
+  NOTE: evidence arrays in violations are shallow copies — mutations by the caller
+  do not affect the engine's internal state. This is verified in T7.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  P11-B Reads From P11-A and P10-E
+
+  compliance_audit_chains table (P11-A)
+  ← All 8 detectors use auditEntries (mapped via rowToAuditChainEntry)
+
+  remediation_execution_attempts table (P10-E)
+  ← Detectors for POL-001, POL-003, POL-006, POL-008 use executionRecords
+     (mapped via rowToExecutionRecord)
+
+  P11-B never reads from any other table. It does not query:
+  - workspaces
+  - users
+  - recovery_orchestration_actions (future: POL-008 could use this for stricter linkage)
+  - governance_policies (there is no such table)
+
+5.2  P11-B Reuses P11-A classifyRetention()
+
+  POL-004 (detectRetentionMisclassification) calls classifyRetention(entityType, eventType)
+  imported from compliance-audit-integrity.ts. This ensures classification semantics are
+  identical between the recording layer (P11-A) and the evaluation layer (P11-B) —
+  there is one single source of truth for retention classification.
+
+5.3  No DB Writes
+
+  evaluateGovernancePolicies() and all individual detectors are pure functions.
+  They do not call db.insert(), db.update(), or db.delete().
+  The 3 API routes in platform.ts call db.select() (read-only) and then call
+  the pure engine functions.
+
+5.4  P10-A → P11-B Complete Data Chain
+
+  P10-A: Live reliability domain evaluation
+  P10-B: Append-only incident + snapshot persistence
+  P10-C: Operator advisory recommendations
+  P10-D: Human-in-the-loop orchestration (recovery_orchestration_actions)
+  P10-E: Explicit-confirmation execution tracking (remediation_execution_attempts)
+  P10-F: Remediation outcome analytics (read-only)
+  P11-A: Immutable audit chain recording + forensic reconstruction
+  P11-B: Policy evaluation over audit chains + execution records (read-only)
+          → detects which policies are violated
+          → classifies violations by severity
+          → links violations to evidence
+          → summarizes governance risk at platform and workspace level
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events are structured log entries via logger.info() or logger.warn().
+No external integrations. No webhook calls. No Slack notifications.
+Observability is strictly internal.
+
+Event payload (all 4 events share the same structure):
+  policyId:           string   — "POL-001" to "POL-008" or "ALL" / "MULTI"
+  workspaceId:        number | null
+  violationType:      string   — violation type or "none"
+  severity:           string   — severity or "low"
+  evidenceReferences: string[] — violationIds or entity IDs
+  action:             string   — what triggered the event
+
+A) governance_policy_evaluated    [INFO]
+   Fired: ALL 3 governance routes on every call.
+   Signals: a governance policy evaluation run completed.
+   In context: "policies listed", "violations evaluated", "workspace governance evaluated".
+
+B) governance_violation_detected  [WARN]
+   Fired: GET /platform/governance/violations (global or workspace) when
+          summary.criticalViolations > 0.
+   Signals: at least one critical-severity governance violation was found.
+   Severity: WARN — requires human review. No automated action.
+
+C) compliance_gap_classified      [WARN]
+   Fired: GET /platform/governance/violations (global) when
+          byViolationType.compliance_gap_detected > 0.
+   Signals: rolled-back executions with no forensic audit coverage were found.
+   Policy context: POL-006 detected one or more rollbacks uncovered in audit.
+
+D) policy_review_required         [WARN]
+   Fired: Any violation evaluation that produces overallRiskLevel "critical" or "high".
+   Signals: the platform risk level is elevated — governance review is warranted.
+   Fired from: both GET /platform/governance/violations and
+               GET /platform/governance/violations/:workspaceId
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 3 routes:
+  - Require Authorization: Bearer <jwt> with role = super_admin
+  - Protected by requireAuth + requireSuperAdmin middleware
+  - Read-only: only SELECT queries against compliance_audit_chains and
+    remediation_execution_attempts tables
+  - Deterministic pagination-free: all data is loaded and evaluated in-memory
+    (see section 9 gap #3 for scaling considerations)
+
+GET /platform/governance/policies
+  Auth:    super_admin
+  Params:  (none)
+  Process: return built-in GOVERNANCE_POLICIES constant — no DB read
+  Returns: { policies: GovernancePolicy[] } — 8 entries always
+  Events:  governance_policy_evaluated (INFO)
+
+GET /platform/governance/violations
+  Auth:    super_admin
+  Params:  workspaceId? (query, optional integer filter)
+  Process: SELECT all from compliance_audit_chains + remediation_execution_attempts
+           → evaluateGovernancePolicies() → buildGovernanceSummary()
+  Returns: { violations: GovernanceViolation[], summary: GovernanceSummary }
+  Order:   violations sorted critical-first, then by detectedAt
+  Events:  governance_policy_evaluated (INFO) always
+           governance_violation_detected (WARN) if criticalViolations > 0
+           compliance_gap_classified (WARN) if compliance_gap_detected > 0
+           policy_review_required (WARN) if overallRiskLevel is critical/high
+
+GET /platform/governance/violations/:workspaceId
+  Auth:    super_admin
+  Params:  workspaceId (path, required integer)
+  Process: SELECT filtered by workspaceId from both tables
+           → evaluateGovernancePolicies({ workspaceIdFilter }) → buildGovernanceSummary()
+  Returns: { workspaceId, violations: GovernanceViolation[], summary: GovernanceSummary }
+  Errors:  400 { error: "INVALID_WORKSPACE_ID" } for non-integer or ≤0 workspaceId
+  Events:  governance_policy_evaluated (INFO) always
+           governance_violation_detected (WARN) if criticalViolations > 0
+           policy_review_required (WARN) if overallRiskLevel is critical/high
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/governance-policy-intelligence.test.ts
+
+T1  (7 assertions)  policy evaluation deterministic
+    ✓ GOVERNANCE_POLICIES contains exactly 8 built-in policies
+    ✓ all built-in policies have unique policyIds
+    ✓ evaluateGovernancePolicies returns empty array for empty inputs
+    ✓ evaluateGovernancePolicies is deterministic — same inputs → same violations
+    ✓ evaluateGovernancePolicies sorts violations critical-first
+    ✓ getPolicyByViolationType returns correct policy for known type
+    ✓ all policies have policyStatus='active'
+
+T2  (5 assertions)  missing audit chains detected correctly
+    ✓ no violation when execution has a matching audit entry
+    ✓ violation detected when execution has no audit entry
+    ✓ violation entityId matches the executionId
+    ✓ detects multiple missing chains in one pass
+    ✓ only unmatched executions produce violations
+
+T3  (5 assertions)  rollback-without-confirmation detected
+    ✓ no violation for completed execution with confirmedBy set
+    ✓ no violation for rolled_back execution WITH confirmedBy
+    ✓ violation detected for rolled_back execution with confirmedBy=null
+    ✓ violation severity is critical (POL-003)
+    ✓ evidenceReferences contains the executionId
+
+T4  (5 assertions)  retention misclassification detection valid
+    ✓ no violation when stored classification matches recomputed
+    ✓ violation detected when stored classification does not match recomputed
+    ✓ violation severity is medium (POL-004)
+    ✓ violation evidenceReferences contains the chainId
+    ✓ no violation for forensic_critical entry classified correctly
+
+T5  (6 assertions)  violation serialization stable
+    ✓ GovernanceViolation is fully JSON-serializable
+    ✓ GovernanceSummary is fully JSON-serializable
+    ✓ GovernancePolicy is fully JSON-serializable
+    ✓ all violations have string violationId
+    ✓ violation violationStatus defaults to 'open'
+    ✓ buildGovernanceSummary overallRiskLevel is 'none' for zero violations
+
+T6  (5 assertions)  append-only violation history preserved
+    ✓ detectMissingAuditChains does not mutate input records
+    ✓ detectRollbackWithoutConfirmation does not mutate input records
+    ✓ detectRetentionMisclassification does not mutate input entries
+    ✓ evaluateGovernancePolicies does not mutate input records
+    ✓ violations array returned by evaluateGovernancePolicies has no function properties
+
+T7  (5 assertions)  evidence linking deterministic
+    ✓ resolveEvidenceReferences finds matching audit entry by chainId
+    ✓ resolveEvidenceReferences finds matching execution by executionId
+    ✓ resolveEvidenceReferences returns unresolved for unknown references
+    ✓ evidenceReferences in violation is a copy, not a reference to input
+    ✓ workspaceIdFilter in evaluateGovernancePolicies scopes violations correctly
+
+T8  (5 assertions)  super-admin enforcement valid
+    ✓ evaluateGovernancePolicies is synchronous
+    ✓ buildGovernanceSummary is synchronous
+    ✓ detectTamperedIntegrityChains flags compromised entries correctly
+    ✓ detectUnresolvedCriticalIncidents flags forensic_critical + non-verified
+    ✓ detectForensicCoverageGaps flags rollback with no forensic_critical audit entry
+
+T9  (5 assertions)  observability events scoped correctly
+    ✓ emitGovernancePolicyEvaluatedEvent does not throw
+    ✓ emitGovernanceViolationDetectedEvent does not throw
+    ✓ emitComplianceGapClassifiedEvent does not throw
+    ✓ emitPolicyReviewRequiredEvent does not throw
+    ✓ all event functions return void
+
+T10 (5 assertions)  policy engine remains read-only
+    ✓ GOVERNANCE_POLICIES cannot be modified (frozen readonly array)
+    ✓ evaluateGovernancePolicies violations have no repair/enforce methods
+    ✓ GovernanceSummary has no execute/trigger methods
+    ✓ detectExecutionOrchestrationGaps flags empty actionId
+    ✓ buildGovernanceSummary overallRiskLevel is 'critical' when any critical violation present
+
+  Total P11-B: 53 assertions (10 test groups)
+  Cumulative:  2159 tests / 2159 passed (38 files)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. REMAINING COMPLIANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P11-B is intentionally minimal — governance policy evaluation foundations only.
+Known remaining gaps (forward-looking, not to be built in P11-B):
+
+  1. VIOLATION STATUS MANAGEMENT ABSENT
+     All violations are always "open". There is no PATCH route for acknowledging
+     or resolving a violation. Status management requires:
+     - A `governance_violation_overrides` table (workspaceId, policyId, entityId,
+       newStatus, operatorId, rationale, updatedAt)
+     - Operator attribution with audit chain entry for each status change
+     - Review workflow before a violation can be set to "resolved"
+
+  2. VIOLATION HISTORY NOT PERSISTED
+     evaluateGovernancePolicies() is stateless — it always evaluates from scratch.
+     Two calls at different times with the same data return identical violations
+     (same violationId since both use the same nowMs). Two calls at different times
+     with the same data but different now parameters produce different violationIds.
+     Gap: persisting detected violations (append-only) would enable:
+       - "first detected" tracking
+       - Duration-in-violation metrics
+       - SLA compliance ("critical violation open > 24h without acknowledgment")
+
+  3. IN-MEMORY EVALUATION DOES NOT SCALE TO LARGE DATASETS
+     The GET /platform/governance/violations route loads ALL rows from
+     compliance_audit_chains and remediation_execution_attempts before evaluating.
+     For platforms with millions of audit entries, this is a scaling problem.
+     Gap: evaluator could be run per-batch, or violation detection could be
+     performed incrementally using a cursor/offset pattern, or async batch jobs
+     could compute violation summaries and cache them in a read model.
+
+  4. POL-008 actionId CHECK IS WEAK
+     detectExecutionOrchestrationGaps() checks whether actionId is empty/null.
+     It does NOT verify that the actionId references an actual existing row in
+     recovery_orchestration_actions. A malformed or spoofed actionId would pass.
+     Gap: a JOIN between remediation_execution_attempts and recovery_orchestration_actions
+     would provide stronger linkage verification.
+
+  5. GOVERNANCE POLICIES NOT EXPOSED IN SUPER ADMIN FRONTEND
+     The 3 API routes are live but there is no frontend view for:
+       - Policy catalog browser (list all 8 policies with description/severity)
+       - Violation dashboard (count by severity, most recent violations)
+       - Workspace violation report (per-tenant governance health)
+     Gap: super admin UI pages for /super-admin/governance/policies and
+     /super-admin/governance/violations would complete the frontend surface.
+
+  6. POLICY EVALUATION NOT TRIGGERED ON WRITE PATHS
+     The governance evaluation is pull-only (invoked via GET routes).
+     When a new execution record is inserted or a new audit chain entry is recorded,
+     no governance evaluation is triggered automatically.
+     Gap: an async post-write hook (event listener or queue consumer) that fires
+     evaluateGovernancePolicies() after writes would enable near-real-time
+     violation detection without polling.
+
+  7. NO POLICY CONFIGURATION OR OVERRIDE MECHANISM
+     All 8 policies are hardcoded. There is no way for a workspace admin to:
+       - Suppress a specific violation for their workspace
+       - Override the severity of a policy
+       - Add a workspace-specific policy note
+     Gap: a `governance_policy_overrides` table with (workspaceId, policyId,
+     suppressedAt, suppressedBy, reason) would allow workspace-scoped policy
+     configuration without modifying the built-in constants.
+
+  8. CROSS-POLICY CORRELATION ABSENT
+     Each violation is evaluated independently. The engine does not detect
+     compound governance failures, such as:
+       "execution X has POL-001 (no audit chain) AND POL-003 (rollback without
+        confirmation) AND POL-006 (no forensic coverage) — this is a triple
+        governance failure requiring immediate escalation."
+     Gap: a correlation layer above evaluateGovernancePolicies() could group
+     violations by entityId and flag entities with multiple concurrent violations
+     as requiring priority review.
+
+  9. NO POLICY-GOVERNANCE FRONTEND INTEGRATION
+     Platform.ts routes are available via the API. However, the ops-platform
+     React frontend has no pages, hooks, or components for governance data.
+     Gap: frontend pages for policy catalog and violation dashboard would
+     complete the operator-facing governance intelligence surface.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. READINESS ASSESSMENT — BEFORE COMPLIANCE WORKFLOW ORCHESTRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The governance policy intelligence layer is operational.
+
+  GOVERNANCE INTELLIGENCE READINESS
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ 8 built-in governance policies — stable, versioned, in-code constants
+  ✓ 8 violation detectors — one per policy, pure, synchronous, deterministic
+  ✓ evaluateGovernancePolicies() — master evaluator, severity-ordered output
+  ✓ GovernanceViolation model — with violationId, evidence, severity, status
+  ✓ GovernanceSummary — bySeverity, byViolationType, overallRiskLevel
+  ✓ resolveEvidenceReferences() — violation → audit/execution evidence linking
+  ✓ 4 structured observability events (INFO + WARN)
+  ✓ 3 governance API routes live (super_admin gated, read-only)
+  ✓ Full typecheck clean (zero TS errors)
+  ✓ 53 new assertions, 2159 total passing (38 files)
+
+  COMPLETE P10-A → P11-B GOVERNANCE STACK
+  ─────────────────────────────────────────────────────────────────────────────
+  P10-A: Live reliability domain evaluation
+  P10-B: Append-only snapshot persistence + incident lifecycle tracking
+  P10-C: Operator advisory recommendations + trend analysis
+  P10-D: Human-in-the-loop orchestration + remediation lifecycle
+  P10-E: Explicit-confirmation execution tracking + rollback recording
+  P10-F: Remediation outcome analytics + effectiveness intelligence (read-only)
+  P11-A: Immutable audit chain integrity + forensic reconstruction + retention
+         classification foundations
+  P11-B: Policy evaluation engine over audit + execution data (read-only)
+         → detects violations of 8 built-in governance policies
+         → classifies by severity (critical/high/medium/low)
+         → links violations to evidence (chainIds, executionIds)
+         → summarizes platform and workspace governance risk
+         → emits structured observability events at appropriate severity
+
+  WHAT IS NOW GOVERNANCE-EVALUATED
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ Executions with no audit chain → POL-001 (critical)
+  ✓ Orphaned chain links → POL-002 (high)
+  ✓ Rollbacks without confirmation → POL-003 (critical)
+  ✓ Retention misclassification → POL-004 (medium)
+  ✓ Tampered / compromised audit entries → POL-005 (critical)
+  ✓ Rollbacks with no forensic audit coverage → POL-006 (high)
+  ✓ Forensic-critical events with non-verified integrity → POL-007 (high)
+  ✓ Executions without orchestration link → POL-008 (medium)
+
+  SAFETY BOUNDARIES (must remain respected in all future phases)
+  ─────────────────────────────────────────────────────────────────────────────
+  ⚠ The governance layer MUST remain READ-ONLY — no DB writes, ever.
+  ⚠ Violation detection MUST NOT trigger automatic policy enforcement.
+  ⚠ Violation status changes (acknowledge, resolve) require human confirmation
+    + operator attribution + audit chain entry for the status change itself.
+  ⚠ If violation persistence is added (gap #2), the persistence layer must use
+    an append-only INSERT pattern — no UPDATE to violation records.
+  ⚠ Cross-policy correlation (gap #8) must remain a reporting/display feature —
+    never a basis for automatic escalation or disciplinary action.
+  ⚠ Policy evaluation errors (panic in a detector) must fail closed —
+    return empty violations for that detector, not crash the entire evaluation.
+  ⚠ The GOVERNANCEPolicies array must remain immutable at runtime — policy
+    modification requires a code change + review, not a runtime API call.
+
+  VERDICT: READY for Compliance Workflow Orchestration
+  Condition: expansion must:
+    (a) build on the GovernanceViolation model — do not define a parallel model
+    (b) treat violation status management as a separate append-only audit layer
+        (each status change = a new audit chain entry, not a violation UPDATE)
+    (c) never auto-enforce based on evaluateGovernancePolicies() output alone —
+        always require explicit human confirmation before any enforcement step
+    (d) if adding new policies, add them as new GOVERNANCE_POLICIES entries
+        with a new policyId, never modify existing policy definitions
+    (e) if adding violation persistence, use INSERT-only with explicit
+        violationId, detected_at, and operator_id columns
+    (f) ensure all new governance routes remain super_admin gated
+    (g) maintain the 38-file / 2159-test baseline as the quality floor
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 11-B REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

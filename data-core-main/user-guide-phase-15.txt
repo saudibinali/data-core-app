@@ -1,0 +1,318 @@
+================================================================================
+USER GUIDE — PHASE 15 (Commercial & Billing)
+دليل المستخدم — الفيز 15 (التجاري والفواتير)
+================================================================================
+Version: Phase 15 (A + B + C + D)
+Language: Arabizi (عربي + English terms)
+Last updated: 2026-05-18
+
+================================================================================
+1) OVERVIEW — نظرة عامة
+================================================================================
+
+Phase 15 يضيف إدارة تجارية enterprise للمنصة + عرض فواتير للعميل (Workspace).
+
+المنصة ما تسوي:
+  - ما فيه دفع إلكتروني (No electronic payment)
+  - ما فيه Stripe / Checkout / بطاقات
+  - ما تولّد فواتير تلقائي (No invoice generation)
+  - ما تحسب ضريبة أو ZATCA
+  - ما ترسل إيميل فواتير من النظام
+
+المنصة تسوي:
+  - تسجّل بيانات تجارية (حساب، عقود، فواتير)
+  - المالية ترفع PDF رسمي للفاتورة
+  - العميل يشوف الفواتير ويحمّل PDF (قراءة فقط)
+
+Phases داخل الفيز 15:
+  P15-A  → Commercial Account + Billing Contacts (Platform فقط)
+  P15-B  → Contract Terms & Renewal (Platform فقط)
+  P15-C  → Invoice Records + PDF Upload (Platform فقط)
+  P15-D  → Tenant Billing Portal (Workspace / العميل)
+  P15-E  → Manual Payment & Collection (قادم — Platform داخلي فقط)
+
+================================================================================
+2) WHO USES WHAT — مين يستخدم إيش
+================================================================================
+
+┌─────────────────────────┬──────────────────────────────────────────────────┐
+│ User Type               │ Phase 15 Access                                  │
+├─────────────────────────┼──────────────────────────────────────────────────┤
+│ Platform Admin          │ P15-A, B, C — Super Admin → Tenants → Commercial │
+│ Finance Admin           │ نفس Platform + رفع PDF فواتير                    │
+│ Sales / Support / Audit │ حسب الصلاحية (read أو update)                    │
+│ Workspace Member        │ P15-D فقط — Billing & Invoices (قراءة + تحميل)   │
+│ Workspace Admin         │ يقدر يعطي صلاحيات الفواتير للأدوار               │
+└─────────────────────────┴──────────────────────────────────────────────────┘
+
+ملاحظة: مستخدم Platform (super_admin) ما يدخل على portal الفواتير حق العميل.
+         لازم login كمستخدم Workspace.
+
+================================================================================
+3) PLATFORM ADMIN — P15-A: COMMERCIAL ACCOUNT
+================================================================================
+المسار: Super Admin → Tenants → اختر Tenant → تبويب Commercial
+
+3.1 Commercial Account — الحساب التجاري
+────────────────────────────────────────
+وش تسوي:
+  - إنشاء / تعديل حساب تجاري واحد لكل Workspace (1:1)
+  - اسم تجاري، اسم كيان قانوني، إيميل/جوال فوترة
+  - Account Manager / Finance Owner (مستخدمين Platform)
+  - ملاحظات داخلية
+
+ما تسوي:
+  - ما فيه حذف حساب من الواجهة (update فقط حسب التصميم)
+  - العميل ما يشوف هذا القسم أبداً
+
+صلاحيات Platform:
+  - commercial.accounts.read   → عرض
+  - commercial.accounts.update → إنشاء / تعديل
+
+3.2 Billing Contacts — جهات اتصال الفوترة
+────────────────────────────────────────
+وش تسوي:
+  - إضافة contacts (اسم، إيميل، جوال، دور)
+  - تحديد Primary contact
+  - تعديل بيانات contact
+
+ما تسوي:
+  - ما فيه Delete لـ contact (تعديل فقط)
+
+صلاحيات Platform:
+  - commercial.contacts.read
+  - commercial.contacts.update
+
+أدوار contact شائعة: billing, finance, procurement, legal, other
+
+================================================================================
+4) PLATFORM ADMIN — P15-B: CONTRACT TERMS
+================================================================================
+نفس المسار: Tenants → Commercial → Contracts
+
+4.1 إنشاء عقد (Contract Term)
+─────────────────────────────
+حقول مهمة:
+  - contractNumber, contractTitle
+  - contractStartDate, contractEndDate, renewalDate
+  - contractValue + currency
+  - billingCycle: monthly | quarterly | semi_annual | annual | custom
+  - paymentTerms: net_30, net_60, ... (شروط دفع — مو دفع إلكتروني!)
+  - renewalType: manual | auto_renewal | non_renewing | under_negotiation
+  - renewalCommitmentStatus: pipeline التجديد
+  - customerDecisionMaker (اسم + إيميل)
+  - internalOwner (مستخدم Platform)
+
+قواعد:
+  - أكثر من عقد لكل tenant مسموح
+  - لما تفعّل عقد active → العقود active الثانية تنأرشف تلقائياً
+  - ما فيه مرفق ملف عقد في P15-B (metadata بس)
+
+4.2 تغيير حالة العقد
+────────────────────
+  - draft → active → expired / terminated / archived
+  - تغيير الحالة يحتاج reason (سبب) — للتدقيق audit
+
+صلاحيات:
+  - commercial.contracts.read
+  - commercial.contracts.update
+
+================================================================================
+5) PLATFORM ADMIN — P15-C: INVOICES & PDF
+================================================================================
+المسار: Tenants → Commercial → Invoices & Documents — الفواتير والمستندات
+
+5.1 سجل الفاتورة (Invoice Record)
+─────────────────────────────────
+المنصة ما تولّد الفاتورة — أنت تدخل metadata والمالية ترفع PDF الرسمي.
+
+حقول:
+  - invoiceNumber (إلزامي، unique per workspace)
+  - invoiceTitle, invoiceDate, dueDate
+  - invoiceAmount, currency
+  - billingPeriodStart, billingPeriodEnd
+  - contractTermId (اختياري — لازم يكون لنفس الـ tenant)
+  - status: draft | issued | shared | paid | overdue | cancelled
+  - externalAccountingReference (اختياري — للربط مع ERP)
+  - notes (داخلية — العميل ما يشوفها في P15-D)
+
+حالات الفاتورة (Status):
+  - draft      → مسودة داخلية، العميل ما يشوفها
+  - issued     → صادرة
+  - shared     → مشاركة / جاهزة للعميل
+  - paid       → مدفوعة (تسجيل يدوي — مو دفع أونلاين)
+  - overdue    → متأخرة
+  - cancelled  → ملغاة (بدل الحذف)
+
+5.2 رفع PDF
+───────────
+  - زر Upload PDF — ملف PDF فقط
+  - حد أقصى 10 MB
+  - رفع جديد يستبدل القديم (replace)
+  - ما فيه Delete للمستند من API
+
+5.3 تحميل PDF (Platform)
+────────────────────────
+  - Download — يحتاج commercial.invoiceDocuments.read
+  - التحميل محمي + يسجل audit
+  - ما فيه رابط public للملف
+
+5.4 تغيير حالة الفاتورة
+───────────────────────
+  - Change Status + reason (سبب 10 أحرف على الأقل)
+  - audit يسجل كل تغيير
+
+صلاحيات Platform (فواتير):
+  - commercial.invoices.read
+  - commercial.invoices.update
+  - commercial.invoiceDocuments.read
+  - commercial.invoiceDocuments.upload
+
+مثال أدوار:
+  - finance_admin     → كل الصلاحيات
+  - sales_admin       → read فقط (بدون upload)
+  - support_admin     → read فواتير بدون PDF
+  - auditor           → read شامل
+
+================================================================================
+6) WORKSPACE / TENANT — P15-D: BILLING PORTAL
+================================================================================
+المسار: Workspace Portal → Billing & Invoices — الفواتير
+URL: /billing/invoices
+
+6.1 مين يشوف الصفحة؟
+────────────────────
+  - لازم module "billing" مفعّل للـ Workspace
+  - لازم صلاحية: tenant.billing.invoices.read
+  - Admin / Manager عندهم bypass (يشوفون بدون تعيين صريح)
+
+6.2 وش يشوف العميل؟
+───────────────────
+  - قائمة فواتير workspace حقه فقط
+  - رقم الفاتورة، عنوان، تاريخ، استحقاق، مبلغ، عملة
+  - فترة الفوترة، الحالة
+  - فلتر: status, from date, to date
+
+ما يشوف:
+  - فواتير draft
+  - ملاحظات داخلية (notes)
+  - بيانات محاسبة داخلية حساسة
+  - فواتير workspace ثاني (عزل كامل)
+
+6.3 تحميل PDF
+─────────────
+  - زر "تحميل PDF" يظهر إذا:
+      • documentAvailable = true
+      • عنده صلاحية tenant.billing.invoiceDocuments.download
+  - بدون صلاحية download: رسالة إن PDF موجود بس ما يقدر يحمّل
+
+6.4 وش ما يقدر العميل يسوي؟
+──────────────────────────
+  ✗ Pay Now / دفع
+  ✗ رفع فاتورة
+  ✗ تعديل أو حذف فاتورة
+  ✗ توليد فاتورة
+  ✗ إرسال إيميل
+
+6.5 إعطاء صلاحيات للفريق
+────────────────────────
+  Settings → Roles → اختر Role → Permissions
+  مجموعة Billing & Invoices:
+    - View workspace invoices        → tenant.billing.invoices.read
+    - Download invoice PDFs          → tenant.billing.invoiceDocuments.download
+
+================================================================================
+7) TYPICAL WORKFLOWS — سيناريوهات عمل
+================================================================================
+
+سيناريو 1: فاتورة شهرية جديدة
+─────────────────────────────
+  1) Finance: Tenants → Commercial → Add Invoice (metadata)
+  2) Status = draft (مراجعة داخلية)
+  3) Upload PDF الرسمي من المالية
+  4) Change Status → issued أو shared
+  5) العميل: Billing & Invoices → يشوف الفاتورة → Download PDF
+
+سيناريو 2: عقد جديد + فواتير مربوطة
+──────────────────────────────────
+  1) Sales/Admin: أنشئ Contract Term (active)
+  2) Finance: أنشئ Invoice واربطها بـ contractTermId
+  3) كرر كل فترة فوترة
+
+سيناريو 3: عميل بدون صلاحية
+───────────────────────────
+  - يشوف Access Denied في /billing/invoices
+  - Admin يضيف tenant.billing.invoices.read للـ role
+
+سيناريو 4: فاتورة ملغاة
+───────────────────────
+  - Platform: status = cancelled + reason
+  - العميل يشوفها في القائمة (حسب الفلتر) بحالة Cancelled
+  - ما فيه hard delete
+
+================================================================================
+8) SECURITY & COMPLIANCE — أمان
+================================================================================
+
+  - كل تحميل PDF عبر API محمي (JWT) — مو رابط عام
+  - Workspace isolation: كل query مربوط بـ workspace الجلسة
+  - Audit logs لعرض الفواتير وتحميل PDF (Platform + Tenant)
+  - Platform notes و storage keys ما تطلع للعميل
+
+================================================================================
+9) FAQ — أسئلة شائعة
+================================================================================
+
+س: ليش ما فيه زر Pay Now؟
+ج: Phase 15 مصمم بدون دفع إلكتروني. التحصيل اليدوي في P15-E (قادم).
+
+س: العميل ما يشوف فاتورة؟
+ج: تأكد status مو draft، و module billing مفعّل، وصلاحية read موجودة.
+
+س: رفع PDF ما يشتغل؟
+ج: لازم PDF فقط، .pdf، أقل من 10MB، وصلاحية commercial.invoiceDocuments.upload.
+
+س: نفس رقم فاتورة مرتين؟
+ج: لا — invoiceNumber unique per workspace.
+
+س: super_admin ما يشوف صفحة الفواتير حق العميل؟
+ج: صح — لازم دخول كمستخدم Workspace عادي.
+
+س: وين أتابع التحصيل والمدفوعات؟
+ج: P15-E (Manual Payment & Collection Tracking) — من جهة Platform فقط.
+
+================================================================================
+10) QUICK REFERENCE — مرجع سريع
+================================================================================
+
+Platform paths:
+  /platform/tenants/:id          → Commercial tab (A, B, C)
+
+Tenant path:
+  /billing/invoices              → P15-D
+
+Platform permissions (أهمها):
+  commercial.accounts.* | commercial.contacts.*
+  commercial.contracts.*
+  commercial.invoices.* | commercial.invoiceDocuments.*
+
+Workspace permissions:
+  tenant.billing.invoices.read
+  tenant.billing.invoiceDocuments.download
+
+Invoice statuses (Platform):
+  draft | issued | shared | paid | overdue | cancelled
+
+Tenant-visible statuses:
+  issued | shared | paid | overdue | cancelled  (بدون draft)
+
+================================================================================
+END OF USER GUIDE — PHASE 15
+نهاية دليل المستخدم — الفيز 15
+================================================================================
+
+For technical details see:
+  workflow-phase-15a-report.txt
+  workflow-phase-15b-report.txt
+  workflow-phase-15c-report.txt
+  workflow-phase-15d-report.txt

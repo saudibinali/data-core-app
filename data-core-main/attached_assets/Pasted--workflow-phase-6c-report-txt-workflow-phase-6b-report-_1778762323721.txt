@@ -1,0 +1,280 @@
+راجع:
+- workflow-phase-6c-report.txt
+- workflow-phase-6b-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- operational query layer
+- governance alerts
+- tenant health model
+- observability events
+- operational blind spots
+
+ثم نفّذ فقط:
+P6-D — Governance APIs Foundations
+
+ولا تنفّذ:
+- frontend dashboards
+- websocket live streaming
+- Prometheus exporters
+- distributed metrics infra
+- alert notification delivery systems
+- multi-region governance aggregation
+
+عنوان المهمة:
+WORKFLOW PHASE 6-D — Governance APIs & Operational Control Surface
+
+المهمة الحالية:
+تحويل:
+internal governance intelligence
+
+إلى:
+safe operational API surface
+
+الهدف:
+تمكين:
+- admin dashboards مستقبلًا
+- operational visibility
+- governance tooling
+- tenant health inspection
+- stuck execution operations
+
+بطريقة:
+read-only governance control layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- governance.ts
+- simulation.ts
+- validation engine
+- observability events
+- operational metrics model
+
+حدّد:
+- ما الذي جاهز للعرض عبر API
+- ما الذي يجب يبقى internal فقط
+- أين توجد payload explosion risks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE API SURFACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+REST governance endpoints.
+
+الحد الأدنى المطلوب:
+
+GET /api/governance/health
+GET /api/governance/metrics
+GET /api/governance/stuck
+GET /api/governance/alerts
+
+مع:
+tenant-scoped semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — HEALTH SUMMARY ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اربط:
+GET /health
+
+بـ:
+evaluateTenantHealth()
+
+المطلوب:
+- severity
+- indicators
+- alerts
+- summary metrics
+- stuck execution count
+- storm severity
+
+لكن:
+لا ترجع raw execution rows.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — METRICS ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اربط:
+GET /metrics
+
+بـ:
+computeOperationalMetrics()
+
+المطلوب:
+stable API response shape:
+- counts
+- averages
+- error rates
+- backlog metrics
+
+مع:
+future dashboard compatibility.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — STUCK EXECUTIONS ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اربط:
+GET /stuck
+
+بـ:
+detectStuckExecutions()
+
+المطلوب:
+- executionId
+- workflowId
+- status
+- stuckReason
+- overdueMs
+- severity
+
+لكن:
+لا ترجع payloads ضخمة
+أو snapshots كاملة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ALERTS ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اربط:
+GET /alerts
+
+بـ:
+GovernanceAlert model.
+
+المطلوب:
+- stable governance codes
+- severity
+- description
+- affected IDs
+- recommended actions
+
+مع:
+pagination-ready shape.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — API SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Governance APIs MUST:
+- remain READ-ONLY
+- never mutate execution state
+- never trigger scheduler
+- never run workflows
+- never acknowledge alerts
+
+أي:
+operational visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_api_health_requested
+
+B)
+governance_api_metrics_requested
+
+C)
+governance_api_stuck_requested
+
+D)
+governance_api_alerts_requested
+
+كلها تحتوي:
+- workspaceId
+- actorId
+- resultCounts
+- responseSeverity
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — RESPONSE HARDENING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف safeguards ضد:
+- huge payloads
+- raw snapshot leakage
+- excessive execution lists
+- recursive serialization
+- unstable response contracts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+health endpoint returns deterministic summary
+
+T2:
+metrics endpoint returns correct aggregates
+
+T3:
+stuck endpoint excludes non-stuck executions
+
+T4:
+alerts endpoint returns stable governance codes
+
+T5:
+all endpoints are read-only
+
+T6:
+large payloads truncated safely
+
+T7:
+response shapes remain stable
+
+T8:
+tenant scoping enforced correctly
+
+T9:
+no DB mutations occur during governance requests
+
+T10:
+structured observability events emitted correctly
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- frontend UI
+- realtime websockets
+- alert acknowledgment workflows
+- governance write APIs
+- admin override systems
+- distributed analytics APIs
+
+خلك:
+safe operational visibility surface.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-6d-report.txt
+
+ويحتوي:
+- governance API architecture
+- endpoint response models
+- safety guarantees
+- observability additions
+- payload hardening strategy
+- tenant isolation behavior
+- tests results
+- remaining operational gaps
+- readiness assessment قبل governance dashboard phase

@@ -1,0 +1,203 @@
+================================================================================
+WORKFLOW PHASE 15-D — Tenant Billing Portal Visibility
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Workspace (tenant) portal — read-only invoice list + protected PDF download.
+Builds on: P15-C commercial_invoices + commercial_invoice_documents (platform upload).
+
+Out of scope (by design): electronic payment, invoice generation, tenant upload/edit/delete,
+email, collection workflow (reserved for P15-E).
+
+================================================================================
+1) TENANT BILLING PERMISSIONS
+================================================================================
+
+Pattern: workspace static permission groups (module.action style with tenant.* prefix
+as specified — not platform commercial.* keys).
+
+Added to artifacts/api-server/src/routes/workspace-roles.ts (billing module group):
+  - tenant.billing.invoices.read
+  - tenant.billing.invoiceDocuments.download
+
+Frontend mirror: artifacts/ops-platform/src/lib/tenant-billing-config.ts
+  TENANT_BILLING_PERMISSIONS
+
+Rules enforced:
+  - Workspace members need explicit permission (admin/manager bypass per requirePermission).
+  - super_admin platform users blocked from tenant billing APIs (no workspace context).
+  - No upload/edit/delete/payment permissions added.
+
+================================================================================
+2) TENANT BILLING APIs
+================================================================================
+
+Router: artifacts/api-server/src/routes/tenant-billing.ts
+Registered in artifacts/api-server/src/routes/index.ts
+
+Endpoints (GET only):
+  GET /api/tenant/billing/invoices
+    - requireAuth + tenant.billing.invoices.read
+    - Filters: status, from, to (invoiceDate)
+    - Returns { invoices: TenantInvoiceSummary[] }
+    - Excludes draft invoices from tenant view
+
+  GET /api/tenant/billing/invoices/:invoiceId
+    - requireAuth + tenant.billing.invoices.read
+    - Returns { invoice: TenantInvoiceSummary }
+    - 404 if not in current workspace or draft
+
+  GET /api/tenant/billing/invoices/:invoiceId/document
+    - requireAuth + tenant.billing.invoiceDocuments.download
+    - Streams PDF via invoice-document-storage (same private store as P15-C)
+    - Content-Disposition attachment; no public URL
+
+Forbidden (no routes): POST, PATCH, DELETE, upload, status update, generate, payment, email.
+
+Workspace isolation:
+  - workspaceId from req.workspaceId (JWT/session DB lookup via requireAuth).
+  - All queries filter eq(commercialInvoicesTable.workspaceId, workspaceId).
+  - No tenantId/workspaceId from request body or query used for authorization.
+
+================================================================================
+3) DATA EXPOSURE RULES
+================================================================================
+
+Tenant API response fields (toTenantInvoiceSummary):
+  - invoiceNumber, invoiceTitle, invoiceDate, dueDate
+  - invoiceAmount, currency
+  - billingPeriodStart, billingPeriodEnd
+  - status
+  - documentAvailable, documentFileName, uploadedAt
+
+Hidden from tenant responses:
+  - notes (internal platform)
+  - createdBy, updatedBy
+  - storageKey, checksum
+  - externalAccountingReference, externalAccountingSystemName
+  - commercialAccountId, contractTermId, workspaceId
+  - audit metadata in response body (audit written to activity_logs only)
+
+Draft invoices: excluded (platform-internal until issued/shared).
+
+================================================================================
+4) FRONTEND BILLING PAGE / TAB
+================================================================================
+
+Page: artifacts/ops-platform/src/pages/billing-invoices.tsx
+Route: /billing/invoices (ProtectedRoute + moduleKey billing)
+
+States:
+  - loading (skeleton)
+  - empty (no invoices)
+  - error (API failure)
+  - access denied (no tenant.billing.invoices.read)
+
+UI:
+  - Invoice list with number, title, dates, amount, currency, status, billing period
+  - Filters: status, from, to
+  - Download PDF button when documentAvailable && tenant.billing.invoiceDocuments.download
+  - Message when PDF exists but download permission missing
+
+Not shown: Pay Now, Stripe, Checkout, Upload/Edit/Delete/Generate/Send Email.
+
+================================================================================
+5) FRONTEND HOOKS
+================================================================================
+
+File: artifacts/ops-platform/src/hooks/use-tenant-billing.ts
+
+  - useTenantBillingInvoices(filters)
+  - useTenantBillingInvoice(invoiceId)
+  - useDownloadTenantInvoiceDocument()
+
+React Query keys:
+  - ["tenant", "billing", "invoices", filters]
+  - ["tenant", "billing", "invoices", invoiceId]
+
+================================================================================
+6) NAVIGATION BEHAVIOR
+================================================================================
+
+Decision: use existing module-driven sidebar (useListModules + permissionKey).
+
+Seed module added in artifacts/api-server/src/seed/modules.ts:
+  - key: billing
+  - name: Billing & Invoices / الفواتير
+  - navigationPath: /billing/invoices
+  - permissionKey: tenant.billing.invoices.read
+  - icon: FileText (added to sidebar ICON_MAP)
+
+Nav item visible only when module enabled for workspace AND user has read permission.
+
+App route: artifacts/ops-platform/src/App.tsx
+  ProtectedRoute requiredPermission="tenant.billing.invoices.read" moduleKey="billing"
+
+================================================================================
+7) AUDIT EVENTS
+================================================================================
+
+Written to activity_logs (metadata JSON, no secrets):
+
+  - tenant_invoice_viewed (list + detail success)
+  - tenant_invoice_document_downloaded (PDF stream authorized)
+  - tenant_invoice_access_denied (invoice not in workspace / not found)
+  - tenant_invoice_document_download_blocked (no document / storage error)
+
+Metadata includes: actorId, workspaceId, invoiceId, invoiceNumber (when known),
+action, result, timestamp.
+
+================================================================================
+8) SAFETY GUARANTEES (TENANT BILLING SAFETY CONTRACT)
+================================================================================
+
+Backend + frontend: tenant-billing-config (TENANT_BILLING_SAFETY_CONTRACT)
+All properties true:
+  tenantReadOnlyBilling, noTenantInvoiceUpload, noTenantInvoiceEdit, noTenantInvoiceDelete,
+  noElectronicPayment, noStripe, noCheckout, noCardStorage, noPaymentGateway,
+  noInvoiceGenerationEngine, noTaxCalculation, noZatcaIntegration, noEmailSending,
+  protectedPdfDownload, noPublicInvoiceUrls, enforceWorkspaceIsolation,
+  auditTenantInvoiceAccess
+
+Platform COMMERCIAL_SAFETY_CONTRACT unchanged (noTenantSideBillingPortal still true for
+platform commercial admin panel — tenant visibility is separate workspace module).
+
+================================================================================
+9) TESTS RESULTS
+================================================================================
+
+New tests:
+  - artifacts/api-server/src/routes/__tests__/tenant-billing.test.ts (13)
+  - artifacts/api-server/src/lib/__tests__/tenant-billing-config.test.ts (4)
+  - artifacts/ops-platform/src/lib/__tests__/tenant-billing-config.test.ts (2)
+  - artifacts/ops-platform/src/lib/__tests__/tenant-billing-page.test.ts (6)
+
+Coverage includes:
+  - Permission keys present
+  - GET list/detail require read; document requires download
+  - Workspace isolation (404 + denied audit)
+  - No sensitive fields in JSON responses
+  - Download audit + blocked audit
+  - No POST/PATCH/DELETE tenant billing routes
+  - Frontend route, module seed, permission gating, forbidden UI terms
+  - Safety contract all true
+
+Full suites (2026-05-18):
+  - api-server: 3509 passed
+  - ops-platform: 1256 passed
+
+================================================================================
+10) LIMITATIONS INTENTIONALLY LEFT FOR P15-E
+================================================================================
+
+Next phase: P15-E — Manual Payment & Collection Tracking
+  - Platform-side collection follow-up only (internal ops).
+  - No electronic payment, no customer payment portal.
+  - Not in P15-D: payment status from tenant view, PO tracking, collection workflow UI,
+    manual payment recording APIs, dunning/reminders, accounting ledger sync.
+
+P15-D delivers visibility + protected PDF download only.
+
+================================================================================
+END OF REPORT
+================================================================================

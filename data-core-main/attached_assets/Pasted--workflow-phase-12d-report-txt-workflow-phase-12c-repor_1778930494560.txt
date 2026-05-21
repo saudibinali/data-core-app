@@ -1,0 +1,345 @@
+راجع:
+- workflow-phase-12d-report.txt
+- workflow-phase-12c-report.txt
+- workflow-phase-12b-report.txt
+- workflow-phase-12a-report.txt
+- workflow-phase-11d-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceAnalytics page
+- useGovernanceAnalytics()
+- useGovernanceTrends()
+- GovernanceAnalyticsProfile
+- PolicyEffectivenessProfile
+- WorkflowEffectivenessScore
+- VIOLATION_SEVERITY_MAP
+- WORKFLOW_STATUS_MAP
+- ESCALATION_LEVEL_MAP
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-E — Governance Analytics UI & Compliance Intelligence Visualization Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- analytics mutation controls
+- auto-escalation
+- policy auto-tuning
+- AI prediction
+- AI summaries
+- export rendering
+- regulator submission
+- legal conclusions
+
+عنوان المهمة:
+WORKFLOW PHASE 12-E — Governance Analytics UI & Compliance Intelligence Visualization Foundations
+
+المهمة الحالية:
+تحويل:
+Governance Analytics placeholder page
+
+إلى:
+frontend read-only governance analytics visualization experience
+
+الهدف:
+تمكين:
+- governance analytics overview
+- violation trend visualization
+- escalation distribution visibility
+- workflow effectiveness visibility
+- policy effectiveness visibility
+- unresolved critical visibility
+- time-range review UX
+
+بطريقة:
+frontend-only read-only analytics visualization layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ANALYTICS PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-analytics.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- existing chart components إن وجدت
+- existing card/table patterns
+- shared governance components
+
+حدّد:
+- كيف تُعرض analytics حاليًا
+- كيف تُعرض trends حاليًا
+- كيف hooks ترجع البيانات
+- هل يوجد chart library مستخدمة مسبقًا
+- كيف تحافظ على read-only notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — ANALYTICS VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+ANALYTICS_METRIC_MAP
+
+يدعم metrics مثل:
+- totalViolations
+- activeWorkflows
+- escalationRate
+- averageResolutionDuration
+- unresolvedCriticalCount
+- policyBreachFrequency
+- workflowStabilityScore
+
+لكل metric:
+- label
+- description
+- unit
+- tier semantics
+- display order
+
+ممنوع:
+- predictive labels
+- legal risk verdicts
+- automatic recommendation wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EFFECTIVENESS SCORE VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+WORKFLOW_EFFECTIVENESS_SCORE_MAP
+
+يدعم:
+- unstable
+- inconsistent
+- acceptable
+- effective
+- highly_effective
+
+مع:
+- label
+- description
+- tier
+- deterministic order
+
+بدون:
+- disciplinary wording
+- legal conclusion wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ANALYTICS DASHBOARD PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceAnalytics
+
+لتحتوي:
+- analytics overview banner
+- metric cards
+- violation trend chart
+- escalation distribution chart
+- workflow effectiveness section
+- policy effectiveness table
+- unresolved critical panel
+- time-range filter:
+  - 7d
+  - 30d
+  - 90d
+  - all
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — CHART COMPONENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ components خفيفة:
+
+A)
+GovernanceViolationTrendChart
+
+يعرض:
+- date bucket
+- total violations
+- severity breakdown إذا متاح
+
+B)
+GovernanceEscalationDistributionChart
+
+يعرض:
+- escalationLevel
+- count
+- percentage
+
+C)
+GovernancePolicyEffectivenessTable
+
+يعرض:
+- policyId
+- totalViolations
+- confirmedViolationRate
+- falsePositiveRate
+- escalationFrequency
+- averageResolutionDuration
+- unresolvedFrequency
+- policyStabilityScore
+
+استخدم chart library الموجودة في المشروع إن وجدت.
+إذا ما فيه:
+استخدم simple CSS bars / tables بدل إدخال dependency جديدة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — TIME RANGE FILTER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- timeRange state
+- options: 7d / 30d / 90d / all
+- client-side filtering إذا البيانات تحتوي dates
+- أو تمرير param للhook إذا موجود جاهز
+
+لكن:
+- لا تضف backend params جديدة
+- لا تضف route جديد
+- لا تكسر query keys
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — UNRESOLVED CRITICAL PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف panel واضح يعرض:
+- unresolvedCriticalCount
+- critical unresolved duration إن وجد
+- related policy/workflow counts إن وجدت
+- guidance text: review only
+
+ممنوع:
+- auto-escalate button
+- resolve button
+- legal warning wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — POLICY EFFECTIVENESS VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض PolicyEffectivenessProfile في table:
+- sort by unresolvedFrequency desc ثم escalationFrequency desc
+- highlight high falsePositiveRate كـ attention
+- highlight high confirmedViolationRate كـ attention
+- لا تقترح auto-tuning
+- لا تضف edit policy controls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Governance Analytics page لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no trend data
+- no policy effectiveness data
+- no unresolved critical data
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Governance Analytics UI MUST:
+- remain frontend-only
+- remain read-only
+- never auto-escalate
+- never auto-tune policies
+- never mutate analytics data
+- never create recommendations
+- never expose legal conclusions
+- never expose data outside super-admin
+
+أي:
+analytics visualization فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+analytics metric map stable
+
+T2:
+workflow effectiveness score map stable
+
+T3:
+analytics page remains super-admin scoped
+
+T4:
+time range options stable
+
+T5:
+chart config deterministic
+
+T6:
+policy effectiveness columns stable
+
+T7:
+no mutation/AI/legal/export labels exist
+
+T8:
+analytics safety contract true
+
+T9:
+hooks remain read-only
+
+T10:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- auto-escalation controls
+- policy tuning controls
+- recommendation engine
+- PDF/XLSX export
+- AI prediction cards
+- regulator submission
+- legal verdicts
+- new chart dependency إذا المشروع ما يستخدمها
+
+خلك:
+minimal frontend governance analytics visualization UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12e-report.txt
+
+ويحتوي:
+- governance analytics UI architecture
+- analytics metric visual model
+- workflow effectiveness score model
+- chart component design
+- time-range behavior
+- unresolved critical panel
+- policy effectiveness visibility
+- read-only safety guarantees
+- tests results
+- remaining analytics UI gaps
+- readiness assessment قبل Topology & Readiness UI

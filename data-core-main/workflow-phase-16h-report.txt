@@ -1,0 +1,247 @@
+================================================================================
+WORKFLOW PHASE 16-H — FINAL SUBSCRIPTION & ENTITLEMENT CONTROL CLOSURE
+================================================================================
+Date: 2026-05-18
+Status: CLOSURE / QA / DOCUMENTATION ONLY (no new features)
+
+================================================================================
+FINAL DECISION
+================================================================================
+
+PHASE 16 — PLATFORM SUBSCRIPTION & ENTITLEMENT CONTROL: COMPLETE
+
+Phase 17 and Platform Users Custom Access Control were NOT started.
+
+================================================================================
+1) END-TO-END REVIEW (P16-A → P16-G)
+================================================================================
+
+P16-A — Subscription State Model — VERIFIED COMPLETE
+  - Table: workspace_subscriptions (schema + apply-p16-tables.cjs)
+  - Statuses: trial, active, grace_period, past_due, suspended, terminated, archived
+  - Transitions: workspace-subscription-transitions.ts
+  - APIs: /platform/tenants/:tenantId/subscription (GET/POST/PUT/PATCH status)
+  - Permissions: platform.subscriptions.read|update|status.change
+  - Audit: workspace_subscription_created|updated|status_changed|status_change_blocked
+  - Safety: SUBSCRIPTION_STATE_SAFETY_CONTRACT
+
+P16-B — Entitlement & Feature Access Model — VERIFIED COMPLETE
+  - Catalog: workspace-entitlement-catalog.ts
+  - Table: workspace_entitlements
+  - Resolver: workspace-entitlement-resolver.ts, canWorkspaceUseFeature
+  - APIs: /platform/tenants/:tenantId/entitlements (+ catalog)
+  - Permissions: platform.entitlements.read|update
+  - Audit: workspace_entitlements_updated|workspace_entitlement_changed|_blocked
+  - Safety: entitlements model config + tests
+
+P16-C — Workspace Limits & Quotas — VERIFIED COMPLETE
+  - Catalog: workspace-quota-catalog.ts
+  - Table: workspace_quota_limits
+  - Usage: workspace-quota-resolver.ts (ok/warning/exceeded/unknown/unlimited)
+  - APIs: /platform/tenants/:tenantId/quotas (+ usage)
+  - Permissions: platform.quotas.read|update
+  - Audit: workspace_quotas_updated|workspace_quota_changed|_blocked
+  - No quota-based write enforcement in Phase 16
+
+P16-D — Grace Period & Suspension Rules — VERIFIED COMPLETE
+  - Table: workspace_subscription_policies
+  - Evaluation: workspace-subscription-policy-evaluator.ts (isAutomaticAllowed: false)
+  - APIs: GET/PUT policy, GET evaluation
+  - Permissions: platform.subscriptionPolicies.read|update|evaluate
+  - Audit: workspace_subscription_policy_updated|evaluated|change_blocked
+
+P16-E — Commercial-to-Workspace Enforcement — VERIFIED COMPLETE
+  - Table: workspace_access_enforcement
+  - Resolver: workspace-access-resolver.ts, assertWorkspaceCanWrite
+  - Evaluator: commercial-workspace-enforcement-evaluator.ts (manualApplyOnly)
+  - APIs: /platform/tenants/:tenantId/workspace-access (+ evaluation)
+  - Middleware: workspaceAccessWriteGuard (exempts /platform/*, /tenant/billing/*)
+  - Tenant: GET /tenant/workspace-access + WorkspaceReadOnlyBanner
+  - allowLogin true by default; no data deletion
+  - Permissions: platform.workspaceAccess.read|update|evaluate
+  - Audit: workspace_access_* , workspace_write_blocked_read_only
+
+P16-F — Subscription Console Integration — VERIFIED COMPLETE
+  - SubscriptionConsole.tsx + summary cards + accordion A–F
+  - Primary tab: Subscription only (dedupe subscription_entitlements)
+  - Navigation: Overview | Lifecycle | Commercial | Subscription | Health | More
+  - Deep link alias: subscription_entitlements → subscription
+  - SUBSCRIPTION_CONSOLE_SAFETY_CONTRACT
+
+P16-G — Tenant Subscription Visibility — VERIFIED COMPLETE
+  - GET /tenant/subscription/summary|entitlements|quotas (no mutations)
+  - Page: /subscription/status (tenant.subscription.read)
+  - Safe exposure filters (no internalNotes/risk/collection/audit)
+  - TENANT_SUBSCRIPTION_VISIBILITY_SAFETY_CONTRACT
+
+================================================================================
+2) INTEGRATION QA SCENARIOS (CODE + TEST VERIFICATION)
+================================================================================
+
+Scenario A — Active subscription
+  PASS (design): normal access flags; evaluator recommends normal for active/trial.
+  Super Admin: SubscriptionConsole + state panel show status.
+  Tenant: summary API + status page; readOnlyMode false when enforcement normal.
+  Writes: allowed per RBAC when enforcementStatus=normal (guard passes).
+
+Scenario B — Past due
+  PASS (design): evaluateSubscriptionPolicy / commercial evaluator recommend read_only;
+  isAutomaticAllowed=false — no auto-apply (tests: commercial-workspace-enforcement-evaluator).
+  Super Admin: manual PATCH workspace-access with reason (platform.workspaceAccess.update).
+  Tenant: readOnlyMode true after apply; banner + subscription page banner.
+  GET: tenant subscription + billing exempt from write guard.
+  POST/PATCH/DELETE: blocked by workspaceAccessWriteGuard (resolver tests + middleware).
+
+Scenario C — Suspended
+  PASS (design): recommendation suspended_view_only; manual apply only.
+  Tenant: allowLogin/allowRead true; create/update/delete false.
+  Billing: /tenant/billing/* exempt — invoice list/PDF per tenant.billing.* permissions.
+  No purge/delete routes in Phase 16.
+
+Scenario D — Terminated
+  PASS (design): recommendation terminated_view_only; manual apply.
+  allowLogin remains true in TERMINATED_VIEW_ONLY_FLAGS (no default full login block).
+  allowAdminAccess false in terminated_view_only preset.
+  No destructive workspace actions in Phase 16 APIs.
+
+Scenario E — Entitlements
+  PASS: platform PUT/PATCH gated; tenant GET only; core module forced enabled in resolver.
+  Tenant page shows enabled/disabled modules without upgrade CTA.
+
+Scenario F — Quotas
+  PASS: platform update gated; tenant GET only; unknown status in resolver/UI ("Not measured yet").
+  No middleware quota blocking.
+
+Scenario G — Navigation
+  PASS: CONSOLE_PRIMARY_TABS order; single Subscription tab; More dropdown tests pass;
+  parseConsoleTabParam(subscription_entitlements)→subscription; content test ids preserved.
+
+================================================================================
+3) DOCUMENTATION
+================================================================================
+
+Created:
+  docs/subscription-entitlement-control.md
+    - Overview, architecture, lifecycle, entitlements, quotas, policy, enforcement
+    - Super Admin console, tenant visibility, permissions, APIs, audit, safety
+    - Known limitations, future phases (explicitly not Phase 17)
+
+================================================================================
+4) SAFETY BOUNDARY VERIFICATION
+================================================================================
+
+Scanned Phase 16 subscription UI components — no Pay Now / Upgrade Plan / Block Login /
+Auto Suspend / Delete Workspace product strings.
+
+tenant-subscription.ts — GET-only (no POST/PATCH/PUT/DELETE).
+
+workspace-subscriptions.ts — Stripe/checkout field names appear only in FORBIDDEN_KEYS
+rejection lists (not product features).
+
+Policy + commercial evaluators — isAutomaticAllowed: false throughout.
+
+All phase safety contracts present and tested (A–G + console + tenant visibility).
+
+No role matrix redesign; no custom permissions added in closure.
+
+================================================================================
+5) PERMISSIONS FINAL COUNT
+================================================================================
+
+Platform permission codes: 45 (unchanged since P16-E; includes 13 P16 platform codes)
+
+Tenant subscription permissions (workspace RBAC, not in platform 45):
+  - tenant.subscription.read
+  - tenant.subscription.entitlements.read
+  - tenant.subscription.quotas.read
+
+Related tenant billing (P15, unchanged):
+  - tenant.billing.invoices.read
+  - tenant.billing.invoiceDocuments.download
+
+================================================================================
+6) API SUMMARY
+================================================================================
+
+Platform (super-admin):
+  /platform/tenants/:id/subscription
+  /platform/tenants/:id/entitlements[/catalog]
+  /platform/tenants/:id/quotas[/catalog|/usage]
+  /platform/tenants/:id/subscription-policy[/evaluation]
+  /platform/tenants/:id/workspace-access[/evaluation]
+
+Tenant (read-only for subscription visibility):
+  GET /tenant/subscription/summary|entitlements|quotas
+  GET /tenant/workspace-access
+  GET /tenant/billing/* (P15-D)
+
+================================================================================
+7) UI SUMMARY
+================================================================================
+
+Super Admin:
+  Tenant Registry → Subscription tab → SubscriptionConsole (cards + accordion)
+
+Tenant workspace:
+  /subscription/status — read-only status, modules, quotas, billing link
+  WorkspaceReadOnlyBanner on AppLayout when read-only
+  Sidebar module: Subscription Status (seed modules.ts)
+
+================================================================================
+8) READ-ONLY ENFORCEMENT SUMMARY
+================================================================================
+
+Manual workspace_access_enforcement row drives flags.
+workspaceAccessWriteGuard blocks operational writes (not GET, not platform, not billing read).
+Evaluation recommends modes; never auto-applies.
+Tenant sees clear read-only messaging without internal collection/risk details.
+
+================================================================================
+9) TESTS RESULTS
+================================================================================
+
+api-server (P16-related suites):
+  workspace-subscriptions, entitlements, quotas, subscription-policies,
+  workspace-access, tenant-subscription, transitions, policy-evaluator,
+  entitlement-resolver, tenant-subscription-visibility,
+  commercial-workspace-enforcement-evaluator
+  → 11 files, 105 tests PASSED
+
+api-server (additional P16-E):
+  workspace-access-resolver, commercial-workspace-enforcement-evaluator
+  → 2 files, 11 tests PASSED (included in resolver batch)
+
+ops-platform:
+  phase-16a through phase-16g, tenant-console-tab-navigation,
+  platform-access, commercial-permissions
+  → 9 files, 126 tests PASSED
+
+P16-H closure:
+  phase-16h-closure.test.ts → PASSED (run with ops-platform vitest)
+
+Combined P16-focused run: 242+ tests PASSED (no failures observed in closure run).
+
+Full monorepo test suite: NOT executed in this closure (time/scope); targeted P16 +
+regression navigation/permission suites executed as specified.
+
+================================================================================
+10) LIMITATIONS (ACCEPTED AT CLOSURE)
+================================================================================
+
+- P13 legacy tenant subscription metadata coexists with P16 workspace_subscriptions
+- Entitlement resolver not wired to every HTTP route as hard gate
+- Quota exceeded does not block writes (by design in Phase 16)
+- Policy/commercial signals require manual workspace access apply
+- Tenant cannot self-manage subscription; no payment or upgrade flows
+
+================================================================================
+11) EXPLICITLY NOT STARTED
+================================================================================
+
+- Phase 17 (any scope)
+- Platform Users Custom Access Control
+- New product modules, payments, email automation, automatic enforcement
+
+================================================================================
+END OF REPORT — PHASE 16 CLOSED
+================================================================================

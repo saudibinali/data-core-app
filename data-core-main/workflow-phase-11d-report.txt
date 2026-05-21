@@ -1,0 +1,832 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 11-D REPORT
+Compliance Operations Analytics & Governance Effectiveness Intelligence Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date         : 2026-05-15
+Phase        : P11-D
+Status       : COMPLETE
+Tests        : 2280 passed / 2280 total (40 files)
+New tests    : 61 assertions (T1–T10)
+Typecheck    : CLEAN (zero errors, EXIT:0)
+DB migration : NONE — pure analytics layer, no new tables
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Convert the human-governed compliance workflows (P11-C) into historical
+governance analytics and compliance effectiveness intelligence.
+
+P11-C gave us: violation lifecycle — who opened it, who escalated it, who
+resolved it, with what classification, at what time.
+
+P11-D adds: the read-only analytics layer above it — what the aggregate of
+that lifecycle data means about governance health, policy quality, escalation
+trends, resolution throughput, and workflow operational effectiveness —
+without ever writing back to the database, auto-escalating, or triggering
+any enforcement action.
+
+Governance gaps closed from P11-C "Remaining Governance Gaps":
+
+  ✓ No SLA/duration tracking         → averageResolutionDurationMs,
+                                        averageAcknowledgmentDurationMs,
+                                        criticalUnresolvedDurationMs
+  ✓ No governance metrics            → GovernanceAnalyticsProfile (13 metrics)
+  ✓ No escalation analytics          → escalationRate, escalationTrend,
+                                        escalationToResolutionRatio,
+                                        escalatedWorkflows count
+  ✓ No workflow effectiveness        → WorkflowEffectivenessScore (5 tiers)
+  ✓ No policy breach analytics       → PolicyEffectivenessProfile per policyId,
+                                        policyBreachFrequency map
+  ✓ No resolution performance view   → throughputRate, dismissalFrequency,
+                                        confirmedViolationRate, falsePositiveRate
+  ✓ No policy stability scoring      → PolicyStabilityScore (4 tiers)
+  ✓ No platform-wide effectiveness   → GovernanceEffectivenessReport with
+                                        global profile + per-policy profiles
+
+Safety constraints upheld:
+  ✓ READ-ONLY: engine never writes to DB, never modifies any workflow
+  ✓ NO AUTO-ESCALATION: analytics functions have no side effects
+  ✓ NO AUTO-RESOLVE: analytics cannot change workflowStatus
+  ✓ NO AI: all classification is deterministic threshold-based scoring
+  ✓ NO ENFORCEMENT: no downstream consequences from any analytics result
+  ✓ NO EXTERNAL INTEGRATIONS: all logic is internal
+  ✓ FAIL-CLOSED: worst condition wins in all classification functions
+  ✓ DETERMINISTIC: same inputs → same outputs, same ordering, every time
+  ✓ IMMUTABLE INPUTS: no analytics function mutates its GovernanceWorkflowAction[] input
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. GOVERNANCE ANALYTICS ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  Design Decision: Pure Computation Over Persisted Workflow Rows
+
+  P11-D introduces NO new database tables. All analytics are computed on-demand
+  by reading governance_workflow_actions rows (P11-C) and passing them to pure
+  functions in the analytics engine.
+
+  This design follows the pattern established in P11-B (policy evaluation with
+  no DB writes) and P10-F (remediation outcome analytics, read-only). The
+  analytics layer is intentionally stateless — every API call recomputes from
+  the current state of the workflow table.
+
+  Trade-offs:
+    PRO:  No denormalized counters to keep in sync. Adding a workflow
+          automatically reflects in the next analytics call. No migration risk.
+    PRO:  Analytics are always consistent with the workflow table state.
+    CON:  For very large workflow tables (millions of rows), on-demand
+          computation may be slow. Addressed in remaining gaps (materialized
+          views / scheduled analytics jobs).
+    CON:  No historical trend data — analytics reflect current state only.
+          Historical trend tracking is listed in remaining gaps.
+
+2.2  Layered Stack — P11-D sits above P11-C
+
+  P11-B evaluateGovernancePolicies()  → detects violations from audit + execution data
+  P11-C initiateGovernanceWorkflow()  → creates/transitions workflow rows in DB
+  P11-D evaluateGovernanceAnalytics() → reads workflow rows, computes analytics
+
+  P11-D has NO dependency on P11-A or P11-B at runtime (only on P11-C output
+  rows and the GOVERNANCE_POLICIES constants from P11-B for policy name lookup).
+  It does NOT re-evaluate policy violations or re-run audit integrity checks.
+
+2.3  File Locations
+
+  artifacts/api-server/src/lib/workflows/
+    compliance-operations-analytics.ts              — P11-D pure engine (new)
+  artifacts/api-server/src/lib/workflows/__tests__/
+    compliance-operations-analytics.test.ts         — 61 assertions (new)
+  artifacts/api-server/src/routes/platform.ts       — 3 new routes added
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. GOVERNANCE ANALYTICS PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  GovernanceAnalyticsProfile Model
+
+  interface GovernanceAnalyticsProfile {
+    profileId:                       string;   // "gap:<workspaceId|"platform">-<nowMs>"
+    workspaceId:                     number | null;  // null = platform-wide
+    totalWorkflows:                  number;
+    activeWorkflows:                 number;   // non-terminal (open, acknowledged,
+                                              //   under_review, escalated)
+    resolvedWorkflows:               number;
+    dismissedWorkflows:              number;
+    escalatedWorkflows:              number;   // status=escalated OR escalatedAt set
+    escalationRate:                  number;   // escalatedWorkflows / total
+    throughputRate:                  number;   // terminal / total
+    dismissalFrequency:              number;   // dismissed / terminal
+    escalationToResolutionRatio:     number;   // escalatedWorkflows / resolvedWorkflows
+    averageResolutionDurationMs:     number | null;  // null if no resolved workflows
+    averageAcknowledgmentDurationMs: number | null;  // null if none acknowledged
+    criticalUnresolvedDurationMs:    number | null;  // avg age of critical open workflows
+    unresolvedCriticalCount:         number;   // critical escalationLevel AND non-terminal
+    policyBreachFrequency:           Record<string, number>;  // policyId → count
+    workflowStabilityScore:          WorkflowEffectivenessScore;
+    evaluatedAt:                     Date;
+  }
+
+3.2  Metric Definitions
+
+  escalationRate
+    = count(workflowStatus="escalated" OR escalatedAt IS NOT NULL) / total
+    Captures workflows that were EVER escalated, including those that were
+    later resolved. A high escalationRate indicates systemic governance pressure.
+
+  throughputRate
+    = count(workflowStatus IN {resolved, dismissed}) / total
+    The fraction of opened workflows that have been closed. A low throughputRate
+    indicates investigation backlog buildup.
+
+  dismissalFrequency
+    = count(dismissed) / count(terminal)
+    Among closed workflows, how many were dismissed (false positive or exception)
+    rather than confirmed. High dismissalFrequency may indicate policy over-triggering.
+
+  escalationToResolutionRatio
+    = escalatedWorkflows / resolvedWorkflows
+    Returns 0 when no resolved workflows exist (prevents division by zero).
+    A ratio > 1 means more workflows are escalating than being resolved — a sign
+    of investigation bottleneck or resource shortage.
+
+  averageResolutionDurationMs
+    Average of (resolvedAt - createdAt) across all resolved/dismissed workflows
+    that have resolvedAt set. Returns null when no terminal workflows exist.
+
+  averageAcknowledgmentDurationMs
+    Average of (acknowledgedAt - createdAt) across workflows with acknowledgedAt.
+    Returns null when no workflows have been acknowledged.
+    A rising acknowledgment duration indicates operator response time degradation.
+
+  criticalUnresolvedDurationMs
+    Average of (now - createdAt) across workflows with:
+      escalationLevel = "critical" AND workflowStatus NOT IN {resolved, dismissed}
+    Returns null when no such workflows exist. Represents how long the highest-risk
+    violations have been open without resolution.
+
+  unresolvedCriticalCount
+    Count of workflows with escalationLevel="critical" AND non-terminal status.
+    This is the primary governance health indicator. Used to trigger the
+    critical_unresolved_threshold_detected event when >= 3.
+
+  policyBreachFrequency
+    Map of policyId → workflow count (all statuses). Ordered DESC by count,
+    ties broken by policyId ASC. Reveals which policies are triggered most often.
+
+3.3  profileId Format
+
+  "gap:<workspaceId|"platform">-<evaluatedAt.getTime()>"
+
+  Examples:
+    "gap:platform-1747310400000"   — platform-wide profile evaluated at a specific time
+    "gap:42-1747310400000"         — workspace 42 scoped profile
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. WORKFLOW EFFECTIVENESS SCORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  WorkflowEffectivenessScore — 5 Tiers
+
+  type WorkflowEffectivenessScore =
+    | "unstable"
+    | "inconsistent"
+    | "acceptable"
+    | "effective"
+    | "highly_effective";
+
+4.2  Scoring Algorithm — Fail-Closed (worst condition wins)
+
+  function classifyWorkflowEffectiveness(
+    escalationRate:           number,
+    throughputRate:           number,
+    unresolvedCriticalCount:  number,
+    avgResolutionDurationMs:  number | null,
+  ): WorkflowEffectivenessScore
+
+  Evaluation order (first match wins):
+
+  ┌──────────────────┬───────────────────────────────────────────────────────┐
+  │ Score            │ Condition                                             │
+  ├──────────────────┼───────────────────────────────────────────────────────┤
+  │ unstable         │ escalationRate >= 0.70                                │
+  │                  │ OR unresolvedCriticalCount >= 5                       │
+  │ inconsistent     │ escalationRate >= 0.40                                │
+  │                  │ OR unresolvedCriticalCount >= 2                       │
+  │                  │ OR avgResolutionDurationMs > 14 days                  │
+  │ highly_effective │ throughputRate >= 0.90                                │
+  │                  │ AND escalationRate < 0.15                             │
+  │                  │ AND unresolvedCriticalCount == 0                      │
+  │ effective        │ throughputRate >= 0.70                                │
+  │                  │ AND escalationRate < 0.30                             │
+  │                  │ AND unresolvedCriticalCount == 0                      │
+  │ acceptable       │ default (none of the above)                           │
+  └──────────────────┴───────────────────────────────────────────────────────┘
+
+4.3  Score Interpretation
+
+  unstable         Governance operations are under severe stress.
+                   Most violations are escalating without resolution.
+                   Immediate operator attention required.
+
+  inconsistent     Governance is functioning but with notable issues:
+                   high escalation pressure, open critical violations,
+                   or slow resolution times.
+
+  acceptable       Normal governance operations. Some room for improvement
+                   but no systemic failures.
+
+  effective        High throughput, low escalation pressure, no critical
+                   unresolved violations.
+
+  highly_effective Excellent governance health across all metrics.
+                   Violations are resolved quickly, escalations are rare.
+
+4.4  Safety Guarantee
+
+  classifyWorkflowEffectiveness() is synchronous, pure, and has no side effects.
+  The score NEVER triggers any automatic action. It is informational only —
+  displayed in the API response for human review.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. POLICY EFFECTIVENESS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  PolicyEffectivenessProfile Model
+
+  interface PolicyEffectivenessProfile {
+    policyId:                    string;   // "POL-001" through "POL-008"
+    policyName:                  string;   // from GOVERNANCE_POLICIES lookup
+    totalViolations:             number;   // workflow count for this policyId
+    confirmedViolationCount:     number;
+    confirmedViolationRate:      number;   // confirmedCount / total
+    falsePositiveCount:          number;
+    falsePositiveRate:           number;   // falsePositiveCount / total
+    operationalExceptionCount:   number;
+    escalationCount:             number;
+    escalationFrequency:         number;   // escalationCount / total
+    averageResolutionDurationMs: number | null;
+    unresolvedCount:             number;   // non-terminal for this policy
+    unresolvedFrequency:         number;   // unresolvedCount / total
+    policyStabilityScore:        PolicyStabilityScore;
+    evaluatedAt:                 Date;
+  }
+
+5.2  PolicyStabilityScore — 4 Tiers
+
+  type PolicyStabilityScore =
+    | "unstable"   // falsePositiveRate >= 0.50 OR unresolvedFrequency >= 0.50
+    | "noisy"      // falsePositiveRate >= 0.30 OR unresolvedFrequency >= 0.30
+    | "stable"     // default
+    | "reliable";  // confirmedViolationRate >= 0.80 AND falsePositiveRate < 0.10
+                   //   AND unresolvedFrequency < 0.20
+
+  Scoring algorithm — fail-closed (worst condition wins):
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │ Score        │ Condition                                                │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ unstable     │ falsePositiveRate >= 0.50 OR unresolvedFrequency >= 0.50 │
+  │ noisy        │ falsePositiveRate >= 0.30 OR unresolvedFrequency >= 0.30 │
+  │ reliable     │ confirmedViolationRate >= 0.80                           │
+  │              │ AND falsePositiveRate < 0.10                             │
+  │              │ AND unresolvedFrequency < 0.20                           │
+  │ stable       │ default                                                  │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+5.3  Score Interpretation
+
+  unstable   The policy triggers excessively or investigations are abandoned.
+             Half or more of detections are false positives, or half remain
+             permanently unresolved. Policy definition likely needs revision.
+
+  noisy      Significant false positive or unresolved rates. The policy works
+             but generates more noise than signal. Threshold calibration recommended.
+
+  stable     The policy functions within acceptable parameters.
+
+  reliable   The policy is a strong signal: most detections are confirmed
+             violations, false positives are rare, resolutions are timely.
+
+5.4  policyName Lookup
+
+  policyName is populated from the GOVERNANCE_POLICIES constant array (P11-B).
+  For unknown policyIds (not in POL-001 through POL-008), the policyId itself
+  is used as the name (fallback). This prevents crashes if custom violation
+  policyIds appear in workflow rows.
+
+5.5  evaluateAllPolicyEffectiveness() Coverage
+
+  Returns profiles for ALL policyIds present in:
+    - Any workflow row (from governance_workflow_actions)
+    - PLUS all 8 built-in GOVERNANCE_POLICIES constants (POL-001 through POL-008)
+
+  This means all 8 built-in policies always appear in the report, even if they
+  have zero workflows. Zero-workflow profiles have all rates = 0 and
+  policyStabilityScore = "stable" (no data → no signal of instability).
+
+  Ordering: DESC by totalViolations, ties broken by policyId ASC. This surfaces
+  the most-triggered policies at the top of the list.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ESCALATION TREND CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  EscalationTrend — 4 States
+
+  type EscalationTrend = "improving" | "stable" | "worsening" | "critical";
+
+6.2  Scoring Algorithm — Fail-Closed
+
+  function classifyEscalationTrend(
+    escalationRate:          number,
+    unresolvedCriticalCount: number,
+  ): EscalationTrend
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │ Trend        │ Condition                                                │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ critical     │ unresolvedCriticalCount >= 3                             │
+  │ worsening    │ escalationRate >= 0.50 OR unresolvedCriticalCount >= 1   │
+  │ improving    │ escalationRate < 0.10 AND unresolvedCriticalCount == 0   │
+  │ stable       │ default                                                  │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+6.3  Trend Interpretation
+
+  critical    Three or more critical violations are open simultaneously.
+              Maximum governance attention required.
+
+  worsening   Escalation pressure is growing or at least one critical violation
+              is unresolved. Operator prioritization needed.
+
+  improving   Escalation rate is very low and no critical violations are open.
+              Governance operations are trending positively.
+
+  stable      Neither improving nor worsening by measurable indicators.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. GOVERNANCE EFFECTIVENESS REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  GovernanceEffectivenessReport Model
+
+  interface GovernanceEffectivenessReport {
+    reportId:           string;   // "geff:<evaluatedAt.getTime()>"
+    totalWorkflows:     number;
+    globalProfile:      GovernanceAnalyticsProfile;   // all workspaces, workspaceId=null
+    perPolicyProfiles:  PolicyEffectivenessProfile[]; // one per policyId in DB + built-ins
+    escalationTrend:    EscalationTrend;
+    evaluatedAt:        Date;
+  }
+
+7.2  buildGovernanceEffectivenessReport()
+
+  Builds the full platform-wide report in one call:
+    1. evaluateGovernanceAnalytics(workflows, null, now) → globalProfile
+    2. evaluateAllPolicyEffectiveness(workflows, now)    → perPolicyProfiles
+    3. classifyEscalationTrend(escalationRate, unresolvedCriticalCount) → escalationTrend
+
+  All three sub-computations use the same `now` reference for determinism.
+  The same workflow slice is passed to all three — no re-fetching, no divergence.
+
+7.3  Determinism Guarantee
+
+  buildGovernanceEffectivenessReport(workflows, now) called twice with identical
+  inputs produces byte-identical JSON output. Verified in T9-4 (evaluatedAt) and
+  T6-4 (per-policy determinism).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. ANALYTICS PRIMITIVES REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All primitives are pure functions. All return 0 or null for empty inputs.
+None write to DB, emit events, or have side effects.
+
+  computeAverageResolutionDuration(workflows)
+    → avg(resolvedAt - createdAt) for resolved/dismissed workflows with resolvedAt set
+    → null if no such workflows
+
+  computeAverageAcknowledgmentDuration(workflows)
+    → avg(acknowledgedAt - createdAt) for workflows with acknowledgedAt set
+    → null if no such workflows
+
+  computeCriticalUnresolvedDuration(workflows, now)
+    → avg(now - createdAt) for workflows with escalationLevel="critical" AND non-terminal
+    → null if no such workflows
+
+  computeEscalationRate(workflows)
+    → count(escalated) / total where "escalated" = status=escalated OR escalatedAt set
+    → 0 if total = 0
+
+  computeThroughputRate(workflows)
+    → count(terminal) / total where terminal = {resolved, dismissed}
+    → 0 if total = 0
+
+  computeDismissalFrequency(workflows)
+    → count(dismissed) / count(terminal)
+    → 0 if no terminal workflows
+
+  computeEscalationToResolutionRatio(workflows)
+    → count(escalated) / count(resolved)
+    → 0 if resolved = 0
+
+  detectRecurringPolicyBreaches(workflows)
+    → Record<policyId, count> ordered DESC by count, ASC by policyId on ties
+    → {} if no workflows
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. GOVERNANCE OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events are structured log entries (pino). No external webhooks or integrations.
+All emit functions use optional chaining (logger?.info/warn) for safe operation
+in test environments and during server startup before logger is fully initialized.
+
+Event payload (all 4 events share GovernanceAnalyticsEventPayload):
+  workspaceId:             number | null
+  policyId:                string
+  effectivenessScore:      WorkflowEffectivenessScore | PolicyStabilityScore
+  escalationRate:          number
+  unresolvedCriticalCount: number
+  action:                  string
+
+A) governance_analytics_evaluated    [INFO]
+   Fired: GET /platform/governance/analytics on every successful response.
+   Signals: a governance analytics profile was computed for inspection.
+   action: "governance_analytics_evaluated"
+
+B) policy_effectiveness_scored       [INFO]
+   Fired: GET /platform/governance/policy-effectiveness — once per policy profile
+          returned in the response.
+   Signals: a policy's effectiveness profile was evaluated.
+   action: "policy_effectiveness_scored"
+
+C) workflow_stability_classified     [INFO]
+   Fired: GET /platform/governance/analytics alongside A).
+   Signals: the overall workflow stability score has been computed.
+   action: "workflow_stability_classified"
+
+D) critical_unresolved_threshold_detected [WARN]
+   Fired: GET /platform/governance/analytics ONLY when
+          profile.unresolvedCriticalCount >= 3.
+   Signals: three or more critical violations are open simultaneously.
+   This is the ONLY event with WARN severity. It does NOT trigger any automatic
+   action — it is a log signal for monitoring infrastructure.
+   action: "critical_unresolved_threshold_detected"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 3 routes:
+  - Require Authorization: Bearer <jwt> with role = super_admin
+  - Protected by requireAuth + requireSuperAdmin middleware
+  - Read-only: SELECT only, no INSERT/UPDATE/DELETE
+  - Forensic-safe serialization (Date objects as ISO strings in JSON response)
+
+GET /platform/governance/analytics
+  Auth:    super_admin
+  Params:  workspaceId? (integer, filters rows by workspaceId),
+           limit (1–1000, default 500), offset (default 0)
+  Process: SELECT all rows from governance_workflow_actions → optional filter
+           by workspaceId → evaluateGovernanceAnalytics() → emit A + C events
+           → emit D event if unresolvedCriticalCount >= 3
+  Returns: { profile: GovernanceAnalyticsProfile, total: number, filtered: number }
+  Errors:  400 { error: "workspaceId must be a positive integer" }
+
+GET /platform/governance/effectiveness
+  Auth:    super_admin
+  Params:  (none)
+  Process: SELECT ALL rows → buildGovernanceEffectivenessReport() → emit A event
+  Returns: { report: GovernanceEffectivenessReport }
+  Note:    This is the heaviest route — it loads all workflow rows and computes
+           profiles for all 8+ policies. Suitable for dashboard loading.
+
+GET /platform/governance/policy-effectiveness
+  Auth:    super_admin
+  Params:  policyId? (string, filters to a single policy profile)
+  Process: SELECT ALL rows → evaluatePolicyEffectiveness() or
+           evaluateAllPolicyEffectiveness() → emit B event per profile returned
+  Returns: { profiles: PolicyEffectivenessProfile[], total: number }
+  Note:    When policyId is omitted, returns all 8+ profiles ordered DESC by
+           totalViolations. When policyId is provided, returns a single-element
+           array for that policy.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. ANALYTICS INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+11.1  Data Flow
+
+  governance_workflow_actions (DB)
+       ↓ SELECT (read-only)
+  GovernanceWorkflowAction[] (P11-C type)
+       ↓ analytics engine (pure functions, no I/O)
+  GovernanceAnalyticsProfile
+  PolicyEffectivenessProfile[]
+  GovernanceEffectivenessReport
+       ↓ JSON serialization
+  API response (super_admin client)
+
+11.2  P11-D reads from:
+
+  governance_workflow_actions   — all columns used in analytics computation
+  GOVERNANCE_POLICIES (P11-B)   — policyName lookup for PolicyEffectivenessProfile
+
+11.3  P11-D does NOT read from:
+
+  compliance_audit_chains                 — P11-A table (not accessed)
+  remediation_execution_attempts          — P10-E table (not accessed)
+  recovery_orchestration_actions          — P10-D table (not accessed)
+  Any other P10-A through P10-F tables    — completely isolated from P11-D
+
+11.4  Connection to GovernanceWorkflowAction fields used per metric
+
+  escalationRate        — workflowStatus, escalatedAt
+  throughputRate        — workflowStatus
+  dismissalFrequency    — workflowStatus
+  escalationToRatio     — workflowStatus, escalatedAt
+  avgResolutionMs       — resolvedAt, createdAt
+  avgAcknowledgmentMs   — acknowledgedAt, createdAt
+  criticalUnresolvedMs  — escalationLevel, workflowStatus, createdAt
+  unresolvedCritical    — escalationLevel, workflowStatus
+  policyBreachFreq      — policyId
+  effectiveness scoring — computed from the above metrics
+
+11.5  rowToWorkflowActionForAnalytics() helper
+
+  A route-layer helper function that maps raw Drizzle SELECT rows to typed
+  GovernanceWorkflowAction objects before passing them to the analytics engine.
+  This is the same pattern used by `rowToWorkflowAction` in the P11-C lifecycle
+  routes — it keeps the pure engine decoupled from Drizzle's row types.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/compliance-operations-analytics.test.ts
+
+T1 (6 assertions)  analytics evaluation deterministic
+  ✓ T1-1: evaluateGovernanceAnalytics returns stable profileId format
+  ✓ T1-2: empty workflow list produces zero metrics
+  ✓ T1-3: two calls with same inputs produce identical output (determinism)
+  ✓ T1-4: workspaceId is preserved in profile
+  ✓ T1-5: evaluatedAt matches the `now` parameter
+  ✓ T1-6: counts are correct for mixed-status workflows
+
+T2 (6 assertions)  resolution duration calculations stable
+  ✓ T2-1: computeAverageResolutionDuration returns null for empty list
+  ✓ T2-2: computeAverageResolutionDuration returns null when no terminal workflows
+  ✓ T2-3: computeAverageResolutionDuration is correct for single resolved workflow
+  ✓ T2-4: computeAverageResolutionDuration averages correctly across multiple workflows
+  ✓ T2-5: computeAverageAcknowledgmentDuration returns null when none acknowledged
+  ✓ T2-6: computeAverageAcknowledgmentDuration computes correctly
+
+T3 (6 assertions)  escalation frequency classification valid
+  ✓ T3-1: computeEscalationRate returns 0 for empty list
+  ✓ T3-2: computeEscalationRate counts escalatedAt set OR status=escalated
+  ✓ T3-3: classifyEscalationTrend — critical when unresolvedCriticalCount >= 3
+  ✓ T3-4: classifyEscalationTrend — worsening for high escalation rate
+  ✓ T3-5: classifyEscalationTrend — improving when rate < 0.10 and no critical unresolved
+  ✓ T3-6: classifyEscalationTrend — stable as default
+
+T4 (5 assertions)  policy recurrence detection correct
+  ✓ T4-1: detectRecurringPolicyBreaches returns empty object for no workflows
+  ✓ T4-2: counts are accumulated per policyId
+  ✓ T4-3: ordering is DESC by count, then ASC by policyId for ties
+  ✓ T4-4: all statuses are counted (open, resolved, dismissed)
+  ✓ T4-5: evaluateGovernanceAnalytics policyBreachFrequency matches manual count
+
+T5 (7 assertions)  workflow effectiveness scoring deterministic
+  ✓ T5-1: unstable — escalationRate >= 0.70
+  ✓ T5-2: unstable — unresolvedCriticalCount >= 5
+  ✓ T5-3: inconsistent — escalationRate >= 0.40 but below 0.70
+  ✓ T5-4: inconsistent — avgResolutionDurationMs > 14 days
+  ✓ T5-5: highly_effective — all conditions met
+  ✓ T5-6: effective — throughputRate >= 0.70 AND escalationRate < 0.30, no criticals
+  ✓ T5-7: acceptable — default when no extreme conditions
+
+T6 (6 assertions)  policy effectiveness serialization stable
+  ✓ T6-1: PolicyEffectivenessProfile is fully JSON-serializable
+  ✓ T6-2: policyName is populated from GOVERNANCE_POLICIES for known policyIds
+  ✓ T6-3: unknown policyId falls back to policyId as name
+  ✓ T6-4: two calls with same input produce identical serialized output
+  ✓ T6-5: evaluateAllPolicyEffectiveness covers all 8 GOVERNANCE_POLICIES
+  ✓ T6-6: evaluateAllPolicyEffectiveness ordering: DESC totalViolations, then ASC policyId
+
+T7 (6 assertions)  critical unresolved metrics accurate
+  ✓ T7-1: unresolvedCriticalCount is 0 for empty list
+  ✓ T7-2: resolved critical workflows are NOT counted as unresolvedCritical
+  ✓ T7-3: open critical workflows are counted as unresolvedCritical
+  ✓ T7-4: computeCriticalUnresolvedDuration returns null when no critical unresolved
+  ✓ T7-5: computeCriticalUnresolvedDuration computes duration from createdAt to now
+  ✓ T7-6: criticalUnresolvedDurationMs in profile is consistent with manual computation
+
+T8 (5 assertions)  append-only workflow guarantees preserved
+  ✓ T8-1: evaluateGovernanceAnalytics does not mutate input workflows array
+  ✓ T8-2: evaluatePolicyEffectiveness does not mutate input workflows array
+  ✓ T8-3: buildGovernanceEffectivenessReport does not mutate input
+  ✓ T8-4: analytics functions return independent copies of computed maps
+  ✓ T8-5: dismissedWorkflows in profile does not count as active
+
+T9 (6 assertions)  super-admin enforcement valid
+  ✓ T9-1: GovernanceEffectivenessReport is fully JSON-serializable
+  ✓ T9-2: reportId format is stable
+  ✓ T9-3: GovernanceAnalyticsProfile is fully JSON-serializable
+  ✓ T9-4: evaluatedAt in GovernanceEffectivenessReport matches `now`
+  ✓ T9-5: buildGovernanceEffectivenessReport is synchronous and returns a plain object
+  ✓ T9-6: computeThroughputRate and computeDismissalFrequency are both 0 for empty list
+
+T10 (8 assertions)  analytics layer remains read-only
+  ✓ T10-1: emit functions return void
+  ✓ T10-2: no execute/trigger/write methods exist on GovernanceAnalyticsProfile
+  ✓ T10-3: no execute/trigger methods exist on PolicyEffectivenessProfile
+  ✓ T10-4: no execute/trigger methods exist on GovernanceEffectivenessReport
+  ✓ T10-5: classifyPolicyStability — unstable when falsePositiveRate >= 0.50
+  ✓ T10-6: classifyPolicyStability — reliable when all conditions met
+  ✓ T10-7: computeEscalationToResolutionRatio returns 0 when no resolved workflows
+  ✓ T10-8: escalationToResolutionRatio in profile is computed correctly
+
+  Total P11-D: 61 assertions (10 test groups)
+  Cumulative:  2280 tests / 2280 passed (40 files)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. REMAINING GOVERNANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P11-D is intentionally a pure read-only analytics layer — no forecasting,
+no AI scoring, no automated policy changes.
+
+  1. NO HISTORICAL TREND TRACKING
+     All analytics reflect the CURRENT state of governance_workflow_actions.
+     There is no time-series storage of escalationRate, throughputRate, or
+     workflowStabilityScore over time.
+     Gap: a governance_analytics_snapshots table (snapshotted periodically)
+     would enable "escalation rate over the past 30 days" trend queries.
+     Without it, all analytics are point-in-time only.
+
+  2. NO WORKSPACE-SCOPED POLICY EFFECTIVENESS
+     GET /platform/governance/policy-effectiveness always loads ALL workflow
+     rows and then filters in-memory if policyId is specified.
+     GET /platform/governance/analytics can filter by workspaceId, but
+     policy effectiveness profiles are always platform-wide.
+     Gap: adding a workspaceId parameter to the policy-effectiveness route
+     would enable workspace-specific policy quality analysis.
+
+  3. ON-DEMAND COMPUTATION DOES NOT SCALE TO MILLIONS OF ROWS
+     All three analytics routes SELECT the entire governance_workflow_actions
+     table on every request. For large installations with many workflows, this
+     will be slow.
+     Gap: materialized analytics views (PostgreSQL MATERIALIZED VIEW or a
+     scheduled job that writes to a governance_analytics_cache table) would
+     enable sub-millisecond analytics responses at scale.
+
+  4. AVERAGE RESOLUTION DURATION DOES NOT EXCLUDE OUTLIERS
+     computeAverageResolutionDuration() computes a simple arithmetic mean.
+     One extremely long investigation (e.g., 365 days open before resolution)
+     will skew the average significantly.
+     Gap: a percentile-based duration metric (p50, p90, p99) or excluding
+     outliers beyond 3 standard deviations would provide more robust SLA tracking.
+
+  5. DISMISSAL FREQUENCY DOES NOT DISTINGUISH FALSE_POSITIVE FROM OPERATIONAL_EXCEPTION
+     dismissalFrequency counts all dismissed workflows together.
+     The two dismissal subtypes have different operational meanings:
+       - false_positive → policy calibration issue
+       - operational_exception → accepted deviation from policy
+     Gap: splitting dismissalFrequency into falsePositiveDismissalRate and
+     operationalExceptionDismissalRate at the profile level would enable
+     separate policy tuning and exception monitoring signals.
+
+  6. NO OPERATOR ATTRIBUTION ANALYTICS
+     No analytics track which operators are most frequently initiating,
+     acknowledging, escalating, or resolving workflows. This would enable
+     workload distribution visibility and response time tracking per operator.
+     Gap: an operator effectiveness breakdown in GovernanceAnalyticsProfile
+     (e.g., byOperator: Record<operatorId, { ack: number, resolve: number }>)
+     would surface investigation ownership patterns.
+
+  7. NO INTER-POLICY CORRELATION
+     Analytics are computed per-policy independently. There is no detection of
+     correlated policy breaches (e.g., POL-003 and POL-005 frequently triggering
+     together on the same entity).
+     Gap: a correlation matrix across policyIds would enable detection of systemic
+     infrastructure patterns that trigger multiple policies simultaneously.
+
+  8. NO FRONTEND DASHBOARD FOR ANALYTICS
+     All three analytics routes are live but the ops-platform React frontend has
+     no super admin pages for:
+       - Governance health dashboard (profile metrics, trend chart, stability score)
+       - Policy effectiveness table (all 8 policies with stability badges)
+       - Effectiveness report (global summary with per-policy breakdown)
+     Gap: super admin UI at /super-admin/governance/analytics would complete the
+     human-facing governance intelligence surface.
+
+  9. CRITICAL_UNRESOLVED_THRESHOLD IS FIXED AT 3
+     The threshold for emitting critical_unresolved_threshold_detected is hardcoded
+     at unresolvedCriticalCount >= 3. There is no per-workspace or per-platform
+     configuration for this threshold.
+     Gap: a platform settings mechanism (e.g., from P11-C's "Platform Settings"
+     super admin panel) to configure the alert threshold would allow operators
+     to tune sensitivity without a code change.
+
+  10. ESCALATION TREND USES CURRENT-STATE ONLY
+      classifyEscalationTrend() uses the current escalationRate and
+      unresolvedCriticalCount only. There is no comparison with a previous
+      snapshot to determine if the rate is "improving" based on actual movement
+      over time — "improving" currently means the current rate is low,
+      not that the rate has decreased from a prior period.
+      Gap: comparing current profile vs a previous snapshot would enable true
+      directional trend classification (was it 0.20 last week and now 0.05?
+      That is genuinely improving).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. READINESS ASSESSMENT — BEFORE GOVERNANCE INTELLIGENCE CLOSURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Compliance operations analytics layer is operational.
+
+  ANALYTICS ENGINE READINESS
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ evaluateGovernanceAnalytics()           — GovernanceAnalyticsProfile
+                                              13 metrics, deterministic, pure
+  ✓ evaluatePolicyEffectiveness()           — PolicyEffectivenessProfile
+                                              per-policy, with policyStabilityScore
+  ✓ evaluateAllPolicyEffectiveness()        — all 8 built-in + any custom policies,
+                                              DESC by totalViolations
+  ✓ buildGovernanceEffectivenessReport()    — full platform report in one call
+  ✓ classifyWorkflowEffectiveness()         — 5-tier fail-closed scoring
+  ✓ classifyPolicyStability()               — 4-tier fail-closed scoring
+  ✓ classifyEscalationTrend()              — 4-state trend from rate + criticals
+  ✓ 8 duration + rate primitives           — all pure, all null-safe, all tested
+  ✓ detectRecurringPolicyBreaches()         — deterministic ordered map
+  ✓ 4 observability events (INFO + WARN)   — optional-chained, test-safe
+  ✓ 3 read-only analytics API routes live  — super_admin gated
+  ✓ rowToWorkflowActionForAnalytics()       — clean DB→engine type bridge
+  ✓ Full typecheck clean (EXIT:0)
+  ✓ 61 new assertions, 2280 total passing (40 files)
+
+  COMPLETE P10-A → P11-D GOVERNANCE STACK
+  ─────────────────────────────────────────────────────────────────────────────
+  P10-A: Live reliability domain evaluation
+  P10-B: Append-only incident + snapshot persistence
+  P10-C: Operator advisory recommendations
+  P10-D: Human-in-the-loop orchestration
+  P10-E: Explicit-confirmation execution tracking
+  P10-F: Remediation outcome analytics (read-only)
+  P11-A: Immutable audit chain integrity + forensic reconstruction
+  P11-B: Policy evaluation — detects violations from audit + execution data
+  P11-C: Governance workflow orchestration — human-managed violation lifecycle
+  P11-D: Compliance operations analytics — deterministic read-only intelligence
+         over the P11-C workflow lifecycle data
+
+  WHAT IS NOW OBSERVABLE (read-only, no enforcement)
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ Workflow stability score for the platform or a workspace
+  ✓ Average resolution duration (SLA proxy)
+  ✓ Average acknowledgment duration (response time proxy)
+  ✓ Average critical unresolved duration (urgency exposure metric)
+  ✓ Escalation rate + escalation trend
+  ✓ Escalation-to-resolution ratio (bottleneck indicator)
+  ✓ Throughput rate (investigation backlog indicator)
+  ✓ Dismissal frequency (policy over-triggering signal)
+  ✓ Policy breach frequency map (recurring violation identification)
+  ✓ Per-policy confirmed violation rate (policy signal quality)
+  ✓ Per-policy false positive rate (policy noise measurement)
+  ✓ Per-policy stability score (policy calibration health)
+  ✓ Unresolved critical count + duration (primary governance risk indicator)
+  ✓ Platform-wide effectiveness report (single comprehensive view)
+
+  SAFETY BOUNDARIES (must remain respected in all future phases)
+  ─────────────────────────────────────────────────────────────────────────────
+  ⚠ READ-ONLY: analytics functions must NEVER INSERT/UPDATE/DELETE.
+    The routes use SELECT only. Any future analytics enhancement must
+    maintain this invariant.
+  ⚠ NO AUTO-ESCALATION: no analytics result may trigger a call to
+    escalateWorkflow() or any other P11-C transition function.
+  ⚠ NO AUTO-POLICY-MUTATION: policyStabilityScore="unstable" must NEVER
+    automatically modify a policy's severity or status.
+  ⚠ NO AI: all scoring is threshold-based. No ML models, no probabilistic
+    scoring, no prediction. Future forecasting features must be explicitly
+    bounded and labeled as advisory-only.
+  ⚠ FAIL-CLOSED: all scoring functions evaluate worst conditions first.
+    This invariant must be maintained if thresholds are ever adjusted.
+  ⚠ DETERMINISM: same workflow rows + same `now` → same output. Future
+    enhancements must not introduce randomness, caching with stale-read,
+    or environment-dependent branching in the analytics engine.
+  ⚠ NO ENFORCEMENT: the WARN event (critical_unresolved_threshold_detected)
+    is a log signal only. No automatic workflow modification may be triggered
+    by this or any other analytics event.
+
+  VERDICT: READY for Governance Intelligence Closure
+  Condition: any closure or wrap-up phase must:
+    (a) treat P11-D as the analytics READ layer — no writes
+    (b) treat P11-C as the lifecycle WRITE layer — human-triggered only
+    (c) treat P11-B as the violation DETECTION layer — no persistence
+    (d) treat P11-A as the audit INTEGRITY layer — INSERT only, never UPDATE
+    (e) maintain the 40-file / 2280-test baseline as the quality floor
+    (f) not add any automated enforcement between these four layers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 11-D REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

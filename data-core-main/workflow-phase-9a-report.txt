@@ -1,0 +1,832 @@
+WORKFLOW PHASE 9-A REPORT
+Multi-Tenant Isolation & Workspace Boundary Hardening Foundations
+=================================================================
+
+Date:        2026-05-15
+Phase:       P9-A (follows P8-F Governance Signals)
+Status:      COMPLETE — all tests green, typecheck clean
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-A converts the platform from workspace-aware behavior (implicit, convention-
+based) to formally hardened multi-tenant isolation architecture (explicit,
+typed, deterministic, fail-closed).
+
+Before P9-A:
+  • Workspace isolation enforced by convention: `if (!req.workspaceId) return 403`
+    + `wsCond(req)` in every query.
+  • No formal typed isolation context — workspaceId floated as a bare number.
+  • Analytics batches not validated — DB queries enforce the boundary but
+    the engine layer had no independent defense.
+  • Observability events not validated for isolation fields.
+  • No risk assessment model — no way to diagnose isolation health.
+  • TenantIsolationViolation did not exist — isolation failures were 403s
+    with no structured code, no audit trail.
+
+After P9-A:
+  • TenantIsolationContext — formal typed context object (workspaceId,
+    tenantBoundaryId, requestScopeId, isolationLevel, actorId, evaluationContext).
+  • enforceTenantIsolation() — fail-closed per-resource boundary enforcement.
+  • validateAnalyticsScope() — batch analytics isolation guard.
+  • validateObservabilityScope() — structured event isolation guard.
+  • assessTenantIsolationRisk() — deterministic 4-dimension risk assessment.
+  • TenantIsolationViolation — typed error class with structured violation code.
+  • 4 structured observability events: tenant_isolation_enforced,
+    tenant_boundary_violation_blocked, tenant_analytics_scope_validated,
+    tenant_observability_scope_validated.
+  • Integrated into GET /workflows/comparative (P8-E) and
+    GET /workflows/governance/signals (P8-F).
+
+Forbidden scope (explicitly excluded):
+  • Distributed tenant federation
+  • Cross-workspace analytics
+  • Org-level aggregation
+  • Multi-region replication
+  • Tenant autoscaling
+  • Dynamic shard orchestration
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/tenant-isolation.ts  (~490 lines)
+  Pure deterministic tenant isolation enforcement layer.
+  No DB, no async, no ML, no side effects, no auto-correction.
+  Six public entry points:
+    buildTenantIsolationContext(params)           → TenantIsolationContext
+    enforceTenantIsolation(context, resource)     → TenantIsolationResult
+    validateAnalyticsScope(context, items, type)  → AnalyticsScopeValidationResult
+    validateObservabilityScope(context, scope)    → ObservabilityScopeResult
+    assessTenantIsolationRisk(input)              → TenantIsolationRiskAssessment
+    makeRequestScopeId(workspaceId)               → string
+
+  Exported types (15):
+    TenantIsolationContext, TenantIsolationLevel, TenantResource,
+    TenantResourceType, TenantIsolationResult, AnalyticsScopeItem,
+    AnalyticsScopeValidationResult, ObservabilityEventScope,
+    ObservabilityScopeResult, TenantRiskLevel, TenantIsolationFinding,
+    TenantIsolationRiskAssessment, TenantIsolationAssessmentInput,
+    TenantViolationCode, TenantIsolationViolation (class)
+
+artifacts/api-server/src/lib/workflows/__tests__/tenant-isolation.test.ts
+  T1–T10 test groups, 52 individual assertions, all passing.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/routes/workflows.ts
+  • Added imports: buildTenantIsolationContext, validateAnalyticsScope,
+    TenantIsolationViolation
+  • GET /workflows/comparative (P8-E):
+    - Builds TenantIsolationContext immediately after workspaceId check
+    - Selects workspaceId column from workflow_definitions in DB query
+    - Calls validateAnalyticsScope() on fetched wfRows before running engines
+    - TenantIsolationViolation caught → 403 with structured error + code
+  • GET /workflows/governance/signals (P8-F):
+    - Same pattern as /comparative (separate isoCtxGov variable)
+    - Both analytics fetch and analytics scope validation enforced
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. TENANT ISOLATION ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Current isolation model (before P9-A)
+
+  Layer A — JWT / requireAuth:
+    JWT verified → DB user looked up → req.workspaceId set from user.workspaceId.
+    Super admins have no workspaceId (by design).
+
+  Layer B — Route-level guard:
+    `if (!req.workspaceId) return 403`
+    Prevents super-admin routes from running workspace-scoped logic.
+
+  Layer C — Query-level scoping (wsCond):
+    `eq(table.workspaceId, req.workspaceId!)`
+    Applied in every SELECT, UPDATE, DELETE that touches workspace data.
+    DB enforces the boundary — cross-workspace rows never returned.
+
+  Gap analysis before P9-A:
+    ✓ DB query boundary is enforced by wsCond (Layer C) — production-safe.
+    ✓ requireAuth correctly resolves workspaceId from user record.
+    ✗ No formal typed context — workspaceId is a bare `number | undefined`.
+    ✗ No independent engine-layer defense — analytics engines trust input blindly.
+    ✗ No structured violation code — all boundary failures are generic 403s.
+    ✗ No analytics batch validation — engine-layer cross-workspace data possible
+      only if a DB bug returned cross-workspace rows (unlikely, but undetected).
+    ✗ No observability event validation — events could be emitted without
+      isolation fields, making cross-tenant telemetry correlation impossible.
+    ✗ No risk assessment — no way to measure isolation health operationally.
+
+4.2 After P9-A: Defense-in-depth model
+
+  Layer A — JWT / requireAuth         (unchanged)
+  Layer B — Route-level guard         (unchanged)
+  Layer C — Query-level scoping       (unchanged — primary DB defense)
+  Layer D — Typed isolation context   (NEW: P9-A)
+    buildTenantIsolationContext() constructs and validates the context.
+    Fails closed on null/undefined/0/float/NaN workspaceId.
+  Layer E — Analytics scope validation (NEW: P9-A)
+    validateAnalyticsScope() verifies every item in a batch post-query.
+    Secondary independent defense against DB anomalies or future code errors.
+  Layer F — Observability enforcement  (NEW: P9-A)
+    validateObservabilityScope() ensures structured events carry all
+    required isolation fields before emission.
+
+4.3 Isolation layers mapped to violation codes
+
+  NULL_WORKSPACE_CONTEXT
+    Where detected: buildTenantIsolationContext()
+    Trigger: workspaceId is null or undefined
+    Origin: middleware failure or super-admin route misconfiguration
+    Response: 403 at route level (caught from buildTenantIsolationContext)
+
+  AMBIGUOUS_TENANT_CONTEXT
+    Where detected: buildTenantIsolationContext()
+    Trigger: workspaceId is 0, float, or NaN
+    Origin: data corruption or incorrect type coercion
+    Response: 403 at route level
+
+  CROSS_WORKSPACE_ACCESS
+    Where detected: enforceTenantIsolation()
+    Trigger: resource.workspaceId ≠ context.workspaceId
+    Origin: direct resource fetch by ID (GET /workflows/:id) with wrong ownership
+    Response: 403 at route level
+
+  ORPHAN_RESOURCE_ACCESS
+    Where detected: enforceTenantIsolation()
+    Trigger: resource.workspaceId is null or undefined
+    Origin: DB data anomaly (resource with no workspace assigned)
+    Response: 403 at route level
+
+  ANALYTICS_BOUNDARY_VIOLATION
+    Where detected: validateAnalyticsScope()
+    Trigger: any item in batch has workspaceId ≠ context.workspaceId or null
+    Origin: DB query scoping failure (wsCond broken) or code error
+    Response: 403 at route level
+
+  GOVERNANCE_LEAKAGE
+    Where detected: validateObservabilityScope()
+    Trigger: structured event missing required isolation fields,
+             or event fields mismatch context
+    Origin: observability event emitted with wrong workspace context
+    Response: TenantIsolationViolation thrown (caller handles)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. TENANT ISOLATION CONTEXT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TenantIsolationContext fields:
+
+  workspaceId         number
+    DB primary key of the authenticated workspace.
+    Source: req.workspaceId (resolved by requireAuth from JWT → user record).
+    Always a positive integer after buildTenantIsolationContext() succeeds.
+
+  tenantBoundaryId    string  (format: "ws:<workspaceId>")
+    Canonical cross-system tenant boundary identifier.
+    Distinct from workspaceId to allow future globally unique boundary IDs
+    without breaking the isolation model (e.g. "ws:7" → "org:acme:ws:7").
+    Deterministic: makeTenantBoundaryId(7) always returns "ws:7".
+
+  requestScopeId      string  (format: "req:<workspaceId>-<ms>-<seq>")
+    Per-request unique identifier for log correlation.
+    Carried in all 4 observability events to correlate:
+      buildTenantIsolationContext → validateAnalyticsScope → engine run.
+    Monotonic sequence counter prevents collisions within same millisecond.
+
+  isolationLevel      "strict" | "standard"
+    Enforcement strictness. Default: "strict" (same behavior for both currently).
+    Reserved for future graduated enforcement (e.g. "standard" for migration
+    windows where some legacy data may lack workspace assignment).
+    Note: P9-A implements "strict" semantics for both levels.
+
+  actorId             number | undefined
+    DB primary key of the authenticated user.
+    Included in all violation and enforcement events for audit.
+
+  evaluationContext   string | undefined
+    Human-readable label for the calling analytics engine.
+    Examples: "comparative-intelligence", "governance-signals".
+    Included in observability events for diagnostics.
+
+Construction invariants:
+  • workspaceId null/undefined → throws NULL_WORKSPACE_CONTEXT
+  • workspaceId = 0          → throws AMBIGUOUS_TENANT_CONTEXT
+  • workspaceId float/NaN    → throws AMBIGUOUS_TENANT_CONTEXT
+  • workspaceId > 0, integer → succeeds, returns frozen-equivalent context
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. BOUNDARY ENFORCEMENT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1 enforceTenantIsolation — per-resource enforcement
+
+  Decision tree (in order, fail-closed):
+    1. resourceWorkspaceId is null or undefined
+       → throw ORPHAN_RESOURCE_ACCESS
+    2. resourceWorkspaceId is 0 or non-integer
+       → throw AMBIGUOUS_TENANT_CONTEXT
+    3. resourceWorkspaceId ≠ context.workspaceId
+       → throw CROSS_WORKSPACE_ACCESS
+    4. resourceWorkspaceId = context.workspaceId
+       → emit tenant_isolation_enforced
+       → return TenantIsolationResult { allowed: true, ... }
+
+  Never silently passes on ambiguity.
+  Steps 1-3 all emit tenant_boundary_violation_blocked before throwing.
+  The observability event is always emitted before the throw so the violation
+  is recorded even if the caller swallows the error.
+
+  Resource types supported (TenantResourceType, 8 values):
+    workflow_definition, workflow_execution, workflow_execution_step,
+    governance_signal, analytics_snapshot, comparative_intelligence,
+    historical_rollup, approval_record
+
+6.2 validateAnalyticsScope — batch enforcement
+
+  For each item in the batch (in order):
+    1. item.workspaceId is null or undefined
+       → emit tenant_boundary_violation_blocked
+       → throw ANALYTICS_BOUNDARY_VIOLATION (message cites batch type + index)
+    2. item.workspaceId ≠ context.workspaceId
+       → emit tenant_boundary_violation_blocked
+       → throw ANALYTICS_BOUNDARY_VIOLATION
+
+  Empty batch always passes (zero analytics = zero risk surface).
+
+  Validates types: analytics_snapshot (synthetic resourceType for errors).
+  Used in routes: comparative_intelligence, governance_signals.
+
+6.3 validateObservabilityScope — event isolation enforcement
+
+  Checks (in order):
+    1. Missing fields: workspaceId null/undefined, requestScopeId empty,
+       or tenantBoundaryId empty → throw GOVERNANCE_LEAKAGE
+    2. event.workspaceId ≠ context.workspaceId
+       → throw GOVERNANCE_LEAKAGE (cross-tenant event emission)
+    3. event.tenantBoundaryId ≠ context.tenantBoundaryId
+       → throw GOVERNANCE_LEAKAGE (boundary mismatch)
+
+  All violations emit tenant_boundary_violation_blocked with reason field.
+  Success emits tenant_observability_scope_validated.
+
+  Usage: route handlers or observability middleware can call this before
+  emitting any structured pino event to guarantee isolation field correctness.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. ANALYTICS ISOLATION GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1 Existing guarantees (before P9-A — unchanged)
+
+  Comparative intelligence (P8-E):
+    wsCond(req) applied to workflow_definitions query.
+    All P8-A → P8-D engines receive workspaceId from wfRows.workspaceId —
+    same workspace throughout the pipeline.
+
+  Governance signals (P8-F):
+    Same pattern as comparative intelligence.
+    generateGovernanceSignals() receives workspaceId in context — all signals
+    carry context.workspaceId.
+
+  Historical rollups:
+    eq(governanceSnapshotRollupsTable.workspaceId, req.workspaceId) applied
+    in all rollup queries.
+
+  Trend APIs (P8-D /workflows/:id/forecast):
+    Route resolves workflow by id + wsCond — cross-workspace fetch impossible.
+
+7.2 New guarantees added by P9-A
+
+  buildTenantIsolationContext:
+    Validates workspaceId is a positive integer before any analytics run.
+    Constructs tenantBoundaryId and requestScopeId for all downstream events.
+
+  validateAnalyticsScope (in /comparative and /governance/signals):
+    Secondary independent post-query batch validation.
+    Verifies that every workflow row returned by the DB belongs to the
+    authenticated workspace. Provides defense against:
+      - Future regressions that accidentally remove wsCond from a query
+      - DB-level anomalies where a row's workspaceId was corrupted
+      - Code paths that bypass wsCond (copy-paste errors in future routes)
+
+  Risk assessment (assessTenantIsolationRisk):
+    4-dimension deterministic measurement:
+      leakageRisk            — cross-workspace resources in any input batch
+      orphanAccessRisk       — null/undefined workspaceId in any resource batch
+      analyticsBoundaryRisk  — mixed workspace in analytics or governance data
+      observabilityIsolationRisk — events missing required isolation fields
+
+  Shared aggregation leakage:
+    IMPOSSIBLE by construction: all analytics engines (P8-A → P8-F) are pure
+    functions that receive workspaceId as input. They produce no shared mutable
+    state, no cached aggregates, no global accumulators.
+    Each request rebuilds all intelligence from scratch from its workspace's data.
+
+  Workspace crossover:
+    IMPOSSIBLE without a DB anomaly: wsCond is applied at Layer C (query),
+    and validateAnalyticsScope is applied at Layer E (engine).
+    An attacker would need to:
+      1. Obtain a valid JWT for workspace A
+      2. Trigger a DB bug that returns workspace B rows despite wsCond
+      3. validateAnalyticsScope (Layer E) would still catch it
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. OBSERVABILITY ISOLATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1 Required isolation fields in structured events
+
+  Every structured log event emitted by the enforcement layer carries:
+    workspaceId       — workspace PK (always a positive integer)
+    tenantBoundaryId  — "ws:<workspaceId>"
+    requestScopeId    — "req:<wsId>-<ms>-<seq>"
+    actorId           — user PK (null for system events)
+    isolationLevel    — "strict" or "standard"
+    action            — "allow" or "block"
+
+  These three fields (workspaceId, tenantBoundaryId, requestScopeId) form
+  the tenant isolation triad required by all P9-A observability events.
+
+8.2 The 4 P9-A structured observability events
+
+  A) tenant_isolation_enforced
+     Emitted: enforceTenantIsolation() on successful pass (action: "allow")
+     Fields: workspaceId, tenantBoundaryId, requestScopeId, actorId,
+             isolationLevel, evaluationContext, resourceType, resourceId, action
+     Use: audit trail of every successful per-resource boundary check.
+
+  B) tenant_boundary_violation_blocked
+     Emitted: enforceTenantIsolation(), validateAnalyticsScope(),
+              validateObservabilityScope() on any violation (action: "block")
+     Fields: workspaceId, tenantBoundaryId, requestScopeId, actorId,
+             isolationLevel, evaluationContext, violationCode, resourceType,
+             resourceId, resourceWorkspaceId, action
+     Special: always emitted BEFORE the TenantIsolationViolation is thrown,
+              so the violation is recorded even if the caller swallows the error.
+     Use: security audit, isolation regression detection, anomaly alerting.
+
+  C) tenant_analytics_scope_validated
+     Emitted: validateAnalyticsScope() on successful batch pass (action: "allow")
+     Fields: workspaceId, tenantBoundaryId, requestScopeId, actorId,
+             isolationLevel, evaluationContext, analyticsType, itemCount, action
+     Use: confirm that the analytics pipeline enforced isolation for a specific
+          batch before feeding it to intelligence engines.
+
+  D) tenant_observability_scope_validated
+     Emitted: validateObservabilityScope() on successful event scope check
+     Fields: workspaceId, tenantBoundaryId, requestScopeId, actorId,
+             isolationLevel, eventType, action
+     Use: audit that observability events carry correct isolation fields.
+
+8.3 Ambiguous events prevention
+
+  ambiguous events: prevented by buildTenantIsolationContext() failing on
+  null/zero/NaN workspaceId — no context = no events.
+
+  orphan telemetry: prevented by validateObservabilityScope() requiring all
+  three isolation fields before an event is considered valid.
+
+  cross-tenant mixing: prevented by validateObservabilityScope() checking
+  workspaceId and tenantBoundaryId match context values.
+
+8.4 tenant_boundary_violation_blocked event correlation
+
+  When monitoring for violations, search for:
+    event = "tenant_boundary_violation_blocked"
+    action = "block"
+
+  Group by: workspaceId, violationCode, requestScopeId
+
+  High-frequency violations from the same workspaceId + violationCode may
+  indicate:
+    CROSS_WORKSPACE_ACCESS: attempted privilege escalation or token misuse
+    NULL_WORKSPACE_CONTEXT: super-admin path misconfiguration
+    AMBIGUOUS_TENANT_CONTEXT: data corruption or type coercion bug
+    ANALYTICS_BOUNDARY_VIOLATION: DB scoping regression (wsCond removed)
+    GOVERNANCE_LEAKAGE: observability instrumentation error
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. TENANT RISK CLASSIFICATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1 TenantIsolationRiskAssessment
+
+  Four dimensions measured independently:
+
+  D1 — leakageRisk
+    Source: workflowResources[] containing rows from different workspace.
+    Low:      0 cross-workspace resources
+    Moderate: 1 cross-workspace resource
+    High:     2-4 cross-workspace resources
+    Critical: 5+ cross-workspace resources
+    Interpretation: DB scoping has broken down — rows from another workspace
+    are present in the resource batch.
+
+  D2 — orphanAccessRisk
+    Source: workflowResources[] containing rows with null/undefined workspaceId.
+    Low:      0 orphan resources
+    Moderate: 1 orphan resource
+    High:     2-4 orphan resources
+    Critical: 5+ orphan resources
+    Interpretation: data integrity issue — resources were created without
+    workspace assignment.
+
+  D3 — analyticsBoundaryRisk
+    Source: analyticsItems[] and/or governanceSignals[] with workspace mismatch.
+    Low:      0 cross-workspace or orphan analytics items
+    Moderate: 1 item
+    High:     2-4 items
+    Critical: 5+ items (or 3+ cross-workspace governance signals)
+    Interpretation: analytics pipeline boundary has leaked — cross-workspace
+    data is being fed to intelligence engines.
+
+  D4 — observabilityIsolationRisk
+    Source: observabilityEvents[] missing isolation fields or wrong workspace.
+    Low:      0 events with issues
+    Moderate: 1 event with issues
+    High:     2-4 events with issues
+    Critical: 5+ events with issues
+    Interpretation: telemetry emission discipline has broken down — events
+    cannot be reliably correlated to a specific workspace.
+
+  overallRisk = max(D1, D2, D3, D4) by severity weight.
+
+9.2 TenantIsolationFinding
+
+  Each finding records:
+    dimension     — which dimension triggered the finding
+    riskLevel     — per-dimension risk level
+    description   — human-readable description with counts
+    affectedCount — number of affected items
+
+  findings array is empty when overallRisk = "low".
+
+9.3 Risk assessment semantics
+
+  assessTenantIsolationRisk() is NON-THROWING — it assesses without blocking.
+  Use case: diagnostic endpoints, governance console health indicators,
+  platform admin health panels.
+
+  Route handlers call enforceTenantIsolation() and validateAnalyticsScope()
+  for active enforcement (throwing). Route handlers do NOT call
+  assessTenantIsolationRisk() in the request path — it is for diagnostic
+  and advisory use only.
+
+  Planned integration for governance console:
+    A future GET /platform/isolation/health endpoint calls
+    assessTenantIsolationRisk() for super-admin visibility into the
+    isolation health of each workspace.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+10.1 Integration into P8-E (GET /workflows/comparative)
+
+  Position: immediately after workspaceId guard, before DB query.
+
+  Step 1 (new): buildTenantIsolationContext({ workspaceId, actorId,
+                evaluationContext: "comparative-intelligence" })
+    Catches: NULL_WORKSPACE_CONTEXT, AMBIGUOUS_TENANT_CONTEXT → 403
+    Emits:  (no event — context construction only)
+
+  Step 2 (modified): DB query now selects workspaceId from workflow_definitions
+    Required by Step 3 to validate each row's workspace ownership.
+
+  Step 3 (new): validateAnalyticsScope(isoCtx, wfRows.map(r => ({ workspaceId:
+                r.workspaceId, itemId: r.id })), "comparative_intelligence")
+    Catches: ANALYTICS_BOUNDARY_VIOLATION → 403
+    Emits:  tenant_analytics_scope_validated (on success)
+            tenant_boundary_violation_blocked (on violation)
+
+  Then: existing P8-A → P8-E pipeline runs unchanged.
+
+10.2 Integration into P8-F (GET /workflows/governance/signals)
+
+  Same pattern as /comparative but with isoCtxGov variable name
+  and analyticsType = "governance_signals".
+
+10.3 Forward integration points
+
+  All future analytics endpoints in the workflow subsystem should follow
+  the same three-step P9-A pattern:
+
+    A) buildTenantIsolationContext() — context construction + validation
+    B) DB query with workspaceId column selected
+    C) validateAnalyticsScope() — post-query batch validation
+
+  Single-resource endpoints (GET /workflows/:id) should additionally call
+  enforceTenantIsolation() after the DB fetch:
+
+    const [row] = await db.select(...).from(workflow_definitions).where(eq(id, ...));
+    if (!row) { return 404; }
+    enforceTenantIsolation(isoCtx, {
+      resourceWorkspaceId: row.workspaceId,
+      resourceType: "workflow_definition",
+      resourceId: row.id,
+    });
+
+  This provides defense-in-depth even when id-based lookups don't use wsCond.
+
+10.4 Advisory systems integration
+
+  Governance signals (P8-F): integrated (see 10.2 above).
+  Governance analytics (P8-A → P8-D individual endpoints): not yet integrated.
+  These endpoints already use wsCond but lack the engine-layer validation.
+  See Section 12 (Known Limitations) for scope.
+
+10.5 Operational consoles integration
+
+  The super-admin workspace detail page (GET /workspaces/:id/users,
+  GET /workspaces/:id/stats) uses separate requireSuperAdmin middleware
+  which bypasses workspace scoping by design.
+  P9-A enforcement does NOT apply to super-admin routes — they operate
+  across workspaces by privilege, not by tenant isolation.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. OBSERVABILITY ADDITIONS SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New structured events emitted by tenant-isolation.ts (prefix: "[tenant] P9-A:"):
+
+  tenant_isolation_enforced
+    Frequency: once per successful enforceTenantIsolation() call
+    Consumers: audit trail, per-resource access log
+
+  tenant_boundary_violation_blocked
+    Frequency: once per violation before throw
+    Consumers: security alerting, isolation regression detection
+    Fields include violationCode for automated alert routing:
+      CROSS_WORKSPACE_ACCESS → potential attack vector alert
+      ANALYTICS_BOUNDARY_VIOLATION → DB scoping regression alert
+      GOVERNANCE_LEAKAGE → instrumentation bug alert
+
+  tenant_analytics_scope_validated
+    Frequency: once per validateAnalyticsScope() success
+    Consumers: pipeline health dashboard, isolation health metrics
+    itemCount field enables per-request analytics batch size tracking
+
+  tenant_observability_scope_validated
+    Frequency: once per validateObservabilityScope() success
+    Consumers: telemetry health monitoring
+
+Additional route-level event (req.log.info, workflows.ts):
+  workflow_governance_signals_requested (existing, unchanged)
+  workflow_comparative_requested (existing, unchanged)
+
+Total new event types added by P9-A: 4
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-A test groups (25th test file in suite):
+
+  T1   cross-workspace workflow access blocked             (5 assertions)
+       - CROSS_WORKSPACE_ACCESS for resource from different workspace
+       - violation name = "TenantIsolationViolation"
+       - correct workspace allows access (result.allowed = true)
+       - workflow_execution from different workspace blocked
+       - approval_record from different workspace blocked
+
+  T2   analytics queries remain tenant-scoped              (5 assertions)
+       - homogeneous batch passes validation
+       - ANALYTICS_BOUNDARY_VIOLATION on cross-workspace item in batch
+       - empty batch always passes
+       - tenantBoundaryId and requestScopeId included in result
+       - single wrong-workspace item throws
+
+  T3   governance signals isolated correctly               (5 assertions)
+       - risk assessment detects cross-workspace governance signals
+       - all-same-workspace signals yield low risk
+       - 3+ cross-workspace signals → critical analyticsBoundaryRisk
+       - enforceTenantIsolation blocks governance_signal from another workspace
+       - governance_signal from correct workspace is allowed
+
+  T4   orphan request rejected safely                      (5 assertions)
+       - ORPHAN_RESOURCE_ACCESS for resource with null workspaceId
+       - ORPHAN_RESOURCE_ACCESS for resource with undefined workspaceId
+       - ANALYTICS_BOUNDARY_VIOLATION for batch with null workspaceId item
+       - risk assessment flags orphan resources
+       - orphan violation carries resource context (type + id)
+
+  T5   missing workspace context fails closed              (6 assertions)
+       - NULL_WORKSPACE_CONTEXT when workspaceId is null
+       - NULL_WORKSPACE_CONTEXT when workspaceId is undefined
+       - AMBIGUOUS_TENANT_CONTEXT when workspaceId is 0
+       - AMBIGUOUS_TENANT_CONTEXT when workspaceId is float (7.5)
+       - AMBIGUOUS_TENANT_CONTEXT when workspaceId is NaN
+       - success with valid positive integer workspaceId
+
+  T6   observability events always scoped                  (6 assertions)
+       - GOVERNANCE_LEAKAGE on missing workspaceId
+       - GOVERNANCE_LEAKAGE on missing requestScopeId
+       - GOVERNANCE_LEAKAGE on missing tenantBoundaryId
+       - GOVERNANCE_LEAKAGE on wrong workspaceId in event
+       - GOVERNANCE_LEAKAGE on wrong tenantBoundaryId in event
+       - fully-scoped event validates successfully
+
+  T7   tenant boundary enforcement deterministic           (5 assertions)
+       - same inputs always produce same outcome (allow)
+       - same inputs always produce same outcome (block) across 5 runs
+       - makeTenantBoundaryId is pure and deterministic for all workspace IDs
+       - risk assessment is deterministic for same inputs
+       - frozen violation context cannot be mutated
+
+  T8   comparative intelligence isolated per workspace     (4 assertions)
+       - homogeneous comparative batch of 5 items passes
+       - one intruder workflow blocks the batch
+       - risk assessment → high/critical for mixed comparative data
+       - risk assessment → low for clean 10-item comparative data
+
+  T9   historical analytics remain isolated                (4 assertions)
+       - clean rollup items of correct workspace pass
+       - single cross-workspace rollup item causes ANALYTICS_BOUNDARY_VIOLATION
+       - orphan rollup row (undefined workspaceId) rejected
+       - fully clean data across all 4 dimensions yields low overall risk
+
+  T10  no implicit tenant crossover possible               (7 assertions)
+       - buildTenantIsolationContext always produces correct boundary ID
+       - violation context is frozen (mutation attempt throws in strict mode)
+       - TenantIsolationViolation is instanceof Error
+       - risk assessment result is plain JSON-serializable
+       - makeRequestScopeId produces unique IDs for sequential calls
+       - requestScopeId format includes workspaceId prefix
+       - mixed data assessment never returns "low" overall risk
+
+Full test suite result (25 test files):
+  Tests:      1447 passed (1447)
+  Test Files: 25 passed (25)
+  Duration:   ~11.1s
+  TypeScript: clean (zero errors in api-server, typecheck:libs clean)
+
+Cumulative test counts by phase:
+  P8-A (topology)              +45  →  ~1140
+  P8-B (dependency)            +50  →   1186
+  P8-C (correlation)           +52  →   1238
+  P8-D (forecast)              +56  →   1294
+  P8-E (comparative)           +51  →   1345
+  P8-F (governance signals)    +50  →   1395
+  P9-A (tenant isolation)      +52  →   TOTAL: 1447
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. REMAINING MULTI-TENANT ISOLATION GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) Individual analytics endpoints not yet hardened (P8-A → P8-D)
+   GET /workflows/:id/topology
+   GET /workflows/:id/dependency
+   GET /workflows/:id/operational
+   GET /workflows/:id/forecast
+   These endpoints resolve the workflow by id+wsCond (Layer C enforced).
+   They have NOT yet been updated to:
+     1. buildTenantIsolationContext() — Layer D
+     2. enforceTenantIsolation() post-query — Layer E
+   Adding P9-A hardening to these is a mechanical pattern application.
+   Current risk: LOW (wsCond is already applied in all 4 routes).
+
+B) Execution and step endpoints not hardened
+   GET /workflows/executions (list)
+   GET /workflows/:id/executions
+   GET /workflows/executions/:id
+   GET /workflows/executions/failed
+   GET /workflows/executions/stuck
+   POST /workflows/:id/trigger
+   Same as (A): wsCond applied at DB layer, no P9-A engine layer defense.
+
+C) External cooldown for governance signals
+   assessTenantIsolationRisk() is not yet called in any request path.
+   No GET /platform/isolation/health endpoint exists.
+   Risk dimension scoring is available but not yet surfaced in the API.
+
+D) No formal TenantIsolationViolation middleware catch
+   Route handlers individually catch TenantIsolationViolation with try/catch.
+   A centralized Express error handler that catches TenantIsolationViolation
+   and automatically returns 403 { error, code } would reduce boilerplate.
+   Currently two routes implement the try/catch pattern (comparative, signals).
+
+E) No cross-request isolation audit log
+   tenant_boundary_violation_blocked events are emitted to pino logs but
+   not persisted to a DB table. A governance_isolation_violation_log table
+   would enable:
+     - Historical violation trend analysis
+     - Workspace-level isolation health score over time
+     - Anomaly detection for repeated violations from the same workspace
+
+F) No per-tenant execution quota enforcement
+   P3-B has MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100 but it is a
+   global rate limit, not a formal tenant isolation quota.
+   A TenantWorkloadBudget layer (tracking active execution counts per
+   workspace, CPU budget per workspace) is not yet designed.
+   This is explicitly out of scope for P9-A (no tenant autoscaling).
+
+G) isolationLevel "standard" semantics not yet differentiated
+   Both "strict" and "standard" isolation levels enforce identical semantics.
+   "standard" is reserved for future migration windows or gradual rollouts
+   where some legacy data may lack workspace assignment.
+   Until standard semantics are defined, always use "strict" (the default).
+
+H) validateObservabilityScope not yet called at event emission sites
+   The four P9-A observability events themselves carry the required
+   isolation fields. However, the pre-P9-A events (governance_signal_generated,
+   workflow_governance_signals_requested, etc.) do not pass through
+   validateObservabilityScope() — they set isolation fields manually.
+   A future phase could call validateObservabilityScope() before every
+   logger.info() call as a runtime assertion, similar to how TypeScript
+   types are checked at compile time.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. READINESS ASSESSMENT BEFORE WORKLOAD PARTITIONING PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is now in place (P8-A through P9-A):
+
+  ✅ Structural topology, dependency, correlation, forecast, comparative, signals
+  ✅ Formal typed TenantIsolationContext — workspaceId validated at context build
+  ✅ Per-resource boundary enforcement — enforceTenantIsolation()
+  ✅ Analytics batch scope validation — validateAnalyticsScope()
+  ✅ Observability event scope validation — validateObservabilityScope()
+  ✅ Deterministic 4-dimension risk assessment — assessTenantIsolationRisk()
+  ✅ 4 structured isolation observability events
+  ✅ 6 typed violation codes (TenantViolationCode)
+  ✅ TenantIsolationViolation error class (fail-closed, no auto-correction)
+  ✅ Integrated into comparative intelligence (P8-E) and governance signals (P8-F)
+  ✅ 52 isolation tests (T1–T10), all passing
+
+What P9-A enables for next phases:
+
+A) P9-B: Workload Partitioning Foundations
+   Prerequisite from P9-A:
+     TenantIsolationContext provides workspaceId + requestScopeId as the
+     starting point for workload attribution.
+   P9-B can build:
+     TenantWorkloadBudget — per-workspace execution budget tracking
+     computeWorkloadPartition() — assigns analytics CPU budget per workspace
+     based on active workflow count + execution rate
+   P9-A gap that P9-B must fill:
+     Section 13-F (no per-tenant execution quota) must be addressed.
+     The rate limit (P3-B) must be tied to the formal tenant context.
+
+B) P9-C: Isolation Audit Log & Violation Persistence
+   Prerequisite from P9-A:
+     tenant_boundary_violation_blocked events are well-structured and
+     carry all needed fields for DB persistence.
+   P9-C can build:
+     governance_isolation_violation_log table (workspaceId, violationCode,
+     resourceType, requestScopeId, actorId, createdAt)
+     GET /platform/isolation/violations — super-admin violation audit trail
+     assessTenantIsolationRisk() surfaced via GET /platform/isolation/health
+
+C) P9-D: Remaining Route Hardening
+   Mechanical application of the P9-A three-step pattern to:
+     All GET /workflows/:id/* individual analytics routes
+     POST /workflows/:id/trigger
+     GET /workflows/executions/* list routes
+   Unblocked now that the pattern is proven (P9-A) and integration tested.
+
+D) Governance dashboard: isolation health panel
+   advisoryLevel (P8-F) + overallRisk (P9-A) together drive:
+     - Workspace health banner (advisory level)
+     - Isolation health indicator (risk assessment)
+   These are complementary: advisory level is operational (workflow risk),
+   isolation risk is structural (tenant boundary health).
+
+Key isolation questions that P9-A resolves:
+  Q: Can a workspace see another workspace's analytics data?
+  A: No. wsCond (Layer C) + validateAnalyticsScope (Layer E) make this
+     impossible without a multi-layer simultaneous failure.
+
+  Q: Can cross-workspace data silently enter the analytics pipeline?
+  A: No. validateAnalyticsScope() will throw ANALYTICS_BOUNDARY_VIOLATION
+     and return 403 before any engine runs on mixed data.
+
+  Q: Can observability events be emitted without workspace identification?
+  A: Formally prevented by validateObservabilityScope(). Not yet enforced
+     at all existing emission sites (gap H in Section 13).
+
+  Q: Can a governance advisory signal reference another workspace's workflow?
+  A: The engine layer prevents this (generateGovernanceSignals receives
+     workspaceId as context and stamps it on all signals). The route handler
+     now additionally calls validateAnalyticsScope() on the input batch.
+
+  Q: Is the isolation deterministic?
+  A: Yes. Same input + same workspaceId → same enforcement outcome.
+     Tested explicitly in T7 (5 assertions).

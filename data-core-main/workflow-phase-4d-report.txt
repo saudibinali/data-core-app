@@ -1,0 +1,515 @@
+WORKFLOW GOVERNANCE — PHASE 4-D: EXACT-ONCE STATUS TRANSITION SAFETY
+Implementation Report
+Date:   2026-05-13
+Status: COMPLETE — 202/202 tests passed (109 new P4-D), typecheck clean, server running.
+Scope:  executor.ts (6 guarded transitions), routes/workflows.ts (2 guarded UPDATEs),
+        __tests__/transitions.test.ts (T1–T8, 109 pure logic tests)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 4-D closes the last class of race conditions in the workflow runtime by
+converting every status-changing UPDATE from a blind write into a guarded write:
+
+  BEFORE (P4-A/B/C):  UPDATE ... SET status='X' WHERE id = :id
+  AFTER  (P4-D):      UPDATE ... SET status='X' WHERE id = :id AND <guard>
+                      .returning() → empty means the race fired → log + return
+
+The model is optimistic concurrency control without distributed locks:
+  • PostgreSQL atomically serializes concurrent UPDATEs on the same row.
+  • Exactly one UPDATE wins the WHERE guard in a concurrent race.
+  • The losing UPDATE returns .returning() = [] — detected and handled.
+  • No retries. No compensating transactions. No distributed mutexes.
+
+The result: status transitions are now exactly-once. A terminal state,
+once set, cannot be overwritten by any concurrent executor, route handler,
+or admin endpoint — regardless of timing.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — COMPLETE TRANSITION TABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All status-changing UPDATEs in the workflow runtime (P4-D complete):
+
+  ID   FROM               TO                WHERE GUARD                       OWNER      RACE RESPONSE
+  ───  ─────────────────  ────────────────  ───────────────────────────────── ─────────  ─────────────────────────────
+  T1   pending            running           status='pending'                  executor   log.warn + return safely
+  T2   running            waiting_approval  status='running'                  executor   log.warn + return safely
+  T3   running            failed            status NOT IN TERMINAL            executor   log.warn + return safely
+  T4   running            timed_out (TTL)   status NOT IN TERMINAL            executor   log.warn + return safely
+  T5   running            cancelled         status NOT IN TERMINAL            executor   log.warn + return safely
+  T6   running            completed         status='running'                  executor   log.warn + return safely
+  T7   non-terminal       timed_out (force) status NOT IN TERMINAL            admin API  409 TRANSITION_RACE_LOST
+  T8   non-terminal       cancel_requested  !terminal AND !cancelRequested    admin API  422/409/409 (see §4)
+
+  Note: currentStepIndex UPDATE is NOT guarded — it is a progress marker,
+  not a terminal transition. It is harmless even if a race fires after it.
+
+  TERMINAL_STATUSES = ['completed', 'failed', 'error', 'timed_out', 'cancelled']
+  Non-terminal statuses = ['pending', 'running', 'waiting_approval']
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — GUARDED TRANSITIONS IN executor.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: artifacts/api-server/src/lib/workflows/executor.ts
+
+New imports:
+  import { eq, and, not, inArray } from "drizzle-orm";
+  import { ..., TERMINAL_STATUSES } from "./ttl";
+
+New helper:
+  const notTerminal = (statusCol) => not(inArray(statusCol, [...TERMINAL_STATUSES]));
+  — Shared by all NOT terminal guards. Avoids repeating the array spread.
+
+── T1: Opening transition (pending → running) ─────────────────────────────────
+
+  WHERE: status='pending'
+  GUARD: prevents duplicate executor start AND force-timeout between creation
+         and first DB write.
+
+  BEFORE:
+    await db.update(...).set({ status: "running" })
+            .where(eq(...id, executionId));
+
+  AFTER:
+    const [openedExec] = await db
+      .update(...).set({ status: "running" })
+      .where(and(eq(...id, executionId), eq(...status, "pending")))
+      .returning({ id: ... });
+    if (!openedExec) { logger.warn(...race_lost...); return; }
+
+  Race scenario this closes (RC-2 variant):
+    t=0  Engine creates execution, status='pending'.
+    t=1  Admin calls POST /timeout (pre-flight passes: pending is non-terminal).
+    t=2  POST /timeout sets status='timed_out' (T7 guard).
+    t=3  Executor starts — T1 guard fires, .returning()=[] → return safely.
+    WITHOUT GUARD: executor would set status='running', overwriting 'timed_out'.
+
+── T2: Approval pause (running → waiting_approval) ────────────────────────────
+
+  WHERE: status='running'
+  GUARD: prevents writing 'waiting_approval' on an execution that is already
+         terminal (admin may have force-timed-out between step completion
+         and this UPDATE).
+
+  Race scenario this closes:
+    t=0  Step returns { waitForApproval: true }.
+    t=1  Admin calls POST /timeout between step completion and this UPDATE.
+    t=2  POST /timeout sets status='timed_out'.
+    t=3  T2 guard fires, .returning()=[] → return safely.
+    WITHOUT GUARD: executor would set status='waiting_approval',
+                   overwriting 'timed_out'.
+
+── T3: Step failure (running → failed) ────────────────────────────────────────
+
+  WHERE: status NOT IN TERMINAL
+  GUARD: prevents overwriting timed_out/cancelled if admin acted between
+         the step throwing and this UPDATE.
+
+  Why NOT terminal (not status='running'):
+    The step may also fail from a 'waiting_approval' state if the approval
+    handler throws. Using NOT terminal covers both cases correctly.
+
+  Race scenario this closes (RC-1 partial):
+    t=0  Step i throws an exception.
+    t=1  Admin calls POST /timeout between catch{} and the UPDATE.
+    t=2  POST /timeout sets status='timed_out'.
+    t=3  T3 guard fires, .returning()=[] → return safely.
+    WITHOUT GUARD: executor would set status='failed', overwriting 'timed_out'.
+
+── T4: TTL timeout at boundary (running → timed_out) ──────────────────────────
+
+  WHERE: status NOT IN TERMINAL
+  GUARD: prevents duplicate timed_out if admin force-timed-out at the same
+         boundary moment, or if cancellation fired first.
+
+  Race scenario:
+    t=0  TTL check fires (isExecutionTimedOut=true).
+    t=1  Admin calls POST /timeout simultaneously.
+    t=2  Admin's UPDATE (T7) wins — sets status='timed_out'.
+    t=3  Executor's T4 guard fires, .returning()=[] → return safely (already done).
+    WITHOUT GUARD: two timed_out UPDATEs fire. Harmless (same state) but
+                   the .returning() guard eliminates the redundant DB write.
+
+── T5: Cancellation at boundary (running → cancelled) ─────────────────────────
+
+  WHERE: status NOT IN TERMINAL
+  GUARD: prevents cancelled from overwriting timed_out (if force-timeout
+         fired between the cancel flag re-fetch and this UPDATE).
+
+  Race scenario (EC-3 from P4-C — now closed):
+    t=0  cancel_requested=true found in re-fetch.
+    t=1  Admin calls POST /timeout between the re-fetch and this UPDATE.
+    t=2  POST /timeout sets status='timed_out'.
+    t=3  T5 guard fires, .returning()=[] → return safely.
+    WITHOUT GUARD: executor would set status='cancelled', overwriting 'timed_out'.
+
+── T6: Completion (running → completed) ───────────────────────────────────────
+
+  WHERE: status='running'
+  GUARD: prevents overwriting timed_out/cancelled if admin acted between the
+         last step completing and this UPDATE. The stricter 'running' guard
+         (vs NOT terminal) also ensures waiting_approval cannot complete
+         directly — it must resume via the approval flow.
+
+  Race scenario this closes (RC-1 — fully closed):
+    t=0  Last step completes successfully.
+    t=1  Admin calls POST /timeout between step completion and this UPDATE.
+    t=2  POST /timeout sets status='timed_out'.
+    t=3  T6 guard fires, .returning()=[] → return safely.
+    WITHOUT GUARD: executor would set status='completed', overwriting 'timed_out'.
+    This was the primary RC-1 documented in workflow-phase-4c-report.txt.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — GUARDED TRANSITIONS IN routes/workflows.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: artifacts/api-server/src/routes/workflows.ts
+
+New imports:
+  + not, inArray  from "drizzle-orm"
+  + TERMINAL_STATUSES  from "../lib/workflows/ttl"
+
+── T7: Force-timeout route (POST /executions/:id/timeout) ─────────────────────
+
+  WHERE: status NOT IN TERMINAL
+  GUARD: prevents overwriting a terminal state that the executor set between
+         the pre-flight SELECT and this UPDATE.
+
+  BEFORE:
+    const [updated] = await db
+      .update(...).set({ status: "timed_out", completedAt: now })
+      .where(eq(...id, id))
+      .returning();
+    // always treated as successful
+
+  AFTER:
+    const [updated] = await db
+      .update(...).set({ status: "timed_out", completedAt: now })
+      .where(and(eq(...id, id), not(inArray(...status, [...TERMINAL_STATUSES]))))
+      .returning();
+    if (!updated) {
+      req.log.warn({ ..., action: "transition_race_lost" }, "P4-D: force-timeout lost race");
+      res.status(409).json({ code: "TRANSITION_RACE_LOST", executionId: id });
+      return;
+    }
+
+  Race scenario this closes:
+    t=0  GET existing → status='running' (pre-flight passes).
+    t=1  Executor: last step completes, UPDATE status='completed'.
+    t=2  POST /timeout UPDATE fires → .returning()=[] → 409 TRANSITION_RACE_LOST.
+    WITHOUT GUARD: force-timeout would overwrite 'completed' → data corruption.
+
+── T8: Cancel flag route (POST /executions/:id/cancel) ────────────────────────
+
+  WHERE: cancelRequested=false AND status NOT IN TERMINAL
+  GUARD: closes two races simultaneously with one atomic UPDATE:
+    a) Duplicate cancel requests that bypass the pre-flight check.
+    b) Execution becoming terminal between the pre-flight SELECT and UPDATE.
+
+  BEFORE:
+    await db.update(...).set({ cancelRequested: true })
+            .where(eq(...id, id));
+    // always succeeded
+
+  AFTER:
+    const [flagged] = await db
+      .update(...).set({ cancelRequested: true })
+      .where(and(
+        eq(...id, id),
+        eq(...cancelRequested, false),
+        not(inArray(...status, [...TERMINAL_STATUSES])),
+      ))
+      .returning({ id });
+    if (!flagged) {
+      // Re-fetch to determine why the guard fired:
+      const [current] = await db.select(...).where(eq(...id, id));
+      if (!current || isTerminalStatus(current.status)) → 422 EXECUTION_ALREADY_TERMINAL
+      else if (current.cancelRequested)                 → 409 CANCEL_ALREADY_REQUESTED
+      else                                              → 409 TRANSITION_RACE_LOST
+    }
+
+  Why re-fetch on race:
+    The 'existing' snapshot is stale by the time .returning() is empty.
+    Re-fetching gives the caller accurate current-state information and
+    the most specific error code.
+
+  Error codes (post-P4-D):
+    EXECUTION_ALREADY_TERMINAL — status became terminal between pre-flight and UPDATE.
+    CANCEL_ALREADY_REQUESTED   — duplicate cancel (flag was set concurrently).
+    TRANSITION_RACE_LOST       — state changed in an unexpected way (should be rare).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — RACE CONDITIONS STATUS (POST P4-D)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RC-1 (P4-C report): Completion overwrites timed_out.
+  STATUS: CLOSED (P4-D, T6 guard: WHERE status='running').
+  Any concurrent force-timeout wins the guard. Completion UPDATE returns []
+  → race detected → return safely.
+
+RC-2 (P4-C report): cancel_requested on pending execution start race.
+  STATUS: CLOSED (P4-D, T1 guard: WHERE status='pending').
+  If force-timeout fires before executor starts → T1 returns [] → return safely.
+  The cancel flag race is handled by the guarded flag UPDATE in T8.
+
+RC-3 (P4-C report): waiting_approval + cancel (EC-1 race).
+  STATUS: PARTIALLY MITIGATED (P4-D, T2 + T8).
+  If execution is at 'waiting_approval' and cancel is requested:
+    • T8 guard: the cancel flag is set only if status is non-terminal (OK).
+    • The executor has already returned — it will not reach the boundary
+      unless the execution resumes (approval provided).
+  REMAINING: if approval arrives after cancel was requested, the executor
+  would re-enter the loop and read cancel_requested=true at the first
+  boundary, correctly cancelling. However, the approval resumption path
+  is not fully implemented yet — the executor currently pauses and returns
+  without a re-entry mechanism. This is P4-E scope.
+
+New race windows AFTER P4-D:
+  NONE identified.
+
+  The currentStepIndex UPDATE (progress marker, non-terminal) is intentionally
+  left without a status guard:
+    • It only writes a monotonically increasing index.
+    • It does not change status.
+    • Even if it races with a terminal transition, the terminal UPDATE's guard
+      (T3–T6) runs AFTER it and correctly handles the race.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — OPTIMISTIC CONCURRENCY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHY NO LOCKS:
+
+  Option A (NOT chosen): Pessimistic locking.
+    SELECT ... FOR UPDATE inside a transaction wrapping the entire step loop.
+    Problem: locks the row for the entire duration of a step (seconds to minutes),
+    blocking all readers and the force-timeout admin endpoint.  Unacceptable
+    for an operations platform with real-time monitoring.
+
+  Option B (NOT chosen): Advisory locks.
+    pg_try_advisory_lock(executionId) held for the step loop lifetime.
+    Problem: same duration issue + lock leaks on process crash.
+    Requires background cleanup.
+
+  Option C (CHOSEN): Optimistic concurrency via guarded UPDATE.
+    PostgreSQL atomically evaluates the WHERE clause and runs the UPDATE
+    in a single lock acquisition of the row.  Concurrent UPDATEs on the
+    same row are serialized by the DB engine.  Exactly one UPDATE wins;
+    all others see .returning()=[].  Total lock time: microseconds.
+    Zero lock leaks.  Zero blocking of readers.
+
+WHY THIS IS SUFFICIENT FOR CURRENT SCALE:
+
+  The workflow engine is single-instance (one Node.js process).  Concurrent
+  execution races occur ONLY between:
+    1. The executor (async step loop) and an admin HTTP handler.
+    2. Two concurrent admin HTTP requests (force-timeout + cancel).
+  In both cases, the guarded UPDATE correctly serializes the winner.
+  Multi-instance deployment (future): the guard model extends correctly —
+  PostgreSQL serializes the guard across all instances simultaneously.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — TRANSITION OWNERSHIP MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RULE: The executor owns all status transitions.
+        Route handlers may request intent (cancel_requested flag) but
+        must never write status directly.
+
+  EXCEPTION: POST /timeout (force-timeout) is an irreversible admin override
+  for stuck-execution recovery.  It bypasses the cooperative model by design.
+  The T7 guard ensures even this exception cannot overwrite a terminal state.
+
+  ENFORCEMENT MODEL (P4-D complete):
+    All 8 status-changing UPDATEs now use WHERE guards.
+    No blind UPDATEs remain in the execution status flow.
+
+  WHY THIS IS SAFE WITHOUT TRANSACTIONS:
+    Each individual status UPDATE is atomic at the PostgreSQL level.
+    The transition correctness guarantee comes from the WHERE guard,
+    not from wrapping multiple operations in a transaction.
+
+    Between the WHERE guard and the status transition, no other code
+    runs — it is a single SQL statement.  The window for a race is
+    reduced to the microsecond-level lock acquisition time.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — OBSERVABILITY (RACE DETECTION LOGS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every race detection emits a structured logger.warn (or req.log.warn) entry.
+
+Guaranteed fields for executor races:
+  executionId         number
+  workflowId          number
+  workspaceId         number
+  attemptedTransition string     — e.g. "running→completed"
+  action              string     — always "transition_race_lost"
+  + transition-specific fields (stepIndex, stepName, timeoutAt, etc.)
+
+Guaranteed fields for route races:
+  executionId         number
+  workflowId          number
+  workspaceId         number
+  previousStatus      string
+  action              "transition_race_lost"
+  + route-specific fields (adminId, cancelledBy, etc.)
+
+Log level: WARN (all race detections).
+  Race conditions are operational signals, not system errors.
+  They indicate concurrent activity that was handled gracefully.
+
+Search patterns (for log aggregation):
+  action:transition_race_lost          — all races across all transitions
+  attemptedTransition:running→completed — completion races specifically
+  attemptedTransition:running→timed_out — TTL boundary races
+  attemptedTransition:pending→running   — duplicate executor start races
+  P4-D: (substring in message)         — all P4-D race log entries
+
+Complete list of transitions that emit race logs:
+  1. pending→running           (T1: executor opening guard)
+  2. running→failed            (T3: step failure guard)
+  3. running→waiting_approval  (T2: approval pause guard)
+  4. running→timed_out         (T4: TTL boundary guard)
+  5. running→cancelled         (T5: cancellation boundary guard)
+  6. running→completed         (T6: completion guard)
+  7. ?→timed_out               (T7: force-timeout route guard)
+  8. set cancel_requested=true (T8: cancel flag route guard)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Command:  pnpm --filter @workspace/api-server run test
+Runner:   vitest v4.1.6
+Duration: 1.10s
+
+  Test Files:  4 passed (4)
+  Tests:       202 passed (202)
+
+Breakdown — NEW P4-D tests (transitions.test.ts):
+
+  T1 — completion cannot overwrite terminal states              7 tests  ✓
+  T2 — step failure cannot overwrite terminal states           27 tests  ✓
+       (5 terminal × 1 target + 5 terminal × rejection + ...via forEach)
+  T3 — duplicate terminal transitions always prevented         27 tests  ✓
+       (5 × 5 terminal→terminal matrix + 2 extras)
+  T4 — pending→running guarded correctly                        6 tests  ✓
+  T5 — cancel route guarded UPDATE logic                        8 tests  ✓
+  T6 — force-timeout route guarded UPDATE logic                 8 tests  ✓
+  T7 — .returning() empty treated as race safely                4 tests  ✓
+  T8 — terminal states remain completely immutable             22 tests  ✓
+       (5 terminal × 8 all-statuses matrix + 4 extras)
+  ─────────────────────────────────────────────────────────────────────
+  Total P4-D (transitions.test.ts)                           109 tests  ✓
+
+  P4-C (cancellation.test.ts)                                 35 tests  ✓
+  P4-B (ttl.test.ts)                                          40 tests  ✓
+  P4-A (context.test.ts)                                      18 tests  ✓
+  ─────────────────────────────────────────────────────────────────────
+  Grand total                                                202 tests  ✓ ALL PASS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — WHAT WAS NOT BUILT (SCOPE BOUNDARIES)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Explicitly excluded per spec:
+
+  ✗  DB advisory locks (pg_try_advisory_lock)
+  ✗  Pessimistic row locking (SELECT ... FOR UPDATE)
+  ✗  Distributed mutexes / queues
+  ✗  Transaction redesign (wrapping the step loop in a DB transaction)
+  ✗  Saga patterns / compensating transactions
+  ✗  Execution retries
+  ✗  Execution recovery / resumption (P4-E scope)
+  ✗  Background scheduler / sweeper (P4-F scope)
+  ✗  DAG execution
+  ✗  Workflow snapshots
+  ✗  Distributed workers
+  ✗  P4-E: Execution resume/retry flow
+  ✗  P4-F: Background stuck-execution sweeper
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P4-D is complete. The workflow runtime now has strict, exactly-once status
+transition safety across all 8 status-changing UPDATEs.
+
+Readiness for P4-E (Execution Resume/Retry Flow):
+
+  ✓  All status transitions are guarded — P4-E can safely add resume paths
+     (waiting_approval → running) without worrying about overwrite races.
+  ✓  cancel_requested flag is correctly set via guarded UPDATE (T8).
+  ✓  TERMINAL_STATUSES is complete and exported from ttl.ts.
+  ✓  isTerminalStatus() is used consistently across executor and routes.
+  ✓  202/202 tests passing — regression baseline is solid.
+  ✓  Typecheck: 0 errors.
+  ✓  Server running with P4-D changes active (restarted post-implementation).
+
+Remaining items before production-hardening:
+
+  MEDIUM: RC-3 (waiting_approval + cancel) requires the approval resumption
+          path to be implemented (P4-E) before the cancellation can fire
+          on approval-paused executions. Current behavior: cancel flag is set
+          correctly, but the executor won't reach the boundary until approval.
+          Workaround: admin uses POST /timeout to force-terminate.
+
+  LOW:    Zero-step workflow (EC-5 from P4-C): no boundary, so neither TTL
+          nor cancellation fires cooperatively. Executor completes directly.
+          The opening guard (T1) still protects against duplicate start races.
+
+  LOW:    currentStepIndex UPDATE is unguarded (intentional — progress marker
+          only). This is safe with the current single-instance deployment.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX — FILES CHANGED SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED:
+    artifacts/api-server/src/lib/workflows/__tests__/transitions.test.ts
+      — 109 unit tests across T1–T8 (pure logic, no DB).
+        Covers immutability matrix, guard model, race detection,
+        cancel route guards, force-timeout route guards.
+
+  MODIFIED:
+    artifacts/api-server/src/lib/workflows/executor.ts
+      + imports: and, not, inArray from drizzle-orm
+      + imports: TERMINAL_STATUSES from ./ttl
+      + notTerminal() helper (top-level)
+      + T1: Guarded opening transition (pending→running)
+      + T2: Guarded approval pause (running→waiting_approval)
+      + T3: Guarded step failure (running→failed)
+      + T4: Guarded TTL check (running→timed_out)
+      + T5: Guarded cancellation check (running→cancelled)
+      + T6: Guarded completion (running→completed)
+      + Comprehensive transition ownership documentation (file header)
+      + Race log for each of the 6 transitions (logger.warn with
+        attemptedTransition, action:'transition_race_lost')
+
+    artifacts/api-server/src/routes/workflows.ts
+      + imports: not, inArray from drizzle-orm
+      + imports: TERMINAL_STATUSES from ../lib/workflows/ttl
+      + T7: POST /timeout — guarded WHERE NOT terminal + .returning() race
+            detection → 409 TRANSITION_RACE_LOST + req.log.warn
+      + T8: POST /cancel — guarded WHERE !terminal AND !cancelRequested +
+            .returning() race detection → re-fetch + 422/409/409 by case
+            + req.log.warn with action:'transition_race_lost'
+
+  UNCHANGED:
+    lib/db/src/schema/workflows.ts  — no schema changes needed
+    ttl.ts                          — TERMINAL_STATUSES already complete
+    context.ts                      — P4-A, no changes
+    conditions.ts, validator.ts     — no changes
+    steps/*.ts                      — no changes
+    engine.ts                       — no changes
+    cancellation.test.ts            — P4-C, unchanged (35 tests still pass)
+    ttl.test.ts                     — P4-B, unchanged (40 tests still pass)
+    context.test.ts                 — P4-A, unchanged (18 tests still pass)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

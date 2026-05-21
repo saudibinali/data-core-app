@@ -1,0 +1,189 @@
+================================================================================
+WORKFLOW PHASE 16-F — Subscription Console Integration
+================================================================================
+Status: COMPLETE
+Date: 2026-05-18
+Scope: UI / integration only (no new enforcement, payments, emails, or role matrix)
+
+--------------------------------------------------------------------------------
+1) UNIFIED SUBSCRIPTION CONSOLE
+--------------------------------------------------------------------------------
+
+Location:
+  Super Admin > Tenant Registry > open tenant > primary tab "Subscription"
+
+Component:
+  artifacts/ops-platform/src/components/subscription/SubscriptionConsole.tsx
+
+Layout (accordion sections):
+  A) Subscription Overview
+     - SubscriptionConsoleOverviewSection.tsx (read-only snapshot)
+     - Optional registry metadata slot (legacy SubscriptionManagementPanel when
+       subscriptions.read is granted)
+  B) Subscription State (P16-A) — SubscriptionStatePanel
+  C) Entitlements & Features (P16-B) — EntitlementsFeaturesPanel
+  D) Limits & Quotas (P16-C) — LimitsQuotasPanel
+  E) Grace & Suspension Policy (P16-D) — GraceSuspensionPolicyPanel
+  F) Workspace Access Control (P16-E) — WorkspaceAccessControlPanel
+
+Legacy wrapper preserved for tests:
+  SubscriptionEntitlementsConsole.tsx → delegates to SubscriptionConsole with
+  data-testid="subscription-entitlements-console"
+
+Single primary tab label: "Subscription" (no duplicate "Subscription & Entitlements"
+in the tab bar).
+
+Deep link alias:
+  ?tab=subscription_entitlements → normalized to subscription tab
+  (parseConsoleTabParam / normalizeConsoleTab)
+
+--------------------------------------------------------------------------------
+2) TOP SUMMARY CARDS
+--------------------------------------------------------------------------------
+
+Component:
+  SubscriptionConsoleSummaryCards.tsx
+
+Cards (permission-filtered, existing hooks only):
+  - Subscription Status (useTenantSubscription)
+  - Access Mode (useTenantWorkspaceAccess / evaluation)
+  - Renewal Date
+  - Days Until End
+  - Grace / Past Due / Suspension recommendation (policy evaluation)
+  - Entitlements Enabled (useTenantEntitlements)
+  - Quotas Warning / Exceeded (useTenantQuotaUsage)
+  - Workspace Mode (workspace access flags)
+
+No new aggregation API added.
+
+--------------------------------------------------------------------------------
+3) TENANT DETAIL NAVIGATION CLEANUP
+--------------------------------------------------------------------------------
+
+Config: tenant-admin-console-config.ts
+
+Primary tabs (order):
+  Overview | Lifecycle | Commercial | Subscription | Health | More
+
+More dropdown (secondary):
+  Entitlements | Usage | Renewal | Evaluation
+  (+ future non-primary tabs appended; subscription_entitlements excluded when
+   subscription is visible)
+
+Helpers:
+  - dedupeConsoleTabs() — hides duplicate subscription_entitlements tab
+  - normalizeConsoleTab() — legacy alias → subscription
+  - partitionVisibleConsoleTabs() — skips subscription_entitlements when subscription
+    is in the visible set
+
+Tab bar: TenantConsoleTabBar.tsx (unchanged behavior — keyboard menu, active
+indicator, overflow-hidden, dark mode compatible)
+
+P13 secondary panels (Entitlements, Usage, Renewal, Evaluation) remain under
+More; content not removed.
+
+--------------------------------------------------------------------------------
+4) PERMISSION GATING
+--------------------------------------------------------------------------------
+
+No new permissions added.
+
+Subscription tab visibility (any of):
+  subscriptions.read
+  platform.subscriptions.read
+  platform.entitlements.read
+  platform.quotas.read
+  platform.subscriptionPolicies.read
+  platform.workspaceAccess.read
+
+Each accordion section renders only when the corresponding canRead* flag is true.
+Denied users see subscription-console-denied message.
+
+Existing action gates unchanged (update / status.change / evaluate per section).
+
+--------------------------------------------------------------------------------
+5) BACKEND DECISION
+--------------------------------------------------------------------------------
+
+No new backend routes or mutations.
+
+Did NOT add GET /platform/tenants/:tenantId/subscription-overview — client-side
+aggregation from existing hooks is sufficient for P16-F.
+
+--------------------------------------------------------------------------------
+6) SAFETY GUARANTEES
+--------------------------------------------------------------------------------
+
+File: subscription-console-config.ts
+Contract: SUBSCRIPTION_CONSOLE_SAFETY_CONTRACT (all boolean flags true)
+
+  subscriptionConsoleIntegrationOnly = true
+  noNewEnforcement = true
+  noAutomaticSuspension = true
+  noTenantLoginBlocking = true
+  noNewModuleBlocking = true
+  noDestructiveWorkspaceActions = true
+  noElectronicPayment / noStripe / noCheckout / noPaymentGateway = true
+  noInvoiceGenerationEngine / noTaxCalculation / noZatcaIntegration = true
+  noAccountingLedger / noEmailSending / noAutomatedDunning = true
+  noAutomatedRenewalActions = true
+  noCustomPermissions = true
+  sectionPermissionGated = true
+  navigationOverflowHandled = true
+
+Forbidden UI terms checked in tests (Pay Now, Stripe, Checkout, Auto Suspend, etc.).
+
+--------------------------------------------------------------------------------
+7) TESTS
+--------------------------------------------------------------------------------
+
+New:
+  artifacts/ops-platform/src/lib/__tests__/phase-16f-subscription-console.test.ts
+
+Updated:
+  tenant-console-tab-navigation.test.ts
+  phase-16a through phase-16e tests (subscription tab + SubscriptionConsole wiring)
+
+Result (vitest):
+  7 files, 78 tests passed
+
+--------------------------------------------------------------------------------
+8) LIMITATIONS LEFT FOR P16-G
+--------------------------------------------------------------------------------
+
+NOT started in this phase:
+
+  P16-G — Tenant Subscription Visibility
+    - Tenant-facing subscription summary / self-service read views
+    - Tenant portal navigation for subscription status
+    - Any tenant-member UX beyond existing WorkspaceReadOnlyBanner (P16-E)
+
+Also out of scope (future phases):
+  - Automated enforcement / dunning / renewal actions
+  - Electronic payments / invoicing / ZATCA
+  - Email notifications
+  - Custom permissions / role matrix redesign
+
+--------------------------------------------------------------------------------
+FILES TOUCHED (summary)
+--------------------------------------------------------------------------------
+
+New:
+  subscription-console-config.ts
+  SubscriptionConsole.tsx
+  SubscriptionConsoleSummaryCards.tsx
+  SubscriptionConsoleOverviewSection.tsx
+  phase-16f-subscription-console.test.ts
+  workflow-phase-16f-report.txt
+
+Modified:
+  SubscriptionEntitlementsConsole.tsx (thin wrapper)
+  tenant-admin-console-config.ts
+  platform-access.ts
+  super-admin-tenants.tsx
+  tenant-console-tab-navigation.test.ts
+  phase-16a..16e tests (tab id references)
+
+================================================================================
+END OF REPORT — P16-F COMPLETE — DO NOT START P16-G IN THIS WORKFLOW
+================================================================================

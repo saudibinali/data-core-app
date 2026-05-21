@@ -1,0 +1,275 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-7b-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- retention limitations
+- no rollup tables
+- >30d analytics gap
+- snapshot storage pressure
+- trend query semantics
+
+ثم نفّذ فقط:
+P7-C — Historical Rollup Foundations
+
+ولا تنفّذ:
+- distributed analytics warehouses
+- ClickHouse/BigQuery integrations
+- ML forecasting
+- realtime OLAP systems
+- cross-region analytics replication
+- predictive anomaly engines
+
+عنوان المهمة:
+WORKFLOW PHASE 7-C — Historical Rollups & Long-Term Analytics Foundations
+
+المهمة الحالية:
+تحويل:
+raw short-term governance history
+
+إلى:
+long-term compressed operational intelligence
+
+الهدف:
+تمكين:
+- >30 day historical analytics
+- long-term trend visibility
+- storage-efficient retention
+- historical governance continuity
+
+بطريقة:
+deterministic append-only rollup lifecycle
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT RETENTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- governance_snapshots
+- pruning lifecycle
+- trend queries
+- retention recommendations
+- storage pressure model
+
+حدّد:
+- أين 30d analytics تنقطع
+- أين raw snapshots غير عملية طويلًا
+- أين historical continuity مفقودة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN ROLLUP STORAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+governance_snapshot_rollups
+
+ليحتوي:
+- workspaceId
+- granularity (hourly/daily)
+- bucketStart
+- bucketEnd
+- snapshotCount
+- avgErrorRate
+- avgApprovalBacklog
+- avgDelayBacklog
+- avgStuckCount
+- dominantSeverity
+- chronicAlertCodes
+- stormFrequency
+
+مع:
+immutable rollup semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — HOURLY ROLLUP PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+buildHourlyRollups()
+
+بحيث:
+- يجمع raw snapshots
+- يبني hourly summaries
+- append-only inserts
+- deterministic aggregation rules
+
+الحد الأدنى:
+30d → 90d hourly retention.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — DAILY ROLLUP PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+buildDailyRollups()
+
+بحيث:
+- يجمع hourly rollups
+- يبني daily summaries
+- append-only inserts
+- deterministic severity aggregation
+
+الحد الأدنى:
+90d → 365d daily retention.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ROLLUP AGGREGATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّد rules واضحة:
+
+dominantSeverity:
+- highest severity wins
+أو:
+- weighted majority
+
+chronicAlertCodes:
+- alerts appearing above threshold
+
+stormFrequency:
+- percentage of snapshots with storms
+
+المطلوب:
+stable deterministic aggregation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PRUNING LIFECYCLE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+raw pruning
+لا يحدث إلا بعد:
+successful rollup persistence.
+
+المطلوب:
+- no analytics gaps
+- no history holes
+- no accidental data loss
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TREND QUERY CASCADE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+query layer
+يختار تلقائيًا:
+- raw snapshots لـ ≤30d
+- hourly rollups لـ 30–90d
+- daily rollups لـ 90–365d
+
+مع:
+consistent response contracts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_rollup_hourly_completed
+
+B)
+governance_rollup_daily_completed
+
+C)
+governance_rollup_pruning_safe
+
+D)
+governance_rollup_failed
+
+E)
+governance_rollup_query_resolved
+
+كلها تحتوي:
+- workspaceId
+- granularity
+- sourceSnapshotCount
+- rollupCount
+- retentionWindow
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Rollup lifecycle MUST:
+- remain append-only
+- never rewrite existing rollups
+- never mutate surviving raw snapshots
+- never prune before rollup success
+- never affect runtime execution
+
+أي:
+analytics isolation كاملة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+hourly rollups aggregate correctly
+
+T2:
+daily rollups aggregate correctly
+
+T3:
+dominantSeverity deterministic
+
+T4:
+rollups append-only
+
+T5:
+raw snapshots pruned only after rollup success
+
+T6:
+query cascade selects correct storage layer
+
+T7:
+long-term trends remain continuous
+
+T8:
+chronic alert aggregation stable
+
+T9:
+stormFrequency computed correctly
+
+T10:
+rollup failures never delete raw history
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- distributed OLAP infra
+- realtime aggregation streams
+- warehouse sync
+- ML forecasting
+- anomaly prediction
+- BI dashboard suites
+
+خلك:
+minimal deterministic long-term analytics lifecycle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-7c-report.txt
+
+ويحتوي:
+- rollup architecture
+- aggregation semantics
+- pruning integration guarantees
+- long-term query cascade model
+- observability additions
+- tests results
+- remaining analytics scalability gaps
+- readiness assessment قبل advanced operational analytics

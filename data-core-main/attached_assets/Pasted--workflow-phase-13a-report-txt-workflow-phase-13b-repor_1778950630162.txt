@@ -1,0 +1,373 @@
+راجع:
+- workflow-phase-13a-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13e-report.txt
+- workflow-phase-13f-report.txt
+- workflow-phase-13g-report.txt
+- workflow-phase-13h-report.txt
+- workflow-phase-13i-report.txt
+
+ثم نفّذ فقط:
+P13-J — Final Platform Tenant Administration Closure Report
+
+ولا تضف:
+- backend API جديد
+- frontend UI جديد
+- database migration
+- payment provider
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic workspace locking
+- entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing portal
+- background jobs
+- HR module implementation
+- destructive tenant actions
+
+عنوان المهمة:
+WORKFLOW PHASE 13-J — Final Platform Tenant Administration Closure Report
+
+المهمة الحالية:
+إغلاق Phase 13 بتقرير هندسي نهائي شامل يوثق كامل Platform Tenant Administration, Subscription Intelligence, Entitlements, Usage, Renewal, Health, Evaluation, and Console Consolidation.
+
+الهدف:
+إنتاج تقرير نهائي يوضح:
+- ماذا تم بناؤه في Phase 13
+- كيف توسعت إدارة المنصة
+- ما هي APIs الجديدة
+- ما هي الجداول الجديدة
+- ما هي الواجهات الجديدة
+- ما هي Safety Contracts
+- ما هي الاختبارات
+- ما هي القيود المتعمدة
+- ما الذي لم يتم بناؤه عمدًا
+- ما الجاهزية للمرحلة التالية
+
+بطريقة:
+documentation-only closure
+بدون أي تغيير وظيفي جديد
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW ALL PHASE 13 REPORTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع كل التقارير من:
+- P13-A إلى P13-I
+
+استخرج:
+- capabilities
+- files created
+- files modified
+- APIs
+- DB tables
+- UI additions
+- safety contracts
+- test results
+- remaining gaps
+- readiness notes
+
+مهم:
+إذا يوجد اختلاف بسيط في naming بين تقرير وآخر:
+وثقه كـ non-blocking naming variance إذا لا يؤثر على الوظيفة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PHASE 13 EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اكتب ملخص واضح:
+
+Phase 13 حولت السوبر أدمن من Governance Console فقط إلى:
+- Tenant Registry
+- Workspace Lifecycle Controls
+- Subscription Metadata Management
+- Plan & Entitlement Visibility
+- Usage & Capacity Intelligence
+- Renewal & Grace Intelligence
+- Tenant Health Monitoring
+- Tenant Administration Console
+- Lifecycle Evaluation Engine
+
+مع الحفاظ على:
+- super-admin only
+- controlled actions
+- read-only intelligence
+- no payment
+- no invoices
+- no automatic suspension
+- no destructive actions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PHASE 13 CAPABILITY MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ جدول:
+
+P13-A:
+Tenant Registry & Workspace Inventory
+
+P13-B:
+Workspace Lifecycle Management
+
+P13-C:
+Subscription Metadata & Trial/Renewal Foundations
+
+P13-D:
+Entitlements, Module Access & Feature Limits
+
+P13-E:
+Usage Limits, Quotas & Capacity Intelligence
+
+P13-F:
+Subscription Expiry, Grace Period & Renewal Intelligence
+
+P13-G:
+Tenant Health, Risk Signals & Operational Monitoring
+
+P13-H:
+Tenant Administration Console Consolidation
+
+P13-I:
+Automated Lifecycle Evaluation Engine
+
+لكل صف:
+- الهدف
+- أهم المخرجات
+- APIs/DB/UI إن وجدت
+- safety posture
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FINAL ARCHITECTURE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق البنية النهائية:
+
+Platform Tenant Administration Layer:
+- Tenant Registry
+- Workspace Lifecycle
+- Subscription Metadata
+- Entitlements
+- Usage Intelligence
+- Renewal Intelligence
+- Health Intelligence
+- Lifecycle Evaluation
+- Tenant Admin Console
+
+وضح العلاقة:
+- P13-A registry foundation
+- P13-B controlled lifecycle mutation
+- P13-C subscription metadata
+- P13-D entitlement derivation
+- P13-E usage intelligence
+- P13-F renewal intelligence
+- P13-G health aggregation
+- P13-H console organization
+- P13-I advisory evaluation engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — DATA MODEL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق:
+- tenant_subscriptions
+- tenant_entitlement_overrides
+- أي fields جديدة في TenantRiskSignalSummary
+- أي usage/health/evaluation profile models
+- أي status enums / signal enums
+
+مهم:
+إذا لا يوجد Tenant table مستقل:
+اكتب أن workspace هو tenant identity الحالي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — API SURFACE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق كل APIs الجديدة:
+
+P13-A:
+GET /platform/tenants
+GET /platform/tenants/:tenantId
+GET /platform/tenants/:tenantId/summary
+
+P13-B:
+PATCH /platform/tenants/:tenantId/lifecycle
+
+P13-C:
+GET /platform/tenants/:tenantId/subscription
+PATCH /platform/tenants/:tenantId/subscription
+
+P13-D:
+GET /platform/tenants/:tenantId/entitlements
+PATCH /platform/tenants/:tenantId/entitlements/overrides
+
+P13-E:
+GET /platform/tenants/:tenantId/usage
+
+P13-F:
+GET /platform/tenants/:tenantId/renewal-intelligence
+
+P13-G:
+GET /platform/tenants/:tenantId/health
+
+P13-I:
+GET /platform/tenants/:tenantId/lifecycle-evaluation
+
+لكل API:
+- method
+- purpose
+- read/write
+- super-admin only
+- safety note
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق:
+- /super-admin/tenants
+- Tenant Registry Table
+- Tenant Detail / Tenant Admin Console
+- 8 tabs:
+  - Overview
+  - Lifecycle
+  - Subscription
+  - Entitlements
+  - Usage
+  - Renewal
+  - Health
+  - Evaluation
+
+وثق Panels:
+- Lifecycle Controls
+- Subscription Management
+- Entitlements & Module Access
+- Usage & Capacity Intelligence
+- Renewal & Grace Intelligence
+- Tenant Health & Operational Monitoring
+- Lifecycle Evaluation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SAFETY CONTRACT SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اجمع كل Safety Contracts:
+- Tenant Registry
+- Workspace Lifecycle
+- Subscription Metadata
+- Entitlements
+- Usage Intelligence
+- Renewal Intelligence
+- Tenant Health
+- Tenant Admin Console
+- Lifecycle Evaluation
+
+اكتب final guarantees:
+- super-admin only
+- no payment processing
+- no invoice generation
+- no charge collection
+- no tax
+- no auto suspension
+- no auto lock
+- no destructive tenant actions
+- no HR module execution
+- no email/legal notices
+- no tenant self-service billing
+- no external provider dependency
+- controlled mutations only where explicitly allowed:
+  - lifecycle
+  - subscription metadata
+  - entitlement overrides
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TEST RESULTS SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اجمع آخر أرقام الاختبارات من التقارير:
+- Backend final count
+- Frontend final count
+- Typecheck status
+- أي pre-existing errors غير مرتبطة
+
+إذا بعض التقارير ناقصة رقم backend:
+اكتب آخر رقم موثق من P13-I كـ final verification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — INTENTIONAL NON-SCOPE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق بوضوح أن Phase 13 لم يبنِ:
+- payment provider
+- invoices
+- charges
+- tax
+- automatic suspension
+- automatic lock
+- entitlement enforcement across modules
+- tenant self-service billing
+- customer emails
+- legal notices
+- HR employee management
+- payroll execution
+- recruitment execution
+- attendance engine
+- LMS content
+- destructive tenant actions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — REMAINING GAPS / NEXT READINESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+وثق المتبقي بعد Phase 13:
+- actual billing provider integration لاحقًا
+- invoice/payment workflows لاحقًا
+- background lifecycle evaluator لاحقًا
+- notification/email templates لاحقًا
+- tenant self-service admin لاحقًا
+- real storage/API/document counters لاحقًا
+- entitlement enforcement gates لاحقًا
+- tenant-scoped admin console لاحقًا
+- HRM/HCM modules لاحقًا
+
+لكن وضح:
+Phase 13 جهز foundation قوي لها.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL VERDICT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اكتب verdict واضح:
+
+Phase 13 is complete.
+
+The platform now has a mature super-admin tenant administration layer capable of:
+- managing workspace lifecycle safely
+- maintaining subscription metadata
+- deriving entitlements
+- observing usage/capacity
+- detecting renewal/grace risks
+- aggregating tenant health
+- presenting a consolidated tenant console
+- producing advisory lifecycle evaluations
+
+Without:
+- payment processing
+- destructive automation
+- automatic enforcement
+- tenant data mutation outside controlled metadata/lifecycle areas
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — OUTPUT FILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13j-final-report.txt
+
+ويكون مرتب ومنسق وجاهز للتحويل إلى PDF.

@@ -1,0 +1,480 @@
+═══════════════════════════════════════════════════════════════════════════════
+WORKFLOW PHASE 7-A REPORT
+Historical Governance Snapshots & Trend Infrastructure
+Generated: 2026-05-14
+═══════════════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Convert point-in-time governance visibility into historical operational
+intelligence via append-only snapshot persistence, trend extraction, and
+alert frequency analysis.
+
+Prior to P7-A:
+  • evaluateTenantHealth() computed a fresh health state on every API call
+    and discarded it after the HTTP response.
+  • No historical record existed — trend analysis was impossible.
+  • Alert codes were regenerated live; no frequency or recurrence data.
+  • A workspace that was "critical" at 3am left no permanent record.
+
+After P7-A:
+  • Every governed health evaluation can be persisted as an immutable row.
+  • Trend series (error rates, backlogs, stuck counts, severity evolution)
+    are queryable across 1h / 24h / 7d / 30d windows.
+  • Alert frequency intelligence detects "chronic" GOV-* codes.
+  • Full observability event chain from capture through chronic detection.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SNAPSHOT STORAGE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Table: governance_snapshots
+File:  lib/db/src/schema/governance.ts
+
+┌─────────────────────┬────────────────────────────────────────────────────┐
+│ Column              │ Type / Purpose                                     │
+├─────────────────────┼────────────────────────────────────────────────────┤
+│ id                  │ SERIAL PRIMARY KEY                                 │
+│ workspace_id        │ INTEGER FK → workspaces(id) ON DELETE CASCADE      │
+│ captured_at         │ TIMESTAMPTZ — authoritative trend ordering key     │
+│ severity            │ TEXT — healthy|warning|degraded|critical           │
+│ metrics_snapshot    │ JSONB — SnapshotMetrics (11 numeric fields)        │
+│ indicators          │ JSONB — SnapshotIndicators (5 dimension severities)│
+│ alert_codes         │ JSONB TEXT[] — GOV-* codes active at capture time  │
+│ alert_summary       │ JSONB — {total, critical, warning, info}           │
+│ stuck_count         │ INTEGER — length of stuckExecutions at capture     │
+│ storm_severity      │ TEXT — none|warning|critical                       │
+│ schema_version      │ INTEGER — currently 1 (for future JSONB migration) │
+└─────────────────────┴────────────────────────────────────────────────────┘
+
+Indexes:
+  idx_gov_snap_workspace_time     → (workspace_id, captured_at)
+    Primary trend query index. Covers: WHERE workspace_id=? AND captured_at>=?
+  idx_gov_snap_workspace_severity → (workspace_id, severity, captured_at)
+    For severity-filtered queries: "how often was this workspace critical?"
+
+JSONB design rationale:
+  • metricsSnapshot stores 11 numeric fields from OperationalMetricsSnapshot
+    (excludes workspaceId, capturedAt, estimatedNotificationFanout which are
+    first-class columns or derivable).
+  • alert_codes as JSONB string[] enables fast frequency aggregation without
+    joining to a separate alerts table.
+  • schema_version enables future readers to detect and migrate legacy rows
+    if JSONB shapes change in a breaking way.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPEND-ONLY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All application code paths enforce the following immutability contract:
+
+  ✓ insertGovernanceSnapshot() — uses INSERT ... RETURNING, never UPDATE
+  ✓ No UPDATE path exists for governance_snapshots in any route or library
+  ✓ No DELETE path exists for governance_snapshots in any route or library
+  ✓ captureGovernanceSnapshot() calls evaluateTenantHealth() (READ-ONLY)
+    then insertGovernanceSnapshot() (APPEND-ONLY write) — no execution mutations
+  ✓ Schema has no ON UPDATE trigger or mutable computed column
+  ✓ Structural proof: buildSnapshotPayload() is synchronous and pure —
+    T6 tests verify it returns a plain object without mutation
+
+Immutability is enforced by convention, not DB constraints.
+A future enforcement option: REVOKE UPDATE, DELETE ON governance_snapshots
+FROM app_role — deferred to a hardening pass.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SNAPSHOT CAPTURE PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+captureGovernanceSnapshot(workspaceId, db?, now?)
+
+  Step 1: evaluateTenantHealth()
+          Reads workflow_executions (read-only).
+          Runs computeMetricsFromRows, detectStuckFromRows,
+          detectStormFromRows, generateGovernanceAlerts, classifyTenantHealth.
+
+  Step 2: buildSnapshotPayload(summary)
+          Pure serialization — extracts all storable fields from the summary.
+          No I/O.
+
+  Step 3: insertGovernanceSnapshot(payload)
+          Executes INSERT INTO governance_snapshots ... RETURNING.
+          Returns the hydrated StoredSnapshot with its assigned ID.
+
+  Step 4: Emit governance_snapshot_captured structured log event
+          Fields: workspaceId, snapshotId, snapshotSeverity, stuckCount,
+                  stormSeverity, alertCodes, capturedAt
+
+  Step 5: querySnapshotsByRange(workspaceId, "7d") → detectChronicAlerts()
+          If any chronic alerts found → emit governance_chronic_alert_detected
+          Non-fatal: failure here does not fail the capture.
+
+  Returns: CaptureResult
+    { snapshotId, workspaceId, capturedAt, severity, stuckCount,
+      stormSeverity, alertCodes }
+
+Failure handling:
+  Any error in Step 1 or Step 3 → emit governance_snapshot_capture_failed
+  structured log event with error message, then re-throw to the route handler.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TREND QUERY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Time ranges:
+  "1h"  →   1 hour   →   60 snapshots at 1-min, 12 at 5-min
+  "24h" →  24 hours  → 1440 snapshots at 1-min, 288 at 5-min
+  "7d"  → 168 hours  → 2016 snapshots at 5-min
+  "30d" → 720 hours  → 8640 snapshots at 5-min
+
+Query semantics:
+  • WHERE workspace_id = ? AND captured_at >= (now - range_hours) AND
+          captured_at <= now
+  • ORDER BY captured_at ASC
+  • Future snapshots (captured_at > now) are always excluded
+
+Trend series extracted (pure, from StoredSnapshot[]):
+  severityHistory      → [{capturedAt, severity}]
+                          Allows drawing a severity timeline / heat bar
+  errorRateTrend       → [{capturedAt, value}]  (0–1 range)
+                          Sparkline: error rate over time
+  approvalBacklogTrend → [{capturedAt, value}]
+                          Backlog pressure trend for approval queues
+  delayBacklogTrend    → [{capturedAt, value}]
+                          Backlog pressure trend for delayed executions
+  stuckCountTrend      → [{capturedAt, value}]
+                          Stuck execution count history
+
+API endpoint: GET /governance/snapshots?range=24h
+Response shape (GovernanceSnapshotTrend):
+  { range, capturedAt, snapshotCount, firstAt, lastAt,
+    severityHistory[], errorRateTrend[], approvalBacklogTrend[],
+    delayBacklogTrend[], stuckCountTrend[] }
+
+Empty result is valid (snapshotCount=0, empty arrays) — not an error.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALERT FREQUENCY INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+computeAlertFrequency(snapshots[]) → AlertFrequencyEntry[]
+
+  For each distinct GOV-* code found in any snapshot's alert_codes array:
+    code           — the GOV-NN_* alert identifier
+    count          — number of snapshots containing this code
+    totalSnapshots — total snapshots in the query window
+    frequencyPct   — (count / total) × 100, rounded to 2dp
+    firstSeenAt    — earliest capturedAt where code appeared
+    lastSeenAt     — latest capturedAt where code appeared
+    isChronic      — frequencyPct >= CHRONIC_THRESHOLD_PCT (50%)
+
+  Sorted: count descending, code alphabetical on ties (deterministic).
+
+detectChronicAlerts(snapshots[], thresholdPct=50) → AlertFrequencyEntry[]
+  Filters to only isChronic=true entries.
+
+Chronic patterns detected without ML:
+  • Persistent degradation: critical code appears in >50% of 7d snapshots
+  • Recurring storms: GOV-storm codes appear repeatedly over 24h
+  • Chronic backlog: GOV-approval or GOV-delay codes at >50% frequency
+  • Systemic error concentration: GOV-error codes in majority of snapshots
+
+API endpoint: GET /governance/snapshots/chronic-alerts?range=7d
+Response shape (GovernanceChronicAlerts):
+  { range, capturedAt, snapshotCount, chronicCount, items[] }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RETENTION RECOMMENDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Recommendation (static, deterministic — recommendRetentionPolicy()):
+
+  Capture interval:    5 minutes
+  Raw retention:      30 days   (~8,640 rows per workspace)
+  Hourly rollup:      90 days   (prune raw to 1/hour — NOT YET IMPLEMENTED)
+  Daily rollup:       365 days  (prune hourly to 1/day — NOT YET IMPLEMENTED)
+
+  Estimated rows at steady state (30d raw): 8,640 per workspace.
+  At 100 active workspaces: 864,000 rows — feasible for PostgreSQL without
+  partitioning at current scale. A future prune job should apply these tiers.
+
+computeRetentionStats(snapshots[]) → RetentionStats
+  { snapshotCount, oldestCapturedAt, newestCapturedAt,
+    spanHours, avgIntervalMs }
+
+  Used to surface data coverage to future dashboard components:
+  "Showing data from Jan 1 to Jan 31 (720h, avg 5m intervals)"
+
+Pruning NOT implemented in P7-A:
+  A background sweep task (future P7-B or equivalent) should implement:
+    DELETE WHERE captured_at < (now - 30d)
+    Rollup INSERT of 1 row/hour for rows between 30d and 90d
+    Rollup INSERT of 1 row/day for rows between 90d and 365d
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Four new structured log events:
+
+A) governance_snapshot_captured
+   Level:  INFO
+   When:   Snapshot successfully persisted
+   Fields: workspaceId, snapshotId, snapshotSeverity, stuckCount,
+           stormSeverity, alertCodes, capturedAt, action
+
+B) governance_snapshot_capture_failed
+   Level:  ERROR
+   When:   evaluateTenantHealth() or INSERT fails
+   Fields: workspaceId, snapshotSeverity (if available), error, action
+
+C) governance_trend_query_requested
+   Level:  INFO
+   When:   GET /governance/snapshots is called
+   Fields: workspaceId, actorId, trendRange, snapshotCount,
+           firstAt, lastAt, action
+
+D) governance_chronic_alert_detected
+   Level:  WARN
+   When:   detectChronicAlerts() returns ≥1 result
+   Emitted in two places:
+     1. captureGovernanceSnapshot() — after each capture, 7d rolling check
+     2. GET /governance/snapshots/chronic-alerts route — on every query
+   Fields: workspaceId, snapshotSeverity, trendRange, alertCodes,
+           chronicCount, capturedAt, action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NEW API ENDPOINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET  /governance/snapshots
+  Auth:    requireAuth + requireWorkspaceAdmin
+  Query:   ?range=1h|24h|7d|30d  (default: 24h)
+  Returns: GovernanceSnapshotTrend
+  Notes:   READ-ONLY; empty arrays when no snapshots stored
+
+POST /governance/snapshots/capture
+  Auth:    requireAuth + requireWorkspaceAdmin
+  Body:    (none)
+  Returns: 201 GovernanceCaptureResult
+  Notes:   APPEND-ONLY; one INSERT per call; no execution mutations
+
+GET  /governance/snapshots/chronic-alerts
+  Auth:    requireAuth + requireWorkspaceAdmin
+  Query:   ?range=1h|24h|7d|30d  (default: 7d)
+  Returns: GovernanceChronicAlerts
+  Notes:   READ-ONLY; frequencyPct-based chronic detection
+
+New OpenAPI schemas (7):
+  GovernanceNumberPoint          GovernanceSeverityPoint
+  GovernanceSnapshotTrend        GovernanceCaptureResult
+  GovernanceAlertFrequencyEntry  GovernanceChronicAlerts
+  (GovernanceSnapshotTrend references GovernanceNumberPoint × 4 + GovernanceSeverityPoint × 1)
+
+Codegen: 3 new hooks generated in lib/api-client-react/src/generated/api.ts
+  useGetGovernanceSnapshots
+  usePostGovernanceSnapshotsCapture
+  useGetGovernanceSnapshotsChronicAlerts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/governance-history.test.ts
+New tests: 70 across 15 describe blocks
+
+Previous suite total: 725 (P6-C + P6-D all passing)
+New total: 795 / 795 passed (0 failures)
+
+Test groups:
+
+  T1  buildSnapshotPayload creates correct, immutable-ready shape      (6 tests)
+      ✓ includes all required columns
+      ✓ alert codes extracted from alert objects
+      ✓ alert summary counts correct (critical/warning/info split)
+      ✓ excludes estimatedNotificationFanout from metricsSnapshot
+      ✓ pure — same input → same output
+      ✓ does not mutate the input TenantHealthSummary
+
+  T2  sortSnapshotsChronological preserves chronological order         (5 tests)
+      ✓ sorts ascending by capturedAt
+      ✓ does not mutate the input array
+      ✓ handles empty array
+      ✓ single snapshot returned unchanged
+      ✓ equal timestamps do not throw
+
+  T3  Trend range semantics are deterministic                          (6 tests)
+      ✓ trendRangeToHours maps all four ranges
+      ✓ TREND_RANGE_HOURS constant matches trendRangeToHours
+      ✓ trendRangeCutoff returns correct cutoff with injectable now
+      ✓ snapshotsSince filters to >= since boundary
+      ✓ snapshotsSince does not mutate the input
+      ✓ snapshotsSince returns all when since is very old
+
+  T4  extractSeverityHistory maps snapshots to severity data points    (5 tests)
+      ✓ maps capturedAt and severity for each snapshot
+      ✓ preserves order of input array
+      ✓ returns empty array for no snapshots
+      ✓ all 4 severity values round-trip correctly
+      ✓ capturedAt is ISO 8601 string
+
+  T5  computeAlertFrequency aggregates alert codes correctly           (5 tests)
+      ✓ counts each code occurrence across snapshots
+      ✓ marks isChronic=true when frequencyPct >= CHRONIC_THRESHOLD_PCT
+      ✓ returns empty array for no snapshots
+      ✓ sorts by count descending
+      ✓ tracks firstSeenAt and lastSeenAt correctly
+
+  T6  Snapshot capture pipeline is observability-only (structural)     (5 tests)
+      ✓ buildSnapshotPayload is synchronous and returns plain object
+      ✓ serializeSnapshotMetrics does not include workspaceId/capturedAt
+      ✓ serializeSnapshotMetrics retains all 11 numeric fields
+      ✓ does not modify the alerts array reference
+      ✓ GOVERNANCE_ACTION_* constants are 4 distinct strings
+
+  T7  snapshotsBefore excludes future-dated snapshots                  (4 tests)
+      ✓ filters out snapshots after the boundary
+      ✓ snapshot exactly at boundary is included
+      ✓ all future snapshots removed when now is in the past
+      ✓ does not mutate input
+
+  T8  Retention recommendations are deterministic                      (6 tests)
+      ✓ recommendRetentionPolicy returns expected constants
+      ✓ estimatedRawRowsAt30d = (24*60/interval) * keepRawDays
+      ✓ recommendRetentionPolicy is idempotent (pure)
+      ✓ computeRetentionStats with 0 snapshots returns null timestamps
+      ✓ computeRetentionStats with 1 snapshot has null avgIntervalMs
+      ✓ computeRetentionStats computes spanHours correctly
+
+  T9  Snapshot serialization is stable and deterministic               (5 tests)
+      ✓ serializeSnapshotMetrics same input → same output
+      ✓ serializeSnapshotIndicators same input → same output
+      ✓ computeAlertSummary zero alerts → all zeros
+      ✓ serializeCaptureResult maps all fields
+      ✓ SNAPSHOT_SCHEMA_VERSION is 1
+
+  T10 Trend extraction functions are deterministic                     (5 tests)
+      ✓ extractErrorRateTrend same inputs → same outputs
+      ✓ extractApprovalBacklogTrend maps correct field
+      ✓ extractDelayBacklogTrend maps correct field
+      ✓ extractStuckCountTrend maps stuckCount column
+      ✓ all trend extractors return empty array for empty input
+
+  T11 computeAlertSummary correctly counts by severity                 (3 tests)
+  T12 detectChronicAlerts threshold boundary                           (4 tests)
+  T13 Numeric trend extractors map correct fields                      (3 tests)
+  T14 computeRetentionStats edge cases                                 (4 tests)
+  T15 API response serializers produce correct shapes                  (4 tests)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TYPECHECK RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  @workspace/api-server   → 0 errors
+  @workspace/db           → 0 errors (governance.ts compiled into schema)
+  @workspace/api-spec     → 0 errors (codegen clean)
+  @workspace/ops-platform → 2 pre-existing errors in workflow-detail.tsx /
+                            workflows.tsx (isActive on UpdateWorkflowBody —
+                            not introduced by P7-A)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DASHBOARD READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The data model is now ready for the following UI capabilities:
+
+  READY (data exists, hooks generated):
+  ✓ Sparklines — extractErrorRateTrend, extractStuckCountTrend arrays
+  ✓ Severity timeline — extractSeverityHistory [{capturedAt, severity}]
+  ✓ Backlog trend charts — approvalBacklogTrend, delayBacklogTrend
+  ✓ Chronic alert badge — isChronic field + chronicCount in response
+  ✓ Historical drill-down — individual StoredSnapshot rows have full metrics
+  ✓ Data coverage indicator — firstAt/lastAt/snapshotCount in trend response
+  ✓ Alert frequency table — AlertFrequencyEntry with frequencyPct + firstSeen
+
+  NOT YET IMPLEMENTED (data model ready, UI pending):
+  ○ Frontend trend chart components (Recharts/chart library needed)
+  ○ "Capture Now" button in governance dashboard
+  ○ Historical sidebar / drill-down panel
+  ○ Trend comparison (period-over-period)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING HISTORICAL ANALYTICS GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. AUTOMATED CAPTURE (not in P7-A):
+   captureGovernanceSnapshot() must currently be called explicitly via
+   POST /governance/snapshots/capture.  A background scheduler (cron-style
+   or event-driven) is needed to capture automatically every 5 minutes.
+   Without it, historical data only accumulates when an admin triggers manually.
+
+2. SNAPSHOT PRUNING (not in P7-A):
+   No pruning job exists.  The governance_snapshots table will grow
+   indefinitely.  The retention tiers (30d raw → 90d hourly → 365d daily)
+   are documented but not enforced.
+
+3. PER-WORKSPACE ROLLUP (not in P7-A):
+   No hourly/daily aggregation table exists yet.  For >30d trend queries,
+   reading thousands of raw rows is inefficient.  A future rollup table
+   (governance_snapshot_rollups) should aggregate by hour and day.
+
+4. TREND COMPARISON (not in P7-A):
+   The API does not support period-over-period comparisons (e.g., "this
+   week vs last week").  The current range parameter is a single window only.
+
+5. WORKSPACE-LEVEL RETENTION SETTINGS (not in P7-A):
+   All workspaces share the same recommended retention policy.  Large
+   enterprise tenants may want longer raw retention.  A future
+   workspace_settings column could override the platform default.
+
+6. CROSS-WORKSPACE TREND (super_admin only — not in P7-A):
+   No endpoint exists for super_admin to see trend data across all
+   workspaces simultaneously (e.g., "which workspaces are chronic-critical?").
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATED
+  lib/db/src/schema/governance.ts
+    — governanceSnapshotsTable (append-only, 11 columns, 2 indexes)
+
+  artifacts/api-server/src/lib/workflows/governance-history.ts
+    — 560 lines; 3 layers: pure model (Sections 1–8) + DB queries (Section 9)
+      + capture pipeline (Section 10)
+    — Exports: 25+ functions / types / constants
+
+  artifacts/api-server/src/lib/workflows/__tests__/governance-history.test.ts
+    — 70 tests across 15 describe blocks (T1–T15)
+
+  workflow-phase-7a-report.txt
+
+MODIFIED
+  lib/db/src/schema/index.ts
+    + export * from "./governance"
+
+  lib/api-spec/openapi.yaml
+    + 3 new paths: /governance/snapshots, /governance/snapshots/capture,
+                   /governance/snapshots/chronic-alerts
+    + 7 new schemas: GovernanceNumberPoint, GovernanceSeverityPoint,
+                     GovernanceSnapshotTrend, GovernanceCaptureResult,
+                     GovernanceAlertFrequencyEntry, GovernanceChronicAlerts
+
+  lib/api-client-react/src/generated/api.ts       (codegen — 3 new hooks)
+  lib/api-zod/src/generated/api.ts                (codegen — 6 new schemas)
+
+  artifacts/api-server/src/routes/governance.ts
+    + P7-A import block (captureGovernanceSnapshot, querySnapshotsByRange, …)
+    + VALID_TREND_RANGES set
+    + GET /governance/snapshots handler
+    + POST /governance/snapshots/capture handler
+    + GET /governance/snapshots/chronic-alerts handler
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STATUS: COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tests:     795 / 795 passed  (70 new P7-A tests)
+Typecheck: 0 new errors introduced by P7-A
+DB:        governance_snapshots table pushed and live
+Codegen:   3 new hooks + 6 new Zod schemas generated
+═══════════════════════════════════════════════════════════════════════════════

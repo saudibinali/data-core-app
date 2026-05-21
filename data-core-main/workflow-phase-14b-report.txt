@@ -1,0 +1,174 @@
+================================================================================
+P14-B COMPLETION REPORT — Platform Roles & Permission Matrix
+================================================================================
+Date: 2026-05-16
+Phase: P14-B
+
+────────────────────────────────────────────────────────────────────────────────
+SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+P14-B implements a fixed permission matrix (18 codes × 8 roles) with
+requirePlatformPermission middleware, role update API, and updated UI.
+
+All P14-B deliverables are complete and tested.
+
+────────────────────────────────────────────────────────────────────────────────
+FILES CREATED (NEW)
+────────────────────────────────────────────────────────────────────────────────
+
+artifacts/api-server/src/lib/platform-permissions.ts
+  - Pure library, no DB/HTTP side effects
+  - Defines 18 PlatformPermissionCode values (as const tuple)
+  - PLATFORM_PERMISSION_CONFIG: label, labelAr, description, riskLevel, group per code
+  - PlatformRoleCode: 8 roles (root_platform_owner, platform_admin, support_admin,
+    workspace_support, sales_admin, finance_admin, auditor, read_only_operator)
+  - PLATFORM_ROLE_PERMISSION_MATRIX: ReadonlySet<PlatformPermissionCode> per role
+  - Helpers: getPlatformUserRoleCode, getPlatformPermissionsForRole, hasPlatformPermission,
+    hasAnyPlatformPermission, hasAllPlatformPermissions, assertPlatformPermission,
+    isRootOnlyPermission, isAssignablePlatformRoleCode, buildPermissionDeniedAuditEvent
+  - Legacy root backward compat: role=super_admin + platformRoleCode IS NULL → all perms
+
+artifacts/api-server/src/lib/__tests__/platform-permissions.test.ts
+  - 17 describe blocks, 66 individual tests
+  - Covers: config stability (18 codes), matrix stability (8 roles), root gets all,
+    legacy root detection, each role's explicit permissions, unknown role → no perms,
+    hasAny/hasAll/assert helpers, isRootOnlyPermission, isAssignablePlatformRoleCode,
+    buildPermissionDeniedAuditEvent structure, no forbidden scope
+
+artifacts/ops-platform/src/lib/platform-permissions-config.ts
+  - Frontend mirror of backend platform-permissions.ts
+  - PLATFORM_PERMISSION_CONFIG (18 codes, same structure)
+  - PLATFORM_PERMISSION_GROUPS (10 groups, all 18 codes distributed)
+  - PLATFORM_ROLE_PERMISSION_MATRIX_CONFIG (readonly arrays per role)
+  - PLATFORM_ROLE_PERMISSION_SUMMARY (RolePermissionSummary[] with assignableFromUi flag)
+  - ASSIGNABLE_PLATFORM_ROLE_KEYS: 7 roles (excludes root_platform_owner)
+  - PLATFORM_PERMISSION_MATRIX_SAFETY_CONTRACT: 14 properties, all true
+  - Import-time IIFE enforcement of safety contract (throws on violation)
+
+artifacts/ops-platform/src/lib/__tests__/platform-permissions-config.test.ts
+  - 9 describe blocks, 29 individual tests
+  - Covers: config stable, matrix stable, safety contract all true, assignable keys
+    exclude root, summary stable, groups cover all permissions, grouped renders,
+    root excluded from UI, no forbidden scope
+
+────────────────────────────────────────────────────────────────────────────────
+FILES UPDATED
+────────────────────────────────────────────────────────────────────────────────
+
+artifacts/api-server/src/middlewares/requireAuth.ts
+  - Added platformRoleCode?: string | null to AuthRequest interface
+  - Added isRootOwner?: boolean to AuthRequest interface
+  - requireAuth now selects platformRoleCode + isRootOwner from DB, attaches to req
+  - Added requirePlatformPermission(permissionCode) factory function:
+      - Requires role === "super_admin" (platform user only)
+      - Calls hasPlatformPermission from platform-permissions.ts
+      - On denial: req.log.warn + fire-and-forget audit write to activityLogsTable
+      - Returns 403 with { code: "PERMISSION_DENIED", required: permissionCode }
+      - Legacy root (platformRoleCode IS NULL) gets all permissions automatically
+  - Added requireAnyPlatformPermission(permissionCodes[]) factory function
+  - requireSuperAdmin kept intact for backward compat
+
+artifacts/api-server/src/routes/platform-users.ts
+  - Import changed: requireSuperAdmin → requirePlatformPermission
+  - GET /platform/users → requirePlatformPermission("platform.users.read")
+  - GET /platform/users/:userId → requirePlatformPermission("platform.users.read")
+  - POST /platform/users → requirePlatformPermission("platform.users.create")
+  - PATCH /platform/users/:userId/status → requirePlatformPermission("platform.users.status.update")
+  - NEW: PATCH /platform/users/:userId/role → requirePlatformPermission("platform.users.role.update")
+    - Validates: roleCode is assignable (not root), reason ≥ 10 chars, confirmation = true
+    - Checks: target is not root/protected (isProtectedPlatformAccount)
+    - Checks: canManagePlatformUser (actor can manage target)
+    - Checks: canAssignPlatformRole (actor's privilege level allows assigning roleCode)
+    - Writes audit log on every blocked/success outcome
+    - Returns { user, previousRoleCode, nextRoleCode }
+
+artifacts/api-server/src/routes/tenants.ts
+  - Import added: requirePlatformPermission from middlewares/requireAuth
+  - ALL 12 routes migrated from requireSuperAdmin → requirePlatformPermission:
+    GET  /platform/tenants                            → "tenants.read"
+    GET  /platform/tenants/:tenantId                  → "tenants.read"
+    GET  /platform/tenants/:tenantId/summary          → "tenants.read"
+    PATCH /platform/tenants/:tenantId/lifecycle       → "tenants.lifecycle.update"
+    GET  /platform/tenants/:tenantId/subscription     → "subscriptions.read"
+    PATCH /platform/tenants/:tenantId/subscription    → "subscriptions.update"
+    GET  /:tenantId/entitlements                      → "entitlements.read"
+    PATCH /:tenantId/entitlements/overrides           → "entitlements.override.update"
+    GET  /:tenantId/usage                             → "usage.read"
+    GET  /platform/tenants/:tenantId/renewal-intelligence → "renewal.read"
+    GET  /platform/tenants/:tenantId/health           → "health.read"
+    GET  /platform/tenants/:tenantId/lifecycle-evaluation → "evaluation.read"
+
+artifacts/ops-platform/src/lib/platform-users-config.ts
+  - Added updateRole: (userId) => /api/platform/users/${userId}/role to API_PATHS
+  - Added "useUpdatePlatformUserRole" to MUTATION_HOOK_NAMES
+
+artifacts/ops-platform/src/lib/platform-users-hooks.ts
+  - Added UpdatePlatformUserRoleInput interface
+  - Added UpdatePlatformUserRoleResult interface
+  - Added useUpdatePlatformUserRole() mutation hook
+    (PATCH /platform/users/:userId/role with { roleCode, reason, confirmation })
+
+artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+  - Import: useUpdatePlatformUserRole from hooks
+  - Import: PLATFORM_PERMISSION_MATRIX_SAFETY_CONTRACT, PLATFORM_ROLE_PERMISSION_SUMMARY,
+           PLATFORM_PERMISSION_GROUPS, PLATFORM_PERMISSION_CONFIG from config
+  - Import-time safety check for PLATFORM_PERMISSION_MATRIX_SAFETY_CONTRACT
+  - NEW: RoleBadge riskLevel display helper (RiskBadge component)
+  - NEW: RolePermissionMatrix component (collapsible table, 18 permissions × 8 roles)
+    - Column headers: role names + Arabic + root badge
+    - Row headers: permissions grouped by PermissionGroup (10 groups)
+    - Cells: ✓ (green) or — (muted) per role/permission
+    - riskLevel badge per permission (Read/Write/Sensitive/Root)
+  - NEW: RoleChangePanel component in UserDetailPanel (non-root/non-protected only)
+    - Role selector (excludes root and current role)
+    - Reason textarea (min 10 chars)
+    - Confirmation checkbox
+    - Error display (data-testid="role-change-error")
+    - Apply / Cancel buttons (data-testid="role-change-apply")
+  - UserDetailPanel now renders: StatusChangePanel + RoleChangePanel
+
+────────────────────────────────────────────────────────────────────────────────
+PERMISSION MATRIX (8 roles × 18 permissions)
+────────────────────────────────────────────────────────────────────────────────
+
+Role                  | Permissions count | Assignable from UI
+---------------------|-------------------|-------------------
+root_platform_owner  | 18 (ALL)          | No (root flag)
+platform_admin       | 18 (ALL)          | Yes
+support_admin        | 7                 | Yes
+workspace_support    | 5                 | Yes
+sales_admin          | 5                 | Yes
+finance_admin        | 5                 | Yes
+auditor              | 10                | Yes
+read_only_operator   | 6                 | Yes
+
+────────────────────────────────────────────────────────────────────────────────
+TEST RESULTS
+────────────────────────────────────────────────────────────────────────────────
+
+Backend  (api-server):   3081 tests, 52 files — ALL PASSED  ✅  (+66 new P14-B tests)
+Frontend (ops-platform): 1018 tests, 20 files — ALL PASSED  ✅  (+29 new P14-B tests)
+
+Typecheck:
+  api-server:   0 errors  ✅
+  ops-platform: 7 errors  — all pre-existing (governance-audit.tsx TS2322×4,
+                              governance-violations.tsx TS2503, workflow-detail.tsx TS2353,
+                              workflows.tsx TS2353) — NOT introduced by P14-B
+
+────────────────────────────────────────────────────────────────────────────────
+SAFETY GUARANTEES PRESERVED
+────────────────────────────────────────────────────────────────────────────────
+
+✅ root_platform_owner cannot be assigned via API (isAssignablePlatformRoleCode guard)
+✅ Root/protected accounts are immutable (isProtectedPlatformAccount guard)
+✅ All permission denials written to activityLogsTable (fire-and-forget, non-fatal)
+✅ Legacy root (platformRoleCode IS NULL) gets ALL permissions (backward compat)
+✅ requireSuperAdmin kept intact for non-platform routes (backward compat)
+✅ No password reset, no delete, no email change, no SSO, no MFA
+✅ Fixed role matrix — no custom role builder, no tenant/HR/customer users
+✅ Safety contract enforced at import time (throws on violation in both frontend + backend)
+
+────────────────────────────────────────────────────────────────────────────────
+END OF P14-B REPORT
+================================================================================

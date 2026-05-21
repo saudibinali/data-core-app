@@ -1,0 +1,228 @@
+راجع:
+- workflow-governance-phase-3-report.txt
+- workflow-governance-architecture-review.txt
+- event-diagnostics-phase-2-report.txt
+
+ثم نفّذ فقط:
+PHASE 4 — Runtime Execution Safety Review & Controlled Implementation Plan
+
+بدون أي implementation مباشر حتى الآن.
+
+عنوان المهمة:
+WORKFLOW GOVERNANCE PHASE 4 — Execution Engine Safety Review
+
+المهمة الحالية:
+تحليل وتنظيم التحول القادم من:
+linear workflow executor
+
+إلى:
+safe orchestration runtime
+
+بدون كسر:
+- architecture الحالية
+- EventBus
+- observability
+- diagnostics
+- existing workflow executions
+
+الهدف:
+تصميم المرحلة القادمة بأمان قبل لمس:
+- DAG execution
+- workflow cancellation
+- execution TTL
+- real condition routing
+- runtime execution safety
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — راجع الـ executor الحالي بالكامل
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- executor.ts
+- executeWorkflow()
+- step execution loop
+- currentStepIndex behavior
+- step logs
+- workflow_executions lifecycle
+- waiting_approval handling
+- context propagation
+- notification steps
+- status_update behavior
+- assignment behavior
+- condition step outputs
+- any future resume assumptions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — حلّل مشاكل الـ Linear Executor الحالي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ابحث عن:
+- why nextSteps ignored
+- why branching impossible
+- why parallelism impossible
+- why cancellation unsupported
+- why timeout unsupported
+- why retries impossible
+- mutable context pollution
+- execution corruption risks
+- resume risks
+- orphaned steps
+- partial execution corruption
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — صمّم DAG EXECUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+- step graph representation
+- execution cursor model
+- branching execution
+- nextSteps semantics
+- dead branch handling
+- merge semantics
+- step dependency handling
+
+المطلوب:
+- minimal viable DAG
+- no overengineering
+- preserve existing step model قدر الإمكان
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — صمّم CONDITION ROUTING الحقيقي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+كيف:
+condition steps
+تحدد:
+- next step
+- branch
+- skip paths
+
+المطلوب:
+- deterministic behavior
+- observable branch decisions
+- diagnostics compatibility
+- no hidden implicit routing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — صمّم EXECUTION CANCELLATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف نوقف execution بأمان.
+
+المطلوب:
+- cooperative cancellation
+- current step finish behavior
+- cancellation checkpoints
+- cancellation visibility
+- cancellation diagnostics
+- step-safe abort model
+
+لا تنفذ actual cancellation بعد.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — صمّم EXECUTION TTL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- execution wall-clock timeout
+- stuck execution detection
+- timeout lifecycle
+- timeout states
+- timeout cleanup
+- timeout observability
+
+بدون scheduler implementation حاليًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — صمّم EXECUTION SAFETY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- step isolation
+- immutable execution snapshots
+- context isolation
+- execution corruption prevention
+- duplicate suppression
+- concurrent mutation safety
+- safe status transitions
+- execution recovery assumptions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد أن التصميم القادم:
+لا يكسر:
+- diagnostics APIs
+- event tracing
+- workflow timelines
+- activity linkage
+- notification linkage
+- triggerEventLogId semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — BACKWARD COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف نضيف:
+DAG execution
+
+بدون كسر:
+- workflows الحالية
+- linear workflows
+- existing DB rows
+- diagnostics history
+- current step logs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تدخل:
+- distributed orchestration
+- queues
+- Temporal.io style systems
+- microservices orchestration
+- external schedulers
+- event sourcing redesign
+- parallel distributed workers
+
+خلك:
+single-process pragmatic architecture.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم التنفيذ القادم إلى مراحل صغيرة وآمنة:
+- DAG foundations
+- routing engine
+- cancellation support
+- TTL support
+- immutable execution safety
+- execution recovery
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-governance-phase-4-review.txt
+
+ويحتوي:
+- current executor weaknesses
+- DAG execution model
+- condition routing design
+- cancellation model
+- TTL model
+- execution safety model
+- backward compatibility strategy
+- observability compatibility notes
+- implementation phases
+- risks إذا تم التنفيذ بشكل خاطئ
+- recommendation النهائية قبل implementation

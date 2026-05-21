@@ -1,0 +1,630 @@
+WORKFLOW PHASE 8-E REPORT
+Cross-Workflow Comparative Intelligence & Risk Ranking Foundations
+==================================================================
+
+Date:        2026-05-15
+Phase:       P8-E (follows P8-A topology, P8-B dependency, P8-C operational correlation, P8-D forecast)
+Status:      COMPLETE — all tests green, typecheck clean
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-E converts isolated per-workflow intelligence (P8-A through P8-D) into
+workspace-level comparative operational intelligence.
+
+Where P8-A through P8-D each answer "what is the state of THIS workflow?",
+P8-E answers:
+  "Which workflows in the workspace need attention most urgently,
+   relative to each other?"
+
+Core problem being solved: operators have no way to triage across many
+workflows without a common comparative measure.  P8-E creates that shared
+scale — the comparativeRiskScore — by blending the current operational
+state (rWC from P8-C), the forecast trajectory (projectedComplexity from
+P8-D), trend dynamics, fragility severity, and hotspot burden.
+
+Forbidden scope (explicitly excluded):
+  • AI/ML ranking algorithms
+  • Autonomous prioritization or remediation
+  • Cross-workspace federation
+  • Organisation-wide super analytics
+  • Realtime streaming ranking
+  • Automatic alert escalation systems
+
+Implemented scope: minimal deterministic comparative intelligence layer.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/comparative-intelligence.ts  (~330 lines)
+  Pure deterministic comparative-intelligence engine.
+  No DB, no async, no ML, no side effects.
+  Single public entry point:
+    computeComparativeIntelligence(
+      input:   ComparativeIntelligenceInput,  // snapshots[] + optional workspaceId
+      context? ComparativeContext,            // optional for observability
+    ) → ComparativeIntelligenceResult
+
+artifacts/api-server/src/lib/workflows/__tests__/comparative-intelligence.test.ts
+  T1–T10 test groups, 51 individual assertions, all passing.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/routes/workflows.ts
+  • Added static imports: computeComparativeIntelligence, WorkflowIntelligenceSnapshot
+  • Registered GET /workflows/comparative BEFORE GET /workflows/executions/* and
+    GET /workflows/:id to prevent "comparative" from being captured by the :id
+    parameter in Express route matching
+  • Route fetches all active workflows in the workspace (limit 200), fetches
+    historical rollup data ONCE (shared across all workflows for efficiency),
+    then runs the full P8-A → P8-D → P8-E pipeline per workflow
+
+lib/api-spec/openapi.yaml
+  • New endpoint:    GET /workflows/comparative
+  • New schemas (3): WorkflowComparativeIntelligence, WorkspaceHotspotConcentration,
+                     WorkflowComparativeRankingResponse
+
+Auto-generated (by `pnpm --filter @workspace/api-spec run codegen`):
+  lib/api-client-react/src/generated/  — new hook: useGetWorkflowComparative
+  lib/api-zod/src/generated/api.ts     — new Zod schemas for all 3 types
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. COMPARATIVE INTELLIGENCE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Input: WorkflowIntelligenceSnapshot (per workflow)
+
+  Built by the route handler, one entry per active workflow definition.
+  Contains the synthesised outputs from the full P8 stack:
+
+    workflowId                — workflow definition primary key
+    workflowName              — human-readable name
+    stepCount                 — total step count in the definition
+    runtimeWeightedComplexity — P8-C: current operational state (0–100)
+    structuralComplexity      — P8-B: static complexity baseline (0–100)
+    fragilityLevel            — P8-C: fragility index level (low/moderate/high/critical)
+    hotspotCount              — P8-C: chronicOperationalHotspots.length
+    projectedComplexity       — P8-D: forecasted rWC at +7 days (0–100)
+    trendDirection            — P8-D: improving/stable/degrading/critically_degrading
+    confidenceLevel           — P8-D: forecast confidence (low/moderate/high)
+
+4.2 Engine pipeline (all pure, all deterministic)
+
+  Step 1 — scoreWorkflow()
+    Compute comparativeRiskScore for each snapshot.
+    (See Section 5 for full formula.)
+
+  Step 2 — rankWorkflows()
+    Sort by comparativeRiskScore DESC.
+    Tie-break by workflowId ASC (stable, deterministic, independent of input order).
+    Assign workspaceRank = sort index + 1 (1-based).
+
+  Step 3 — classifyPriority()
+    Assign OperationalPriority per workflow.
+    (See Section 6 for full model.)
+
+  Step 4 — computeHotspotConcentration()
+    Compute workspace-level concentration analytics from the ranked list.
+    (See Section 7.)
+
+  Step 5 — Emit 4 structured observability events.
+
+4.3 Dependency graph
+
+  comparative-intelligence.ts → logger.ts   (observability only)
+
+  The engine is a pure consumer of P8-C / P8-D summaries.
+  It does NOT import topology.ts, dependency.ts, operational-correlation.ts,
+  or trend-forecast.ts — those are invoked in the route handler, not in the
+  engine.  This keeps the engine independently testable with synthetic inputs
+  without requiring the full P8 chain.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COMPARATIVE RISK SCORE FORMULA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+comparativeRiskScore is computed in three stages:
+
+Stage 1 — Complexity base (max 60 points)
+  base = runtimeWeightedComplexity × 0.35
+       + projectedComplexity       × 0.25
+
+  Rationale: rWC captures the current operational state (P8-C blend);
+  projectedComplexity captures the forecast trajectory (P8-D).
+  Present state outweighs future state (0.35 vs 0.25) because the projection
+  carries uncertainty.
+
+Stage 2 — Bonus signals (max 40 points)
+
+  trendBonus (based on P8-D trendDirection):
+    critically_degrading → +20  (rWC growing > 2 pts/day; urgent escalation)
+    degrading            → +10  (rWC measurably growing)
+    stable               →  +0  (within noise band)
+    improving            →  -5  (rWC shrinking; rewarded with score reduction)
+
+  fragilityBonus (based on P8-C fragilityLevel):
+    critical   → +15   (rWC ≥ 75, highest structural + runtime fragility)
+    high       → +10   (rWC ≥ 50)
+    moderate   →  +5   (rWC ≥ 25)
+    low        →  +0
+
+  hotspotBonus:
+    min(hotspotCount × 1.0, 5)
+    Capped at 5 points — hotspots are a signal, not the primary driver.
+
+  subtotal = base + trendBonus + fragilityBonus + hotspotBonus
+
+Stage 3 — Confidence multiplier
+  high     → × 1.00  (full weight; reliable P8-D forecast)
+  moderate → × 0.90  (10% reduction; limited historical sample)
+  low      → × 0.80  (20% reduction; sparse or noisy history)
+
+  Rationale: low forecast confidence means the projected complexity is less
+  reliable.  Reducing the score prevents low-confidence predictions from
+  dominating the ranking over well-evidenced signals.
+
+  score = clamp(round(subtotal × multiplier), 0, 100)
+
+Range analysis:
+  Minimum possible: ~0 (all zeros, improving trend, low confidence) → 0 × 0.80 = 0
+  Maximum possible: 60 + 20 + 15 + 5 = 100, × 1.00 = 100 (clamped)
+  Typical critical workflow: 60×1 + 20 + 15 + 5 = 100 → 100
+  Typical stable low-risk: 10×0.35 + 10×0.25 + 0 + 0 + 0 = 6 → 6 (with high conf)
+
+Score interpretation:
+  0–14:   Informational — healthy, no meaningful risk signal
+  15–34:  Watch        — minor pressure, monitor
+  35–54:  Elevated     — notable pressure, plan attention
+  55–74:  Urgent       — significant pressure, prioritise
+  75–100: Critical     — severe pressure, immediate attention needed
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. WORKSPACE RANKING SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sort key: (comparativeRiskScore DESC, workflowId ASC)
+
+  Primary:   comparativeRiskScore DESC — higher risk = lower rank number = higher priority
+  Tie-break: workflowId ASC            — stable, deterministic, independent of input order
+
+Properties:
+  • Stable: same snapshot set always produces the same ranking.
+  • Pagination-ready: sort is deterministic, so OFFSET/LIMIT on the server or
+    client always yields consistent pages.
+  • Input-order independent: input snapshots can arrive in any order; the
+    output ranking is always the same.
+
+workspaceRank:
+  1-based integer assigned after sort.
+  Rank 1 = highest comparativeRiskScore (most urgent).
+  Rank N = lowest score (least urgent).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. OPERATIONAL PRIORITY CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OperationalPriority has five levels (ascending severity):
+  informational | watch | elevated | urgent | critical
+
+Base assignment from comparativeRiskScore:
+  score < 15              → informational
+  15 ≤ score < 35         → watch
+  35 ≤ score < 55         → elevated
+  55 ≤ score < 75         → urgent
+  score ≥ 75              → critical
+
+Escalation rules (applied if score ≥ 10, maximum = critical):
+  Rule 1: trendDirection = "critically_degrading"
+    → +1 priority level  (e.g., watch → elevated, elevated → urgent)
+  Rule 2: fragilityLevel = "critical"
+    → +1 priority level  (independent of Rule 1)
+  Both rules apply independently; each adds +1 (maximum escalation = +2 levels).
+
+Escalation rationale:
+  A workflow with comparativeRiskScore = 20 (watch) that is critically_degrading
+  is escalated to elevated — because even if the current absolute pressure is low,
+  an accelerating trend changes the urgency picture.
+  Similarly, a workflow flagged as structurally + operationally critical (fragilityLevel)
+  deserves elevation even if its composite score hasn't yet reached a threshold.
+
+The threshold score ≥ 10 prevents false escalation for completely healthy
+workflows where all signals are noise-level zero.
+
+Examples:
+  score=20, trend=stable,               fragility=low       → watch
+  score=20, trend=critically_degrading, fragility=low       → elevated (Rule 1)
+  score=20, trend=stable,               fragility=critical  → elevated (Rule 2)
+  score=20, trend=critically_degrading, fragility=critical  → urgent (Rules 1+2)
+  score=75, trend=stable,               fragility=low       → critical (base)
+  score=60, trend=critically_degrading, fragility=critical  → critical (+2, capped)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. HOTSPOT CONCENTRATION ANALYTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkspaceHotspotConcentration is computed from the ranked list after scoring.
+
+Fields:
+
+  dominantWorkflowCount
+    Workflows with comparativeRiskScore ≥ 70.
+    "Dominant" = they account for a disproportionate share of workspace risk.
+    Useful threshold: if concentrationRatio > 0.3, the workspace has a
+    concentration problem rather than a broad operational issue.
+
+  concentrationRatio
+    dominantWorkflowCount / totalWorkflows  (0–1, 3 decimal places)
+    Low ratio: risk is spread evenly.
+    High ratio (e.g., 0.1): a small number of workflows are dominating
+    the operational pressure; fixing them would have outsized impact.
+
+  chronicHotspotWorkflowCount
+    Workflows with hotspotCount ≥ 2 (from P8-C chronicOperationalHotspots).
+    These workflows carry multiple simultaneous chronic pressure categories
+    (e.g., both approval_backlog_concentration AND convergence_under_load).
+
+  criticallyDegradingCount
+    Workflows with trendDirection = "critically_degrading" from P8-D.
+    These workflows are accelerating toward higher risk; they may not score
+    highest today but will in the near future.
+
+  urgentOrCriticalCount
+    Workflows with operationalPriority ∈ {"urgent", "critical"}.
+    Immediate triage queue size.
+
+  topRiskWorkflowId / topRiskScore
+    Identity and score of the rank-1 workflow.
+    null / 0 if the workspace has no active workflows.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. API ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workflows/comparative
+  Auth:        requireAuth + requirePermission("workflow.view")
+  No query params
+
+  Internal execution plan (DB queries + CPU):
+    1. Query all active, non-deleted workflow definitions in workspace (limit 200)
+    2. Query governance_snapshot_rollups (granularity=hourly, last 7 days) ONCE
+       — reused as historical input for all workflows' P8-C and P8-D calls
+    3. Per workflow (pure CPU, no DB):
+       a. extractWorkflowTopology + computeTopologyAnalytics  (P8-A)
+       b. analyzeDependencies                                 (P8-B)
+       c. computeOperationalCorrelation                       (P8-C)
+       d. computeWorkflowForecast (7-day window)              (P8-D)
+       e. Build WorkflowIntelligenceSnapshot
+    4. computeComparativeIntelligence(snapshots[])            (P8-E)
+    5. Return WorkflowComparativeRankingResponse
+
+  Note: historical data is workspace-scoped (not per-workflow), so it is
+  fetched ONCE and reused across all per-workflow P8-C / P8-D computations.
+  This keeps the endpoint at 2 DB queries regardless of workflow count.
+
+  Response: WorkflowComparativeRankingResponse
+  {
+    workspaceId:     number,
+    totalWorkflows:  number,
+    rankedWorkflows: WorkflowComparativeIntelligence[],   // sorted: rank 1 first
+    hotspotConcentration: WorkspaceHotspotConcentration,
+    computedAt:      string,   // ISO 8601 timestamp
+  }
+
+  WorkflowComparativeIntelligence fields per item:
+    workflowId, workflowName, stepCount,
+    comparativeRiskScore,           // 0–100 integer
+    runtimeWeightedComplexity,      // from P8-C
+    projectedComplexity,            // from P8-D
+    fragilityLevel,                 // from P8-C: low/moderate/high/critical
+    trendDirection,                 // from P8-D: improving/stable/degrading/critically_degrading
+    hotspotCount,                   // from P8-C: count of chronic hotspot categories
+    operationalPriority,            // computed: informational/watch/elevated/urgent/critical
+    workspaceRank,                  // 1-based (1 = highest risk)
+    confidenceLevel                 // from P8-D: low/moderate/high
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. OPENAPI SCHEMAS (3 new)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkflowComparativeIntelligence
+  12 properties — all required.
+  Defines the full comparative intelligence record per workflow.
+  comparativeRiskScore: integer 0–100.
+  operationalPriority: enum (5 values).
+  trendDirection: enum (4 values, from P8-D).
+  fragilityLevel: enum (4 values, from P8-C).
+  confidenceLevel: enum (3 values, from P8-D).
+
+WorkspaceHotspotConcentration
+  7 properties — all required.
+  dominantWorkflowCount, concentrationRatio (0–1), chronicHotspotWorkflowCount,
+  criticallyDegradingCount, urgentOrCriticalCount, topRiskWorkflowId (nullable),
+  topRiskScore.
+
+WorkflowComparativeRankingResponse
+  5 properties — all required.
+  workspaceId, totalWorkflows, rankedWorkflows (array), hotspotConcentration,
+  computedAt (date-time).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-E consumes all prior phases and integrates with the governance layer:
+
+  P8-A TopologyAnalytics           → approvalDensity, delayDensity (per workflow)
+  P8-B analyzeDependencies         → structuralComplexity, bottlenecks
+  P8-C computeOperationalCorrelation → rWC, fragilityLevel, hotspotCount
+  P8-D computeWorkflowForecast     → projectedComplexity, trendDirection, confidenceLevel
+  P7-C governance_snapshot_rollups → shared historical data (ONCE per request)
+  P8-E GET /workflows/comparative  → workspace risk ranking
+
+Cross-endpoint consistency:
+  For any workflow W:
+    P8-C.runtimeWeightedComplexity = P8-E.rankedWorkflows[W].runtimeWeightedComplexity
+    P8-D.forecast.projectedComplexity = P8-E.rankedWorkflows[W].projectedComplexity
+  (exact, since both use the same historical data aggregation and same engine calls)
+
+Integration use cases:
+  • Workflow list view can show operationalPriority badge and workspaceRank
+  • Governance dashboard can show top-N urgent/critical workflows
+  • Hotspot concentration ratio can power a workspace health indicator
+  • criticallyDegradingCount can power a "workflows at risk of escalation" counter
+  • topRiskWorkflowId feeds directly into a "most urgent workflow" deep-link
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. OBSERVABILITY EVENTS (4 per call)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All events emitted via logger.info with structured fields.
+
+A) workflow_comparative_ranking_computed  (always)
+   Fields: workspaceId, totalWorkflows, dominantWorkflows, concentrationRatio,
+           urgentOrCritical, topRiskWorkflowId, topRiskScore
+
+B) workflow_operational_priority_assigned  (when any urgent/critical found)
+   Fields: workspaceId, criticalCount, urgentCount, topWorkflowIds (up to 5)
+
+C) workflow_hotspot_concentration_detected  (when dominant > 0 OR chronic > 0)
+   Fields: workspaceId, dominantWorkflowCount, concentrationRatio,
+           chronicHotspotWorkflowCount, criticallyDegradingCount, topRiskWorkflowId
+
+D) workflow_risk_escalation_detected  (when priority is escalated beyond score-only)
+   Emitted when a workflow's operationalPriority exceeds what its comparativeRiskScore
+   alone would give (i.e., the trend or fragility escalation rules fired).
+   Fields: workspaceId, escalatedCount,
+           workflowIds[ { workflowId, comparativeRiskScore, operationalPriority, trendDirection } ]
+
+Route-level event (additional, via req.log.info):
+   workflow_comparative_ranking_requested — includes actorId, totalWorkflows,
+   dominantWorkflows, urgentOrCritical, topRiskWorkflowId.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-E test groups (23rd test file in suite):
+
+  T1   comparativeRiskScore deterministic                    (6 assertions)
+       - identical inputs → identical scores
+       - low < high risk
+       - score bounded [0, 100]
+       - score is integer
+       - critical > low
+       - improving trend reduces score vs stable
+
+  T2   workspace ranking stable ordering                     (6 assertions)
+       - ranks are 1-based and contiguous
+       - rank 1 has highest score
+       - critical workflow ranked 1 in a set of 4
+       - empty input → empty ranking
+       - single workflow → rank 1
+       - totalWorkflows = snapshot count
+
+  T3   tie-breaking deterministic                            (4 assertions)
+       - identical scores broken by workflowId ASC
+       - tie-breaking stable regardless of input order
+       - two tied: lower workflowId = rank 1
+       - different scores: higher score wins regardless of workflowId order
+
+  T4   operationalPriority classification stable             (5 assertions)
+       - low-risk → informational or watch
+       - critical workflow → critical priority
+       - all priorities are valid enum values
+       - extreme workflow → urgent or critical
+       - critically_degrading escalates priority
+
+  T5   degrading workflows ranked higher                     (5 assertions)
+       - degrading > stable (same base metrics)
+       - critically_degrading > degrading
+       - improving < stable
+       - all 4 trend bonuses in correct order
+       - 4 trend directions produce 4 distinct scores
+
+  T6   confidence penalties reduce ranking                   (4 assertions)
+       - high > low confidence (same signals)
+       - high ≥ moderate ≥ low
+       - confidence multipliers monotonically decreasing
+       - low-confidence ranked lower than high-confidence
+
+  T7   hotspot concentration detection stable                (7 assertions)
+       - no dominant workflows when all scores are low
+       - critical workflow counted as dominant
+       - concentrationRatio = dominantCount / totalCount
+       - chronicHotspotWorkflowCount counts hotspotCount ≥ 2
+       - criticallyDegradingCount correct
+       - topRiskWorkflowId = rank 1's id
+       - empty input → zero-filled concentration
+
+  T8   comparative serialization stable                      (4 assertions)
+       - JSON round-trip safe (no undefined, no circular refs)
+       - all required fields present on each ranked workflow
+       - hotspotConcentration has all required fields
+       - workspaceRanks are sequential integers starting at 1
+
+  T9   no live runtime dependency required                   (5 assertions)
+       - runs with zero snapshots (no DB/network needed)
+       - handles all-zero metrics
+       - handles maximum values without overflow (score = 100)
+       - 100 snapshots processed without error
+       - result shape consistent
+
+  T10  comparative engine remains read-only                  (5 assertions)
+       - input snapshot array is not mutated
+       - input snapshot objects are not mutated
+       - calling twice yields identical results
+       - output arrays independent per call
+       - result contains only plain data (no functions/instances)
+
+Full test suite result (23 test files):
+  Tests:      1345 passed (1345)
+  Test Files: 23 passed (23)
+  Duration:   ~7.2s
+  TypeScript: clean (zero errors in api-server, typecheck:libs clean)
+
+Cumulative test counts by phase:
+  P8-A (topology)             +45  →  ~1140
+  P8-B (dependency)           +50  →   1186
+  P8-C (correlation)          +52  →   1238
+  P8-D (forecast)             +56  →   1294
+  P8-E (comparative)          +51  →   TOTAL: 1345
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. SAFETY INVARIANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • READ-ONLY: engine never mutates workflow definitions, governance data, or DB
+  • No autonomous actions: no alerts triggered, no executions invoked, no emails
+  • Input mutation guard: input.snapshots array never mutated (T10)
+  • Snapshot objects never mutated (T10)
+  • Deterministic: identical inputs always produce identical outputs (T10)
+  • Bounded outputs: comparativeRiskScore clamped [0, 100] (T9)
+  • JSON-safe: result round-trips losslessly (T8)
+  • Graceful degradation: empty snapshots → empty ranking, no crash (T9)
+  • Overflow protection: all inputs clipped to MAX_SNAPSHOTS=200 before processing
+  • Type-safe: TypeScript strict mode, zero errors in the full api-server check
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. KNOWN LIMITATIONS & COMPARATIVE INTELLIGENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) Workspace-scoped historical data
+   All workflows in a workspace share the same historical rollup data.
+   The comparative differentiation comes entirely from structural differences
+   (approvalDensity, delayDensity, structuralComplexity) — not from
+   per-workflow runtime telemetry.  Two structurally identical workflows will
+   always receive identical comparativeRiskScores.
+
+B) No incremental caching
+   The endpoint recomputes the full P8-A → P8-E pipeline on every call.
+   For workspaces with many workflows (>50) this is CPU-intensive.
+   A future phase could cache WorkflowIntelligenceSnapshot[] per workflow
+   version and invalidate on definition changes.
+
+C) Forecast window fixed at 7 days
+   The comparative endpoint always uses a 7-day forecast window for P8-D.
+   The single-workflow /forecast endpoint allows 1–90 days.
+   A future enhancement could expose a ?window= query parameter on the
+   comparative endpoint as well.
+
+D) Priority escalation is binary
+   Escalation adds exactly +1 per rule (capped at critical).
+   It does not reflect magnitude — a slope of 5.0 (rapidly critical) escalates
+   by the same amount as a slope of 0.5 (just crossing the degrading threshold).
+   A quantitative escalation model (proportional to slope) could be added in P8-F.
+
+E) No historical rank tracking
+   workspaceRank is computed fresh on each call.
+   There is no storage of previous ranks, so "this workflow moved from rank 5
+   to rank 1 in the last 24h" cannot be detected.
+   A future phase could persist ranks to a governance_workflow_ranks table.
+
+F) No multi-criteria weighting profiles
+   All workspaces use the same weight constants (W_RWC=0.35, W_PROJECTED=0.25, etc.).
+   Workspaces with different risk tolerances (e.g., a critical-workflow-heavy
+   workspace vs a batch-processing workspace) cannot currently tune the weights.
+
+G) Max 200 workflows per call
+   The safety cap (MAX_SNAPSHOTS=200) prevents CPU spikes.
+   Large workspaces with > 200 active workflows will see their top 200
+   (ordered by workflowDefinitionsTable.id ASC) ranked; the rest are excluded.
+   A future phase could implement server-side pagination for comparative rankings.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. READINESS ASSESSMENT FOR PROACTIVE GOVERNANCE PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is now in place (P8-A through P8-E):
+
+  ✅ Structural topology graph, analytics, risk classification (P8-A)
+  ✅ Static dependency + bottleneck + execution pressure (P8-B)
+  ✅ Runtime-weighted complexity, fragility index, hotspot detection (P8-C)
+  ✅ Deterministic trend projection, confidence modeling, trend direction (P8-D)
+  ✅ Cross-workflow ranking, operational priority, hotspot concentration (P8-E)
+
+What P8-E enables for the next phase (P8-F: Proactive Governance):
+
+  → GOV-* proactive alert codes — P8-E now provides operationalPriority and
+    trendDirection per workflow, enabling:
+    - GOV-WORKFLOW-URGENT: when operationalPriority="urgent" persists for N days
+    - GOV-WORKFLOW-CRITICAL: when operationalPriority="critical"
+    - GOV-WORKFLOW-ESCALATING: when critically_degrading trend detected
+    - GOV-HOTSPOT-CONCENTRATION: when concentrationRatio > threshold
+
+  → Governance dashboard surface — the comparativeRankingResponse is ready
+    to drive a "workflow risk heat-map" UI panel:
+    - Top-N riskiest workflows list with badges
+    - Urgency/priority distribution chart
+    - concentrationRatio gauge for workspace health
+    - criticallyDegradingCount for "at-risk" counter
+
+  → Rank-change detection — with P8-E rank values in place, storing snapshots
+    of workspaceRank to governance_snapshot tables would enable rank-delta alerts.
+
+  → Differential triage — urgentOrCriticalCount provides the "immediate queue"
+    size that can be surfaced in the platform header or notification center.
+
+  → Blocking conditions (governance gates) — operationalPriority could be
+    surfaced as a non-blocking advisory on the workflow activation screen
+    (e.g., "This workflow is currently ranked #1 for operational risk — are
+    you sure you want to activate a new execution?").
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. COMPLETE P8 INTELLIGENCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Endpoint                              Phase  Scope        Description
+  ─────────────────────────────────────────────────────────────────────────────
+  GET /workflows/:id/topology           P8-A   per-workflow  Structural topology graph
+  GET /workflows/:id/dependency         P8-B   per-workflow  Static dependency + pressure
+  GET /workflows/:id/operational        P8-C   per-workflow  Runtime-weighted historical correlation
+  GET /workflows/:id/forecast           P8-D   per-workflow  Deterministic trend projection
+  GET /workflows/comparative            P8-E   workspace     Cross-workflow ranking ← NEW
+
+  Combined query for full operational intelligence (governance console):
+    1. /comparative        → workspace risk ranking (which workflows need attention?)
+    2. /topology           → structural details for the top-ranked workflow
+    3. /dependency         → static bottleneck analysis
+    4. /operational        → current runtime-weighted pressure score
+    5. /forecast           → where is that pressure heading in the next N days?

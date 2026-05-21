@@ -1,0 +1,413 @@
+LEAVE DOMAIN PHASE 0 REPORT
+============================
+Task:    LEAVE DOMAIN PHASE 0 — Event Taxonomy & Registry Stabilization
+Date:    2026-05-13
+Status:  ✅ COMPLETE — TypeScript clean, codegen clean, zero errors
+Scope:   Stabilize the leave event layer before Phase 1 domain implementation.
+         No routes, tables, migrations, or business logic added.
+         No existing behavior changed.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — BUG-001 REGISTRY DUPLICATE STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  BUG-001: "leave.requested" registered twice in registry.ts
+    Status before Phase 0: ALREADY RESOLVED (Cleanup Sprint, prior session)
+
+  Findings:
+    registry.ts lines 629-647 contain a detailed comment confirming the fix:
+      • The duplicate "forms" module entry was removed.
+      • Canonical owner is module "hr" (single entry, lines 471-516).
+      • The comment explains the root cause, resolution, and design principle.
+
+  Work done in Phase 0:
+    • Updated constants.ts BUG-001 note from "Fix in a dedicated ticket"
+      to "RESOLVED (Cleanup Sprint): duplicate 'forms' entry removed."
+    • Updated events.ts BUG-001 inline note similarly.
+    • Removed stale "leave.approved and leave.rejected will be added" forward
+      reference from LeaveRequestedPayload JSDoc — those events are now added.
+
+  No code change was required for BUG-001 itself (already fixed).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — CHANGES EXECUTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── 2A. lib/core-events/src/events.ts ────────────────────────────────────────
+
+  Updated: HR MODULE section header → HR MODULE — LEAVE DOMAIN
+    Added full domain-level comment block explaining:
+      • Publisher boundary (leave.ts, Phase 1, not yet built)
+      • Leave domain vs. forms module boundary (forms → form.submitted only)
+      • Why approvals module is intentionally excluded (ticketId NOT NULL)
+      • Dedicated leave_approval_steps chain (Phase 1)
+      • Full lifecycle state machine summary
+      • Synchronous vs. async responsibility split
+      • BUG-001 resolution reference
+
+  Updated: LeaveRequestedPayload
+    • Removed stale BUG-001 "Fix in a dedicated ticket" note (now resolved)
+    • Removed stale "leave.approved and leave.rejected will be added" forward ref
+    • Added: leavePolicyId?: number | null (FK to hr_leave_policies)
+    • Added: requiresApproval: boolean (from policy, determines approval chain)
+    • Enhanced JSDoc with emitter trigger description and consumer list
+
+  Added 5 new payload interfaces + TypedEvent aliases:
+
+  LeaveApprovedPayload / LeaveApprovedEvent ("leave.approved")
+    leaveRequestId, employeeUserId, leaveType, startDate, endDate,
+    daysApproved, approvedByUserId, leavePolicyId?, departmentId?
+
+  LeaveRejectedPayload / LeaveRejectedEvent ("leave.rejected")
+    leaveRequestId, employeeUserId, leaveType, startDate, endDate,
+    daysRequested, rejectedByUserId, rejectionReason?, departmentId?
+
+  LeaveCancelledPayload / LeaveCancelledEvent ("leave.cancelled")
+    leaveRequestId, employeeUserId, leaveType, startDate, endDate,
+    cancelledByUserId, wasApproved: boolean, departmentId?
+
+  LeaveWithdrawnPayload / LeaveWithdrawnEvent ("leave.withdrawn")
+    leaveRequestId, employeeUserId, leaveType, startDate, endDate,
+    daysRequested, departmentId?
+
+  LeaveBalanceAdjustedPayload / LeaveBalanceAdjustedEvent ("leave.balance_adjusted")
+    leaveBalanceId, employeeId, employeeUserId, leaveType, year,
+    adjustmentDays (signed), reason (required), adjustedByUserId,
+    leavePolicyId?
+
+  Each payload has:
+    • Full JSDoc explaining trigger condition, pre-conditions, consumers
+    • No workflow-specific fields
+    • No UI-specific fields
+    • Consistent naming (camelCase, follows catalog conventions)
+
+── 2B. lib/core-events/src/constants.ts ─────────────────────────────────────
+
+  Imports: Added 5 new event type imports
+    LeaveApprovedEvent, LeaveRejectedEvent, LeaveCancelledEvent,
+    LeaveWithdrawnEvent, LeaveBalanceAdjustedEvent
+
+  EVENT_TYPES: Added 5 new constants
+    LEAVE_APPROVED:         "leave.approved"
+    LEAVE_REJECTED:         "leave.rejected"
+    LEAVE_CANCELLED:        "leave.cancelled"
+    LEAVE_WITHDRAWN:        "leave.withdrawn"
+    LEAVE_BALANCE_ADJUSTED: "leave.balance_adjusted"
+
+    Each constant has JSDoc explaining trigger condition and distinguishing
+    semantics (e.g. LEAVE_CANCELLED vs LEAVE_WITHDRAWN distinction).
+    Group comment explains leave domain ownership and approvals exclusion.
+
+  EventTypeMap: Added 5 new entries (aligned with consistent spacing)
+    "leave.requested":        LeaveRequestedEvent["data"]  (was already there)
+    "leave.approved":         LeaveApprovedEvent["data"]
+    "leave.rejected":         LeaveRejectedEvent["data"]
+    "leave.cancelled":        LeaveCancelledEvent["data"]
+    "leave.withdrawn":        LeaveWithdrawnEvent["data"]
+    "leave.balance_adjusted": LeaveBalanceAdjustedEvent["data"]
+
+  AnyTypedEvent: Added 5 new union members
+    | LeaveApprovedEvent
+    | LeaveRejectedEvent
+    | LeaveCancelledEvent
+    | LeaveWithdrawnEvent
+    | LeaveBalanceAdjustedEvent
+
+  Header comments:
+    • "Not-yet-promoted events" list: removed LEAVE_APPROVED, LEAVE_REJECTED
+      (they are now promoted); added Phase 0 promotion note.
+    • BUG-001 note: updated from "Fix: remove..." to "RESOLVED (Cleanup Sprint)".
+
+── 2C. lib/core-events/src/index.ts ─────────────────────────────────────────
+
+  Package header comment: Updated "HR Leave" event list to include all 6 events.
+
+  Exports: Added 10 new type exports (5 payload interfaces + 5 TypedEvent aliases):
+    LeaveApprovedPayload, LeaveApprovedEvent,
+    LeaveRejectedPayload, LeaveRejectedEvent,
+    LeaveCancelledPayload, LeaveCancelledEvent,
+    LeaveWithdrawnPayload, LeaveWithdrawnEvent,
+    LeaveBalanceAdjustedPayload, LeaveBalanceAdjustedEvent
+
+── 2D. artifacts/api-server/src/lib/events/registry.ts ──────────────────────
+
+  Updated: leave.approved entry (lines 519-535)
+    Enhanced description (clarified "all steps complete")
+    Updated schema fields: employeeId → employeeUserId (matches payload)
+    Added: leaveType enum field (annual/sick/unpaid/maternity/emergency/other)
+    Added: DEPARTMENT_FIELD
+    Added: approvedByUserId user field
+    Added: emergency enum value (was missing from leave.approved/rejected)
+
+  Updated: leave.rejected entry (lines 538-554)
+    Enhanced description (clarified "by an approver")
+    Updated schema fields: employeeId → employeeUserId (matches payload)
+    Added: leaveType enum field with emergency
+    Added: DEPARTMENT_FIELD
+    Added: rejectedByUserId user field
+
+  Added: leave.cancelled entry (new)
+    Fields: employeeUserId, leaveType, cancelledByUserId, wasApproved (boolean)
+    DEPARTMENT_FIELD included
+
+  Added: leave.withdrawn entry (new)
+    Fields: employeeUserId, leaveType (enum)
+    DEPARTMENT_FIELD included
+
+  Added: leave.balance_adjusted entry (new)
+    Fields: employeeUserId, leaveType (enum), adjustmentDays (number), adjustedByUserId
+
+── 2E. Generated files (codegen ran clean) ───────────────────────────────────
+
+  pnpm --filter @workspace/api-spec run codegen → ✅ PASSED
+    lib/api-zod/src/generated/api.ts         — regenerated (no leave-related changes;
+                                               new events are not in OpenAPI spec)
+    lib/api-client-react/src/generated/      — regenerated (same: no OpenAPI impact)
+
+  Note: Leave event payloads live in @workspace/core-events, not in the OpenAPI
+  spec.  Codegen only affects API request/response schemas.  No spec changes
+  were needed for Phase 0.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — CANONICAL LEAVE EVENT TAXONOMY (FINAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Event type string        Constant                  Status
+  ─────────────────────── ─────────────────────── ──────────────────────────
+  "leave.requested"       LEAVE_REQUESTED          EXISTS — no emitter (Phase 1)
+  "leave.approved"        LEAVE_APPROVED           NEW — no emitter (Phase 1)
+  "leave.rejected"        LEAVE_REJECTED           NEW — no emitter (Phase 1)
+  "leave.cancelled"       LEAVE_CANCELLED          NEW — no emitter (Phase 1)
+  "leave.withdrawn"       LEAVE_WITHDRAWN          NEW — no emitter (Phase 1)
+  "leave.balance_adjusted" LEAVE_BALANCE_ADJUSTED  NEW — no emitter (Phase 1)
+
+  All 6 events are in:
+    ✓ EventTypeMap  (payload type inference for appEventBus.emit() calls)
+    ✓ AnyTypedEvent (discriminated union for exhaustive switch narrowing)
+    ✓ EVENT_TYPES   (constant strings, no raw string literals needed)
+    ✓ events.ts     (typed payload interfaces)
+    ✓ index.ts      (exported from @workspace/core-events)
+    ✓ registry.ts   (workflow condition builder schema fields)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — PAYLOAD CONTRACTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  leave.requested — LeaveRequestedPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveRequestId:   number          FK to leave_requests.id              │
+  │ employeeUserId:   number          the requesting employee's user ID     │
+  │ leaveType:        string          annual|sick|unpaid|maternity|         │
+  │                                   emergency|other                       │
+  │ startDate:        string          ISO date "YYYY-MM-DD"                 │
+  │ endDate:          string          ISO date "YYYY-MM-DD"                 │
+  │ daysRequested:    number          business days (excl. weekends+holidays)│
+  │ departmentId?:    number|null                                           │
+  │ employeeNote?:    string          reason from employee                  │
+  │ leavePolicyId?:   number|null     FK to hr_leave_policies               │
+  │ requiresApproval: boolean         from policy (drives approval chain)   │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  leave.approved — LeaveApprovedPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveRequestId:   number                                                │
+  │ employeeUserId:   number                                                │
+  │ leaveType:        string                                                │
+  │ startDate:        string                                                │
+  │ endDate:          string                                                │
+  │ daysApproved:     number          stored at creation, not recomputed    │
+  │ approvedByUserId: number          final approver in the chain           │
+  │ leavePolicyId?:   number|null                                           │
+  │ departmentId?:    number|null                                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  leave.rejected — LeaveRejectedPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveRequestId:   number                                                │
+  │ employeeUserId:   number                                                │
+  │ leaveType:        string                                                │
+  │ startDate:        string                                                │
+  │ endDate:          string                                                │
+  │ daysRequested:    number                                                │
+  │ rejectedByUserId: number          the rejecting approver                │
+  │ rejectionReason?: string          optional note                         │
+  │ departmentId?:    number|null                                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  leave.cancelled — LeaveCancelledPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveRequestId:    number                                               │
+  │ employeeUserId:    number                                               │
+  │ leaveType:         string                                               │
+  │ startDate:         string                                               │
+  │ endDate:           string                                               │
+  │ cancelledByUserId: number         the HR/admin who cancelled            │
+  │ wasApproved:       boolean        true → balance + attendance restore   │
+  │ departmentId?:     number|null                                          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  leave.withdrawn — LeaveWithdrawnPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveRequestId:   number                                                │
+  │ employeeUserId:   number          (IS the withdrawer — employee only)   │
+  │ leaveType:        string                                                │
+  │ startDate:        string                                                │
+  │ endDate:          string                                                │
+  │ daysRequested:    number                                                │
+  │ departmentId?:    number|null                                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  leave.balance_adjusted — LeaveBalanceAdjustedPayload
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ leaveBalanceId:    number         FK to hr_leave_balances.id            │
+  │ employeeId:        number         FK to employees.id                    │
+  │ employeeUserId:    number         FK to users.id                        │
+  │ leaveType:         string                                               │
+  │ year:              number         e.g. 2026                             │
+  │ adjustmentDays:    number         signed: + grant, - deduction          │
+  │ reason:            string         required for audit trail              │
+  │ adjustedByUserId:  number         the HR user who made the adjustment   │
+  │ leavePolicyId?:    number|null                                          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  Payload design principles applied:
+    ✓ Only domain facts — no workflow state, no UI fields
+    ✓ Consistent naming: camelCase, entity.action pattern
+    ✓ All dates as ISO date strings (not timestamps)
+    ✓ Boolean fields for binary state (wasApproved, requiresApproval)
+    ✓ Signed numbers for adjustments (adjustmentDays)
+    ✓ Optional fields use ? (nullable FK fields use number|null)
+    ✓ Reason/note fields: required where audit demands, optional where advisory
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — REGISTRY CLEANUP DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Leave events in platformEventRegistryTable (seeded via seedEventRegistry()):
+
+  Event                    Module  Schema fields
+  ─────────────────────── ─────── ──────────────────────────────────────────
+  leave.requested          hr      employeeId, DEPARTMENT, leaveType (enum),
+                                   startDate (date), endDate (date)
+  leave.approved           hr      employeeUserId, DEPARTMENT, leaveType (enum),
+                                   approvedByUserId          [ENHANCED Phase 0]
+  leave.rejected           hr      employeeUserId, DEPARTMENT, leaveType (enum),
+                                   rejectedByUserId          [ENHANCED Phase 0]
+  leave.cancelled          hr      employeeUserId, DEPARTMENT, leaveType (enum),
+                                   cancelledByUserId, wasApproved (boolean)
+                                                             [NEW Phase 0]
+  leave.withdrawn          hr      employeeUserId, DEPARTMENT, leaveType (enum)
+                                                             [NEW Phase 0]
+  leave.balance_adjusted   hr      employeeUserId, leaveType (enum),
+                                   adjustmentDays (number), adjustedByUserId
+                                                             [NEW Phase 0]
+
+  Corrections applied to existing entries:
+    leave.approved:  employeeId → employeeUserId (field name drift fixed to match payload)
+    leave.rejected:  employeeId → employeeUserId (same fix)
+    Both: added emergency enum value (was missing, now consistent with leave.requested)
+    Both: APPROVER_FIELD (generic) replaced with specific approvedByUserId/rejectedByUserId
+
+  BUG-001 duplicate status:
+    Registry now contains exactly ONE registration per leave event name.
+    seedEventRegistry() uses onConflictDoUpdate — re-seeding is idempotent.
+
+  Field name alignment: registry.ts schema fields now use the same field names
+  as the TypeScript payload interfaces.  This ensures WorkflowEngine condition
+  evaluation (which reads from payload.data) can correctly match field values.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — LEGACY CONCERNS & LEGACY_EVENT_NAMES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  LEGACY_EVENT_NAMES map (no changes made):
+    "approval.requested"   → "approval.created"
+    "approval.approved"    → "approval.completed"
+    "approval.rejected"    → "approval.completed"
+    "forms.form.submitted" → "form.submitted"
+
+  Leave events and legacy aliasing:
+    "leave.requested" — already canonical; NO legacy alias needed.
+      The api-server EVENTS map has LEAVE_REQUESTED = "leave.requested" which
+      matches the canonical EVENT_TYPES.LEAVE_REQUESTED = "leave.requested".
+      No rename occurred; no alias required.
+
+    "leave.approved", "leave.rejected" — existed in registry.ts schema but
+      were NOT published by any route and NOT in EVENT_TYPES previously.
+      They were dead registry entries.  Now promoted to full EVENT_TYPES constants
+      with typed payloads.  No legacy alias needed (no existing workflow_definitions
+      rows trigger on these in dev DB; production audit recommended before Phase 1).
+
+    "leave.cancelled", "leave.withdrawn", "leave.balance_adjusted" — brand new.
+      No legacy aliases exist or are needed.
+
+  Workflow_definitions trigger compatibility:
+    Dev DB: 0 workflow_definitions rows (clean state).
+    No migration needed for dev.
+    Production: audit workflow_definitions for any rows with trigger_event
+    matching leave event names before Phase 1 deployment.
+
+  No LEGACY_EVENT_NAMES entries were added or modified in Phase 0.
+  The map is documentation-only; adding leave events would be premature
+  until a route actually emits them and a deprecation cycle is needed.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — WHAT WAS NOT CHANGED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✓ forms.ts behavior       — unchanged (still emits form.submitted)
+  ✓ hr.ts routes            — unchanged (leave admin endpoints untouched)
+  ✓ WorkflowEngine          — unchanged (engine.ts not modified)
+  ✓ approvals module        — unchanged (approvals.ts not modified)
+  ✓ notifications behavior  — unchanged (no listener changes)
+  ✓ activity.ts             — unchanged (no listener changes)
+  ✓ notifications-bus.ts    — unchanged (no listener changes)
+  ✓ DB schema files         — unchanged (no migrations)
+  ✓ API routes              — unchanged (no new endpoints)
+  ✓ OpenAPI spec            — unchanged (leave payloads are bus-only, not HTTP)
+  ✓ Frontend                — unchanged
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — READINESS ASSESSMENT FOR PHASE 1
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Phase 0 completion checklist:
+
+  [✅] BUG-001 registry duplicate — confirmed resolved (Cleanup Sprint)
+  [✅] BUG-001 reference updated across events.ts + constants.ts comments
+  [✅] leave.requested payload — enhanced with leavePolicyId, requiresApproval
+  [✅] leave.approved event + payload — added
+  [✅] leave.rejected event + payload — added
+  [✅] leave.cancelled event + payload — added
+  [✅] leave.withdrawn event + payload — added
+  [✅] leave.balance_adjusted event + payload — added
+  [✅] All 6 events in EVENT_TYPES, EventTypeMap, AnyTypedEvent
+  [✅] All 6 events exported from @workspace/core-events
+  [✅] Registry entries: leave.approved/rejected enhanced, 3 new added
+  [✅] Registry field names aligned with payload interfaces
+  [✅] Domain boundary docs in events.ts (approvals exclusion, forms boundary)
+  [✅] TypeScript: zero errors (pnpm run typecheck)
+  [✅] Codegen: clean (pnpm --filter @workspace/api-spec run codegen)
+
+  VERDICT: ✅ READY FOR PHASE 1
+
+  Phase 1 can start immediately. All event type strings, payload contracts,
+  TypeScript types, and registry entries are in place.  The leave route
+  (leave.ts) can import EVENT_TYPES and payload types from @workspace/core-events
+  on day one without any changes to the event layer.
+
+  Phase 1 prerequisites (from architecture review):
+    • New DB schema: leave_requests table
+    • New DB schema: leave_approval_steps table
+    • New route file: artifacts/api-server/src/routes/leave.ts
+    • New listeners: activity.ts + notifications-bus.ts for all 6 leave events
+    • OpenAPI spec additions (leave request CRUD endpoints)
+    • Codegen after spec update

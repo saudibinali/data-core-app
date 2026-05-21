@@ -1,0 +1,488 @@
+WORKFLOW PHASE 12-G — Evidence Packages UI & Controlled Package Review Foundations
+====================================================================================
+Frontend-only · Read-only · Super-admin scoped · No backend changes
+Test result: 575/575 frontend · 2399/2399 backend · 0 new backend errors
+Typecheck: 0 new errors (pre-existing unrelated errors excluded per scratchpad)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. EVIDENCE PACKAGES UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+One page, fully rewritten from the P12-A placeholder:
+  /super-admin/governance/evidence-packages
+  → SuperAdminGovernanceEvidence  (rewritten, 8 sections)
+
+Route is already registered in App.tsx from P12-A — no routing change needed.
+Protected by SuperAdminRoute — non-super-admins redirected to /sign-in.
+
+Page sections (top to bottom):
+  1. GovernanceSectionHeader + GovernanceReadOnlyNotice
+  2. Evidence readiness overview banner (useGovernanceEvidenceReadiness)
+  3. Package integrity summary cards (5 status buckets, count per status)
+  4. Scope selector — 6 tabs, drives useGovernanceEvidencePackages(scope)
+  5. Filter bar — scope · integrityStatus · workspaceId · section (text)
+  6. Expandable package list with full detail views
+  7. Export placeholder notice (read-only info card)
+  8. Safety annotation footer line
+
+Data flow (read-only):
+  useGovernanceEvidencePackages(scope)  → evidenceQuery.data.package
+  useGovernanceEvidenceReadiness()      → readinessQuery.data.package
+
+Both hooks are pre-existing from P11-F. No new hooks added.
+All API calls are GET-only. No mutation hooks present.
+
+Normalisation: API may return either a single package object or an array.
+The page normalises both to a packages[] array with:
+  Array.isArray(rawPkg) ? rawPkg : [rawPkg]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. PACKAGE SCOPE VISUAL MODEL — EVIDENCE_PACKAGE_SCOPE_MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6 scopes, ordered 0–5 from broadest to lightest.
+Exported as EVIDENCE_PACKAGE_SCOPE_MAP and EVIDENCE_PACKAGE_SCOPE_ORDER.
+
+Key       Label       Order  Tier            displayHint (purpose)
+────────  ──────────  ─────  ──────────────  ─────────────────────────────
+platform  Platform      0    comprehensive   All 7 sections, platform-wide
+workspace Workspace     1    scoped          Workspace-filtered evidence
+entity    Entity        2    scoped          Entity-specific evidence
+violation Violation     3    targeted        Violation-centred evidence
+workflow  Workflow      4    targeted        Workflow lifecycle evidence
+readiness Readiness     5    lightweight     Topology + boundary only
+
+Each entry: label, description, order, tier, displayHint.
+No export wording, no legal wording in any description or displayHint.
+
+EVIDENCE_PACKAGE_SCOPE_ORDER is the canonical iteration order for
+the scope selector tabs and scope filter options.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. EVIDENCE SECTION VISUAL MODEL — EVIDENCE_SECTION_MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7 canonical sections, ordered 0–6 by EVIDENCE_SECTION_ORDER.
+Exported as EVIDENCE_SECTION_MAP and EVIDENCE_SECTION_ORDER.
+
+Key                   Order  expectedSourceLayer   reviewMeaning (summary)
+──────────────────────  ─────  ─────────────────────  ──────────────────────────────────────────────────
+audit_integrity           0    audit_integrity        Confirms audit data complete + unmodified
+policy_violations         1    policy_governance      Enumerates violations, severity, timestamps
+workflow_lifecycle        2    workflow_governance    Records human review chain
+governance_analytics      3    analytics_intelligence Statistical context for violation patterns
+topology_readiness        4    topology_readiness     Layer health + boundary status at package time
+forensic_timeline         5    audit_integrity        Time-ordered narrative of all governance events
+boundary_summary          6    topology_readiness     Per-layer boundary state documentation
+
+Each entry: label, description, order, expectedSourceLayer, reviewMeaning.
+EVIDENCE_SECTION_ORDER is the canonical order used by:
+  - GovernanceEvidenceSectionCoverageGrid (section rows)
+  - Tests (deterministic ordering assertions)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. PACKAGE INTEGRITY VISUAL MODEL — PACKAGE_INTEGRITY_STATUS_MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5 statuses. Exported as PACKAGE_INTEGRITY_STATUS_MAP and PACKAGE_INTEGRITY_STATUS_ORDER.
+
+Key          Order  Tier        Badge colour     Description
+───────────  ─────  ─────────── ───────────────  ──────────────────────────────────────────────────
+verified       0    good        emerald          Hash verified — contents match digest
+warning        1    attention   amber            Minor integrity concern — review metadata
+incomplete     2    neutral     slate            One or more expected sections absent
+compromised    3    critical    red              Hash mismatch — tamper evidence present
+unknown        4    muted       muted            Status cannot be determined
+
+compromised:
+  - tier = "critical"
+  - description: "Hash mismatch detected — tamper evidence present. Critical visibility only."
+  - badgeClass contains "red"
+  - Rendered with red border + ShieldAlert icon in GovernancePackageIntegrityPanel
+  - Page: row gets red left border + red bg tint (same treatment as leak_detected in topology)
+  - Zero action affordance: no verify button, no repair button, no fix wording
+  - Safety note rendered inline: "Critical visibility only · No automated repair"
+
+Each entry: tier, label, description, badgeClass, order.
+Replaces the local IntegrityBadge map from P12-A placeholder.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. PACKAGE LIST / DETAIL EXPANSION DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PackageRow component — one accordion item per package.
+
+Summary row (always visible):
+  Package icon | ID (truncated 14 chars) | ScopeBadge | IntegrityBadge
+  | generatedAt | workspaceId (truncated, hidden on mobile) | expand toggle
+
+Compromised rows: red left border + red bg tint — visually prominent in list.
+
+Expanded detail view — 6 sub-sections:
+
+a) Package Metadata (key-value grid, 2 columns on sm+):
+   packageId, scope, workspaceId, entityId, generatedBy, generatedAt,
+   integrityStatus, readinessStatus, sections (joined string)
+
+b) Package Summaries (only rendered if present):
+   auditChainSummary, violationSummary, workflowSummary, analyticsSummary,
+   topologySummary, readinessSummary — each in a labelled muted card
+
+c) Section Coverage:
+   GovernanceEvidenceSectionCoverageGrid with includedSections string[]
+
+d) Package Integrity:
+   GovernancePackageIntegrityPanel with PackageIntegrityInfo
+
+e) Evidence References (only rendered if evidenceReferences.length > 0):
+   GovernanceEvidenceReferenceList (from P12-C)
+
+No download buttons, no generate button, no export links anywhere in expanded view.
+Accordion: expand-one-at-a-time (second expand collapses first).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. SECTION COVERAGE GRID DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/
+      governance-evidence-section-coverage-grid.tsx
+
+GovernanceEvidenceSectionCoverageGrid
+
+Props:
+  includedSections?:  string[]              (raw API array of section keys)
+  sectionEntries?:    EvidenceSectionEntry[] (richer per-section API objects)
+  isLoading?:         boolean
+  data-testid?:       string
+
+Rendering:
+  - Always iterates EVIDENCE_SECTION_ORDER (canonical 7-step order)
+  - For each section: resolves inclusion status from sectionEntries lookup,
+    then includedSections set, then falls back to "unknown"
+  - 3-column grid: Section | Source Layer | Status
+  - Missing sections (included=false): red left border + red bg tint
+    — always visible, never hidden
+  - Unknown sections: HelpCircle icon + "Unknown" badge — still rendered
+  - Status icons: CheckCircle2 (included), XCircle (missing), HelpCircle (unknown)
+  - Source layer: resolved from TOPOLOGY_LAYER_MAP[expectedSourceLayer].label
+  - evidenceCount shown as #N next to status if present
+
+EvidenceSectionEntry shape:
+  sectionKey?, section?, included?, evidenceCount?, notes?
+
+States: loading (7 skeletons), full render (always shows all 7 sections).
+
+Footer note: "Missing sections highlighted in red · Read-only"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. PACKAGE INTEGRITY PANEL DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/
+      governance-package-integrity-panel.tsx
+
+GovernancePackageIntegrityPanel
+
+Props:
+  info:            PackageIntegrityInfo | null | undefined
+  isLoading?:      boolean
+  data-testid?:    string
+
+PackageIntegrityInfo shape:
+  packageIntegrityHash?, integrityStatus?, generatedAt?, capturedAt?,
+  warningCodes?[], warnings?[], hashAlgorithm?, serializationNotes?,
+  readinessNotes?
+
+Rendering:
+  a) Status row: IntegrityStatusIcon + "Package Integrity" label
+     + IntegrityStatusBadge + inline compromise note (if compromised)
+  b) Metadata grid (2 cols on sm+):
+     Status · Generated At · Hash Algorithm · Hash Preview (24-char truncation)
+  c) Full hash block (collapsible toggle button):
+     - "Show full hash" / "Hide" button — no download
+     - Full hash in select-all monospaced block (copy-safe text, not a button)
+     - data-testid="full-hash-block" when expanded
+  d) Warnings block (amber/red bg, shows warningCodes + warnings[])
+  e) Notes: serializationNotes, readinessNotes if present
+
+Compromised rendering:
+  - Outer wrapper: red border-2 + red bg tint
+  - Inline note: "Critical visibility only · No automated repair"
+
+No verify button, no repair button, no notarization, no blockchain.
+Footer: "Read-only integrity inspection · No verify or repair controls"
+
+States: loading (4 skeletons), empty (Lock icon + message), full render.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. EVIDENCE READINESS OVERVIEW BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: useGovernanceEvidenceReadiness() — pre-existing GET hook from P11-F.
+Data path: (readinessQuery.data as any)?.package
+
+EvidenceReadinessBanner component (top of page):
+
+When data present:
+  - ShieldCheck (emerald) OR ShieldAlert (red if compromisedCount > 0)
+  - IntegrityBadge (from pkg.integrityStatus ?? pkg.overallReadiness)
+  - 4 stat counters: Total Packages · Incomplete · Compromised · Missing Evidence
+  - Compromised + Incomplete counts rendered in red if > 0
+
+API field resolution (handles varied response shapes):
+  packageCount   → pkg.packageCount ?? pkg.totalPackages
+  incompleteCount → pkg.incompleteCount ?? pkg.incompletePkgs
+  compromisedCount → pkg.compromisedCount ?? pkg.compromisedPkgs
+  missingEvidenceCount → pkg.missingEvidenceCount ?? pkg.missingCount
+
+When data absent:
+  - Does NOT self-infer readiness
+  - Shows EVIDENCE_PACKAGE_EMPTY_STATE.noReadinessData.description
+
+Loading: skeleton for the badge + stat counters remain hidden
+
+Compromised banner state:
+  - Outer border class changes from border-border to border-red-400
+  - Background: bg-red-50 / dark:bg-red-950/20
+  - ShieldAlert icon (red) replaces ShieldCheck
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. FILTER BAR DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Filters interface: { scope, integrityStatus, workspaceId, section }
+
+Scope filter:
+  EVIDENCE_SCOPE_FILTER_OPTIONS (7 entries: "" + 6 scopes)
+  Rendered as toggle buttons.
+  When scope filter changes, it filters the package list in-memory.
+  Note: scope filter is separate from the ScopeTabs (which drives the API call).
+  ScopeTabs → API call (selectedScope state)
+  FilterBar.scope → client-side filter on the already-loaded packages
+
+Integrity status filter:
+  EVIDENCE_INTEGRITY_FILTER_OPTIONS (6 entries: "" + 5 statuses)
+  Rendered as toggle buttons.
+
+Workspace ID filter:
+  Text input with search icon — substring match on pkg.workspaceId
+
+Section filter:
+  Text input — substring match on pkg.includedSections[] items (lowercased)
+
+All filters are applied together in useMemo (AND logic).
+No "Apply" button — reactive, updates on every keystroke.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. UI STATES SUPPORTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+State                          Rendering
+──────────────────────────────  ────────────────────────────────────────────────
+loading                         Skeletons in summary cards, package list, panels
+empty (no packages)             Package icon + noPackages message
+no filter match                 Package icon + noFilterMatch message
+error                           GovernanceErrorState with API message
+no readiness data               Banner shows noReadinessData message, no inference
+no package data in expansion    Sections: "no section data" · Integrity: empty state
+unauthorized                    SuperAdminRoute redirects to /sign-in
+read-only notice                GovernanceReadOnlyNotice always present at top
+missing section (included=false) Red border row in section grid — always visible
+compromised package             Red border row in package list + red banner + red panel
+warnings present                Amber warning block in integrity panel
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EVIDENCE_PACKAGE_SAFETY_CONTRACT (10 properties, all true):
+  noPackageGeneration   — no "Generate Package" button anywhere
+  noExportRendering     — no PDF, XLSX, CSV rendering
+  noExternalSubmission  — no regulator submission controls
+  noVerifyRepairAction  — no "Verify" or "Repair" buttons
+  noNotarization        — no notarization UI elements
+  noAiSummaries         — no AI explanation cards
+  noLegalConclusions    — no legal verdict wording
+  noDownloadButtons     — no download buttons anywhere
+  superAdminOnly        — route protected by SuperAdminRoute
+  noPackageMutation     — no write/update/delete calls
+
+Both pages:
+  - GovernanceReadOnlyNotice always present at top of page
+  - SuperAdminRoute guard — enforced at route level
+  - All API calls are GET-only (no mutation hooks on any evidence page component)
+  - Safety annotation footer renders from EVIDENCE_PACKAGE_SAFETY_CONTRACT.superAdminOnly
+  - Critical / compromised states: visual prominence only, zero action affordance
+    (no "Fix", "Repair", "Override" buttons rendered anywhere)
+
+Pre-existing contracts still in place:
+  GOVERNANCE_CONSOLE_SAFETY_CONTRACT (8 props) — platform-level
+  VIOLATIONS_UI_SAFETY_CONTRACT (12 props) — P12-C
+  TOPOLOGY_UI_SAFETY_CONTRACT (10 props) — P12-F
+  READINESS_UI_SAFETY_CONTRACT (10 props) — P12-F
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. TEST RESULTS — governance-evidence-packages.test.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/lib/__tests__/
+      governance-evidence-packages.test.ts
+
+12 test groups, 65 individual assertions.
+All 65 pass. No skipped tests.
+
+T1  evidence package scope map stable                      7 assertions ✓
+T2  evidence section map stable                            8 assertions ✓
+T3  package integrity status map stable                    9 assertions ✓
+T4  evidence packages page super-admin scoped              4 assertions ✓
+T5  section coverage ordering deterministic                3 assertions ✓
+T6  missing sections always visible (config)               4 assertions ✓
+T7  compromised packages always visible (config)           5 assertions ✓
+T8  no generate/export/verify/legal/notarize labels        4 assertions ✓
+T9  evidence package safety contract all true              3 assertions ✓
+T10 governance read hook names remain read-only            4 assertions ✓
+T11 filters config stable                                  7 assertions ✓
+T12 config shapes correct                                  7 assertions ✓
+
+T8 note: phrase-level forbidden patterns used (e.g. "generate package",
+"pdf export", "legal verdict") not single words — single words like
+"evidence" and "section" appear legitimately throughout descriptions.
+
+T9 note: 10 properties checked individually + shape assertion.
+T10 note: toBeGreaterThanOrEqual(16) on GOVERNANCE_READ_HOOK_NAMES (same
+as P12-F pattern) — evidence hooks included.
+
+Full suite totals:
+  Frontend  575 / 575  (9 test files)
+  Backend  2399 / 2399 (42 test files)
+
+New frontend tests: +65 (governance-evidence-packages.test.ts)
+Previous frontend total: 510
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. REMAINING EVIDENCE PACKAGE UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Intentionally deferred — require backend work or are out of P12-G scope:
+
+a) Multi-package API response
+   Current API returns a single package per scope. A future list endpoint
+   (GET /evidence-packages?scope=x&limit=n) would allow browsing multiple
+   packages and comparing integrity across time. The page already handles
+   array responses via the normalisation step.
+
+b) Per-package detail navigation
+   Currently all packages load in the same page via accordion. A dedicated
+   /super-admin/governance/evidence-packages/:id route would allow deep
+   linking to a specific package for sharing in governance review sessions.
+
+c) Section-to-layer cross-linking
+   GovernanceEvidenceSectionCoverageGrid shows expectedSourceLayer labels.
+   A future pass could deep-link each section row to the relevant topology
+   page (topology or audit integrity page) for boundary context.
+
+d) Evidence reference deep resolution
+   GovernanceEvidenceReferenceList shows referenceId values. When a
+   reference type is "audit_chain_entry" or "execution_record", a future
+   pass could resolve the ID to a specific audit trail event on the
+   Audit Integrity page.
+
+e) Package history / version list
+   No package history endpoint exists. When implemented, a sidebar of
+   "previous versions by scope" would allow comparing hash changes over time,
+   supporting tamper detection review without needing diff execution.
+
+f) Readiness dimension ↔ evidence section linking
+   EVIDENCE_SECTION_MAP.topology_readiness links to TOPOLOGY_LAYER_MAP.
+   A future pass could cross-reference READINESS_DIMENSION_MAP.evidence_packaging
+   against the package's completeness — showing which readiness dimension is
+   affected by each missing section.
+
+g) Warning code lookup table
+   warningCodes[] in PackageIntegrityInfo are currently shown as raw strings.
+   A future INTEGRITY_WARNING_CODE_MAP (similar to VIOLATION_SEVERITY_MAP) would
+   provide human-readable descriptions per warning code.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. READINESS ASSESSMENT — PHASE 12 FINAL CLOSURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All Phase 12 sub-phases complete:
+
+Sub-phase  Title                                              Tests
+─────────  ─────────────────────────────────────────────────  ──────
+P12-A      Governance Dashboard Shell & Navigation            ✓
+P12-B      Audit Integrity UI                                 ✓
+P12-C      Policy Violations UI & Evidence Review             ✓
+P12-D      Workflow Governance UI                             ✓
+P12-E      Analytics Intelligence UI                          ✓
+P12-F      Topology & Readiness UI Foundations               ✓
+P12-G      Evidence Packages UI & Package Review              ✓
+
+Frontend total: 575 / 575 (9 files)
+Backend total:  2399 / 2399 (42 files)
+New backend routes: 0
+New DB migrations: 0
+New external dependencies: 0
+Breaking changes: none
+
+Governance console route coverage:
+  /super-admin/governance                          ✓ Dashboard
+  /super-admin/governance/audit                    ✓ Audit Integrity
+  /super-admin/governance/violations               ✓ Policy Violations
+  /super-admin/governance/workflows                ✓ Workflow Governance
+  /super-admin/governance/analytics               ✓ Analytics Intelligence
+  /super-admin/governance/topology                ✓ Topology
+  /super-admin/governance/evidence-packages        ✓ Evidence Packages
+  /super-admin/governance/readiness               ✓ Readiness (non-nav route)
+
+ALL_GOVERNANCE_ROUTE_PATHS has exactly 7 entries (shell test passes).
+Readiness route registered directly in App.tsx, not in GOVERNANCE_ROUTES.
+
+Safety contracts in place (all properties true):
+  GOVERNANCE_CONSOLE_SAFETY_CONTRACT    8 props
+  VIOLATIONS_UI_SAFETY_CONTRACT        12 props
+  TOPOLOGY_UI_SAFETY_CONTRACT          10 props
+  READINESS_UI_SAFETY_CONTRACT         10 props
+  EVIDENCE_PACKAGE_SAFETY_CONTRACT     10 props
+
+Read-only hook registry:
+  GOVERNANCE_READ_HOOK_NAMES ≥ 16 entries, all GET-only,
+  all prefixed "useGovernance", no mutation prefix.
+
+Phase 12 overall status: COMPLETE — ready for Phase 13 or handoff.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. FILES CHANGED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Modified:
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added before P12-F section:
+      EVIDENCE_PACKAGE_SCOPE_MAP, EVIDENCE_PACKAGE_SCOPE_ORDER, EvidencePackageScopeKey
+      EVIDENCE_SECTION_MAP, EVIDENCE_SECTION_ORDER, EvidenceSectionKey
+      PACKAGE_INTEGRITY_STATUS_MAP, PACKAGE_INTEGRITY_STATUS_ORDER, PackageIntegrityStatusKey
+      EVIDENCE_SCOPE_FILTER_OPTIONS, EVIDENCE_INTEGRITY_FILTER_OPTIONS
+      EVIDENCE_PACKAGE_SAFETY_CONTRACT
+      EVIDENCE_PACKAGE_EMPTY_STATE
+
+  artifacts/ops-platform/src/pages/super-admin-governance-evidence.tsx
+    Full rewrite — 8-section page, 3 imported governance components,
+    4 local sub-components (EvidenceReadinessBanner, IntegritySummaryCards,
+    FilterBar, PackageRow, PackageList, ScopeTabs)
+
+Created:
+  artifacts/ops-platform/src/components/governance/
+    governance-evidence-section-coverage-grid.tsx
+    governance-package-integrity-panel.tsx
+  artifacts/ops-platform/src/lib/__tests__/
+    governance-evidence-packages.test.ts
+
+Not changed:
+  governance-console-hooks.ts          (hooks already present)
+  governance-evidence-reference-list.tsx (reused from P12-C, unchanged)
+  governance-boundary-summary-table.tsx  (reused from P12-F, unchanged)
+  openapi.yaml                          (no backend changes)
+  DB schema                             (no migrations)
+  App.tsx                               (route already registered from P12-A)
+  Any backend route file                (frontend-only phase)

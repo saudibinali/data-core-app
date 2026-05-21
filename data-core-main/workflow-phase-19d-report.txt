@@ -1,0 +1,131 @@
+================================================================================
+WORKFLOW PHASE 19-D REPORT — Reporting Engine & Enterprise Export Infrastructure
+================================================================================
+Date: 2026-05-19
+Phase: P19-D (Implementation)
+Prior: P19-C (Document Registry)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P19-D delivers the first enterprise reporting infrastructure: canonical report
+definitions, async export_jobs processing (DB queue, no Redis), generated_reports
+lifecycle with signed/token downloads, legacy HR export route compatibility, and
+in-app notifications on export completion/failure. PDF rendering and report UI
+are explicitly deferred to P19-E.
+
+Recommended next phase: P19-E — PDF Reporting & Scheduled Enterprise Reports.
+
+================================================================================
+SERVICES ADDED
+================================================================================
+- ReportDefinitionRegistry
+- ReportService
+- ExportJobService
+- export-job-processor (10s poll)
+- report-generators (employees, attendance, leave balances)
+- report-artifact-storage (local filesystem)
+- export-authorization
+- export-notifications
+- report-download-token (JWT)
+
+================================================================================
+APIS ADDED
+================================================================================
+GET  /reports/definitions
+POST /reports/export-jobs
+GET  /reports/export-jobs/:id
+GET  /reports/generated
+GET  /reports/generated/:id/download
+GET  /reports/generated/download/stream?token=
+
+Legacy (routed via ReportService):
+GET  /hr/employees/export  (?mode=sync|async|auto)
+GET  /hr/attendance/export
+
+================================================================================
+REPORT DEFINITIONS STATUS
+================================================================================
+hr.employees.roster    — GO (xlsx, csv)
+hr.attendance.period   — GO (xlsx, csv)
+hr.leave.balances      — GO (xlsx, csv)
+PDF formats            — BLOCKED (P19-E)
+
+================================================================================
+EXPORT INFRASTRUCTURE STATUS
+================================================================================
+export_jobs: pending → processing → completed | failed
+Progress tracking, retry (max 3), generated_reports linkage
+DB processor (no Redis/BullMQ)
+
+Status: GO
+
+================================================================================
+GENERATED_REPORTS STATUS
+================================================================================
+Full lifecycle: pending → completed | failed
+storage_key, expires_at, download_count, parameters_json
+report_access_logs on download
+Workspace isolation on all queries
+
+Status: GO
+
+================================================================================
+SECURITY STATUS
+================================================================================
+Permission checks (hr.manage / reports.view / admin)     GO
+JWT download tokens + TTL                                GO
+Workspace isolation                                    GO
+report_access_logs                                     GO
+Signed GCS for reports                                 PARTIAL (local artifacts in P19-D)
+
+================================================================================
+NOTIFICATION INTEGRATION STATUS
+================================================================================
+export_completed / export_failed in-app notifications   GO
+Email templates seeded (export.completed/failed)        GO
+Email enqueue on export                                 PARTIAL (in-app default; email optional)
+
+================================================================================
+SMOKE TEST RESULTS
+================================================================================
+Suite: reporting-engine.smoke.test.ts
+Run: pnpm --filter api-server vitest run reporting-engine
+
+Executed 2026-05-19: 6/6 passed (reporting-engine.smoke.test.ts)
+
+================================================================================
+READINESS MATRIX
+================================================================================
+Capability                    | Status
+------------------------------|----------
+reporting engine              | GO
+async exports                 | GO
+generated_reports             | GO
+secure downloads              | GO
+enterprise export readiness   | PARTIAL
+
+PARTIAL enterprise export readiness: core engine and HR exports migrated; PDF,
+scheduler execution, report UI, and cloud artifact storage remain future work.
+
+================================================================================
+REMAINING BLOCKERS (OUT OF SCOPE P19-D)
+================================================================================
+- PDF engine (P19-E)
+- Report center UI
+- BI dashboards
+- OCR/AI
+- Payroll full rollout
+- Redis redesign
+- External reporting engines
+
+================================================================================
+CONFIRMATION
+================================================================================
+P19-E NOT STARTED.
+No report center UI. No BI. No OCR/AI. No payroll rollout. No Redis redesign.
+No PDF rendering.
+
+================================================================================
+END OF REPORT
+================================================================================

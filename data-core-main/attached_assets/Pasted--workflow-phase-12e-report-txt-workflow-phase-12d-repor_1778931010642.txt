@@ -1,0 +1,406 @@
+راجع:
+- workflow-phase-12e-report.txt
+- workflow-phase-12d-report.txt
+- workflow-phase-12c-report.txt
+- workflow-phase-12b-report.txt
+- workflow-phase-12a-report.txt
+- workflow-phase-11e-report.txt
+- workflow-phase-11f-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceTopology page
+- SuperAdminGovernanceReadiness page
+- useGovernanceTopology()
+- useGovernanceTopologyBoundaries()
+- useGovernanceTopologySnapshot()
+- useGovernanceReadiness()
+- GovernanceTopologyProfile
+- GovernanceBoundarySummary
+- GovernanceReadinessProfile
+- GovernanceTopologySnapshotPayload
+- GovernanceTopologyDiff
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-F — Governance Topology & Readiness UI Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- topology mutation controls
+- readiness override controls
+- snapshot persistence
+- topology diff persistence
+- export rendering
+- AI summaries
+- regulator submission
+- legal conclusions
+
+عنوان المهمة:
+WORKFLOW PHASE 12-F — Governance Topology & Readiness UI Foundations
+
+المهمة الحالية:
+تحويل:
+Topology & Readiness placeholder pages
+
+إلى:
+frontend read-only topology boundary and readiness review experience
+
+الهدف:
+تمكين:
+- governance topology visualization
+- boundary status visibility
+- readiness dimension review
+- topology snapshot payload inspection
+- topology diff preview UX
+- governance layer dependency visibility
+
+بطريقة:
+frontend-only read-only topology/readiness visualization layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TOPOLOGY / READINESS PAGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-topology.tsx
+- super-admin-governance-readiness.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- shared governance components
+- chart/table components من P12-E إذا تنفع
+
+حدّد:
+- كيف تُعرض topology حاليًا
+- كيف تُعرض readiness حاليًا
+- كيف hooks ترجع البيانات
+- كيف تعرض boundaries بدون graph dependency جديد
+- كيف تحافظ على read-only notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — TOPOLOGY LAYER VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+TOPOLOGY_LAYER_MAP
+
+يدعم طبقات مثل:
+- audit_integrity
+- policy_governance
+- workflow_governance
+- analytics_intelligence
+- topology_readiness
+- evidence_packaging
+- frontend_console
+
+لكل layer:
+- label
+- description
+- order
+- expectedBoundary
+- dependencyDirection
+- semantic tier
+
+بدون:
+- mutation wording
+- enforcement wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — BOUNDARY STATUS VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+BOUNDARY_STATUS_MAP
+
+يدعم:
+- isolated
+- read_only
+- append_only
+- human_governed
+- warning
+- leak_detected
+- unknown
+
+لكل status:
+- label
+- description
+- tier
+- order
+- badge semantics
+
+مهم:
+leak_detected يعرض كـ critical visibility فقط، بدون auto-fix.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — READINESS DIMENSION VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+READINESS_DIMENSION_MAP
+
+يدعم:
+- audit_integrity
+- policy_coverage
+- workflow_maturity
+- analytics_visibility
+- topology_clarity
+- evidence_packaging
+- export_readiness
+- frontend_operability
+
+لكل dimension:
+- label
+- description
+- order
+- expectedInputs
+- outputMeaning
+
+وأضف:
+READINESS_STATUS_MAP
+يدعم:
+- ready
+- partial
+- blocked
+- unknown
+
+بدون:
+- business valuation wording
+- legal compliance verdicts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TOPOLOGY PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceTopology
+
+لتحتوي:
+- topology overview banner
+- layer dependency map
+- boundary summary table
+- topology snapshot payload viewer
+- critical boundary warnings panel
+- topology metadata panel
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — READINESS PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceReadiness
+
+لتحتوي:
+- readiness overview banner
+- readiness score/dimension cards
+- readiness blockers panel
+- readiness inputs/outputs table
+- future readiness notes
+- link back to topology page
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TOPOLOGY DEPENDENCY MAP COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceTopologyDependencyMap
+
+يعرض:
+- layers بالترتيب
+- arrows/dependency direction
+- boundary status per layer
+- readiness status per layer إذا متاح
+- compact mode
+
+بدون graph dependency جديد.
+استخدم CSS cards/arrows.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — BOUNDARY SUMMARY TABLE COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceBoundarySummaryTable
+
+يعرض:
+- layer
+- boundaryStatus
+- expectedBoundary
+- observedBoundary
+- warnings
+- evidenceReferences إن وجدت
+
+مع:
+- stable ordering by layer order
+- critical warnings always visible
+- empty/loading states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — READINESS DIMENSION GRID COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceReadinessDimensionGrid
+
+يعرض:
+- dimension
+- readinessStatus
+- score إن وجد
+- expectedInputs
+- outputMeaning
+- blockers/warnings
+
+مع:
+- stable ordering
+- blocked/partial prominent
+- empty/loading states
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TOPOLOGY SNAPSHOT / DIFF PREVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف في Topology page:
+- snapshot payload summary
+- snapshotHash preview
+- generatedAt
+- topology layer count
+- boundary count
+- readiness status
+
+Diff preview:
+- UI placeholder فقط:
+  "Topology diff comparison will be available when two snapshots are selected."
+
+ممنوع:
+- snapshot persistence
+- POST diff call الآن إلا إذا hook جاهز وآمن وموجود
+- export
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Topology/Readiness pages لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no topology data
+- no boundary data
+- no readiness data
+- critical warning visibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Topology/Readiness UI MUST:
+- remain frontend-only
+- remain read-only
+- never mutate topology
+- never override readiness
+- never persist snapshots
+- never auto-fix boundary leaks
+- never export snapshots
+- never create legal conclusions
+- never expose data outside super-admin
+
+أي:
+topology/readiness review UX فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+topology layer map stable
+
+T2:
+boundary status map stable
+
+T3:
+readiness dimension map stable
+
+T4:
+readiness status map stable
+
+T5:
+topology/readiness pages remain super-admin scoped
+
+T6:
+dependency map ordering deterministic
+
+T7:
+boundary table critical warnings always visible
+
+T8:
+readiness grid blocked/partial prominence stable
+
+T9:
+no mutation/export/legal/fix labels exist
+
+T10:
+topology/readiness safety contracts true
+
+T11:
+hooks remain read-only
+
+T12:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- topology edit controls
+- readiness override controls
+- snapshot persistence
+- topology diff execution/persistence
+- PDF/XLSX export
+- AI explanation cards
+- regulator submission
+- legal verdicts
+- graph dependency جديد
+
+خلك:
+minimal frontend topology/readiness visualization UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12f-report.txt
+
+ويحتوي:
+- topology/readiness UI architecture
+- topology layer visual model
+- boundary status visual model
+- readiness dimension/status model
+- dependency map component design
+- boundary summary table design
+- readiness dimension grid design
+- snapshot/diff preview behavior
+- read-only safety guarantees
+- tests results
+- remaining topology/readiness UI gaps
+- readiness assessment قبل Evidence Packages UI

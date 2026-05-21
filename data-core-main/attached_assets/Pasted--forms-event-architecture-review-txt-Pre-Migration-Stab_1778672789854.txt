@@ -1,0 +1,120 @@
+راجع تقرير forms-event-architecture-review.txt ثم نفّذ فقط مرحلة Pre-Migration Stabilization الخاصة بالفورمز بدون بدء forms migration الفعلية حتى الآن.
+
+عنوان المهمة:
+FORMS PRE-MIGRATION STABILIZATION — Canonical Form Event Preparation
+
+المهمة الحالية:
+تجهيز forms architecture لتصبح متوافقة مع الـ canonical EventBus architecture قبل استبدال eventDispatcher داخل forms.ts.
+
+المشكلة الحالية:
+forms.ts يطلق event names ديناميكية مثل:
+- leave.requested
+- approval.requested
+- hr.{slug}.submitted
+
+لكن payload الفعلي هو Generic Form Payload غير متوافق مع الـ typed domain contracts.
+هذا يسبب silent contract violations وخطر معماري كبير عند تفعيل bus listeners مستقبلًا.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- forms.ts
+- seed/forms.ts
+- hr.ts dynamic HR services
+- WorkflowEngine trigger matching
+- FormSubmittedPayload
+- workflow_definitions
+- LEGACY_EVENT_NAMES
+- registry.ts
+- activity.ts form listeners
+- notifications-bus.ts form listeners
+
+2- أضف:
+workflowEventHint?: string
+
+داخل:
+FormSubmittedPayload
+
+أو داخل metadata إذا كان أنسب معماريًا.
+لكن:
+- يجب أن يكون typed وواضح الاستخدام
+- backward compatible
+- موثق بوضوح
+
+3- حدّث:
+seed/forms.ts
+
+بحيث:
+- لا تستخدم canonical domain event names داخل generic forms
+- لا تستخدم:
+  - leave.requested
+  - approval.requested
+كـ workflowEvent values
+
+استبدلها إلى workflow hints مناسبة مثل:
+- hr.form.submitted
+- approvals.form.submitted
+أو أي naming consistent مشابه.
+
+4- لا تغيّر:
+EVENT_TYPES الحالية الخاصة بالـ domain events.
+
+5- لا تفعّل forms migration بعد.
+
+6- لا تستبدل eventDispatcher داخل forms.ts في هذه المهمة.
+
+7- راجع WorkflowEngine.
+
+المطلوب:
+- التأكد هل يدعم matching على:
+metadata.workflowEventHint
+أو payload equivalent
+- إذا لا:
+وثّق التغيير المطلوب فقط بدون refactor واسع
+- لا تكسر workflow compatibility الحالية
+
+8- نفّذ audit على:
+workflow_definitions.trigger_event
+
+وابحث عن:
+- leave.requested
+- approval.requested
+- system.form.submitted
+- hr.{slug}.submitted
+
+ثم:
+- وثّق usage الحالي
+- حدّد أي rows تحتاج migration مستقبلية
+- لا تنفذ destructive migration الآن إلا إذا كانت آمنة بالكامل
+
+9- لا تغيّر:
+- routes behavior
+- DB schema
+- WorkflowEngine behavior
+- activity listeners behavior
+- notifications behavior
+
+10- لا تضف:
+- new domain routes
+- leave lifecycle
+- approval sagas
+- workflow redesign
+
+11- أضف comments واضحة تشرح:
+- الفرق بين generic form events و true domain events
+- لماذا forms.ts لا يجب أن يطلق domain events مباشرة
+- معنى workflowEventHint
+- canonical event ownership boundaries
+
+12- في النهاية:
+أنشئ ملف TXT باسم:
+
+forms-pre-migration-stabilization-report.txt
+
+ويحتوي:
+- جميع التعديلات المنفذة
+- أي seed data تم تعديلها
+- تقييم WorkflowEngine compatibility
+- أي workflow rows تحتاج migration
+- أي risks متبقية
+- readiness assessment قبل forms migration الفعلية

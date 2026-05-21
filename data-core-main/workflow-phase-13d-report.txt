@@ -1,0 +1,187 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║              Phase 13-D — Entitlements, Module Access & Feature Limits       ║
+║                             Implementation Report                            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+STATUS:   ✅ COMPLETE
+DATE:     2026-05-16
+TESTS:    T1–T12 backend (2713 total pass), T13–T16 frontend (822 total pass)
+TYPECHECK: All new code clean; 4 pre-existing errors in governance/workflow pages (unchanged)
+
+────────────────────────────────────────────────────────────────────────────────
+SAFETY CONTRACT
+────────────────────────────────────────────────────────────────────────────────
+
+ENTITLEMENT_SAFETY_CONTRACT (all true, import-time validated):
+  ✅ superAdminOnly               — only super_admin can read/write entitlements
+  ✅ requiresReason               — every override requires a min-10-char reason
+  ✅ requiresConfirmation         — UI + API both require explicit confirmation
+  ✅ noPaymentProcessing          — no payment, billing, or charge logic
+  ✅ noInvoiceGeneration          — no invoice or billing document generation
+  ✅ noChargeCollection           — no charge collection or deduction logic
+  ✅ noHrModuleExecution          — entitlement only; no HR module execution
+  ✅ noPayrollProcessing          — entitlement only; payroll is not processed
+  ✅ noRecruitmentExecution       — entitlement only; no recruitment flows run
+  ✅ noAttendanceEnforcement      — entitlement only; no shift/attendance logic
+  ✅ noLmsContentDelivery         — entitlement only; no course delivery
+  ✅ noAutoWorkspaceSuspension    — no automatic workspace suspension logic
+  ✅ noSuperAdminGovernanceExposure — governance_console is tenant-scope only
+  ✅ noEmailOrLegalNotices        — no email, legal, or notification sending
+  ✅ failClosedOnUnknownModule    — unknown module code → validation rejected
+  ✅ failClosedOnUnknownLimit     — unknown limit code → validation rejected
+
+────────────────────────────────────────────────────────────────────────────────
+NEW FILES
+────────────────────────────────────────────────────────────────────────────────
+
+Pure libs (no I/O, fully unit-tested):
+  lib/db/src/schema/tenant-entitlement-overrides.ts
+    — tenant_entitlement_overrides table (workspaceId, moduleCode, overrideType,
+      limitCode, limitValue, reason, createdBy, createdAt)
+    — DB migration applied: ✅
+
+  artifacts/api-server/src/lib/platform-modules.ts
+    — PLATFORM_MODULE_REGISTRY: 20 module codes with metadata
+    — ALL_MODULE_CODES, isKnownModuleCode
+
+  artifacts/api-server/src/lib/feature-limits.ts
+    — FEATURE_LIMIT_REGISTRY: 10 limit codes with metadata
+    — ALL_LIMIT_CODES, isKnownLimitCode, buildEmptyLimits
+
+  artifacts/api-server/src/lib/plan-entitlements.ts
+    — PLAN_ENTITLEMENT_MAP: 5 plans (starter/growth/business/enterprise/custom)
+    — getModulesForPlan: returns { enabled, disabled } for any planCode
+
+  artifacts/api-server/src/lib/tenant-entitlements.ts
+    — derivePlanEntitlements: builds base entitlement profile from plan
+    — applyEntitlementOverrides: applies override records to base profile
+    — deriveTenantEntitlementProfile: combined entry point
+    — isModuleEnabled, getFeatureLimit: profile query helpers
+    — validateEntitlementOverride: single-override validation (T7-T9)
+    — validateEntitlementOverridesBatch: batch validation with limits (T10)
+    — buildEntitlementAuditPayload: audit event builder (T11)
+
+  artifacts/ops-platform/src/lib/platform-entitlements-config.ts
+    — MODULE_REGISTRY_CONFIG: 20 entries with badge classes, descriptions
+    — FEATURE_LIMIT_CONFIG: 10 entries with units and descriptions
+    — PLAN_ENTITLEMENT_CONFIG: 5 plan configs (mirrors backend)
+    — OVERRIDE_TYPE_CONFIG: 3 types (enable/disable/limit_override)
+    — ENTITLEMENT_API_PATHS: { get(id), overrides(id) }
+    — ENTITLEMENT_SAFETY_CONTRACT: 16 boolean flags (all true)
+    — ENTITLEMENT_MUTATION_HOOK_NAMES: exactly 1 entry
+    — EntitlementOverrideFormState interface
+    — isEntitlementOverrideFormValid, getEntitlementOverrideFormError
+
+Test files:
+  artifacts/api-server/src/lib/__tests__/tenant-entitlements.test.ts
+    — T1: module registry stable (20 codes, required fields, unique order)
+    — T2: feature limit registry stable (10 codes, required fields)
+    — T3: plan entitlement map stable (5 plans, valid modules, no billing wording)
+    — T4: derivePlanEntitlements for all 5 plans + null planCode
+    — T5: enable/disable overrides apply correctly
+    — T6: limit_override applies correctly, null = unlimited
+    — T7: invalid module codes rejected (UNKNOWN_MODULE_CODE)
+    — T8: invalid limit codes and values rejected
+    — T9: reason and confirmation required (REASON_TOO_SHORT, CONFIRMATION_REQUIRED)
+    — T10: batch validation enforces super-admin-only intent (confirmation, max 50)
+    — T11: buildEntitlementAuditPayload produces correct audit event
+    — T12: customEntitlementsCount and profile metadata correct
+
+  artifacts/ops-platform/src/lib/__tests__/platform-entitlements.test.ts
+    — T13: frontend module config stable (20 modules, 10 limits, 5 plans, badge classes)
+    — T14: frontend form validation (isEntitlementOverrideFormValid, getEntitlementOverrideFormError)
+    — T15: ENTITLEMENT_MUTATION_HOOK_NAMES exactly 1 entry (useUpdateTenantEntitlementOverrides)
+    — T16: no forbidden wording in config (billing/payment/HR-exec/legal/auto-suspend)
+
+────────────────────────────────────────────────────────────────────────────────
+MODIFIED FILES
+────────────────────────────────────────────────────────────────────────────────
+
+  lib/db/src/schema/index.ts
+    — Added: export * from "./tenant-entitlement-overrides"
+
+  artifacts/api-server/src/lib/tenant-registry.ts
+    — buildDefaultModuleSummary now accepts optional customEntitlementsCount param
+    — Populates enabledModules/disabledModules from getModulesForPlan(planCode)
+    — Populates seatLimit/storageLimit from PLAN_ENTITLEMENT_MAP
+
+  artifacts/api-server/src/routes/tenants.ts
+    — Added: GET  /platform/tenants/:tenantId/entitlements (requireSuperAdmin)
+    — Added: PATCH /platform/tenants/:tenantId/entitlements/overrides (requireSuperAdmin)
+    — Upsert logic: DELETE existing (by scope) + INSERT new — no DB unique constraint needed
+    — Audit: writes tenant_entitlements_updated event to activityLogsTable
+
+  artifacts/api-server/src/lib/__tests__/tenant-registry.test.ts
+    — Updated T7 disabledModules expectation to match new plan-based behavior:
+      no planCode → all 20 modules disabled (was: []; now: .toHaveLength(20))
+
+  artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+    — Added: TenantEntitlementOverrideItem, TenantEntitlementProfile,
+      TenantEntitlementsData, EntitlementOverrideInput, EntitlementUpdateInput,
+      EntitlementUpdateResult interfaces
+    — Added: useTenantEntitlements(tenantId) — read hook, staleTime 60s
+    — Added: useUpdateTenantEntitlementOverrides() — mutation hook
+      Invalidates ["platform", "tenants"] on success
+
+  artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+    — Added: ENTITLEMENT_SAFETY_CONTRACT import-time validation
+    — Added: EntitlementPanel component (renders enabled modules grid, key limits,
+      custom overrides list, Add/Edit Override dialog)
+    — Wired: EntitlementPanel into TenantDetailPanel (after SubscriptionManagementPanel)
+    — data-testid: entitlement-panel-{tenantId}, entitlement-edit-{tenantId},
+      ent-module-select, ent-type-select, ent-limitcode-select,
+      ent-limitvalue-input, ent-reason-textarea, ent-confirm-checkbox,
+      ent-form-cancel, ent-form-submit
+
+────────────────────────────────────────────────────────────────────────────────
+API SURFACE
+────────────────────────────────────────────────────────────────────────────────
+
+GET  /api/platform/tenants/:tenantId/entitlements
+  Auth: super_admin only
+  Response: { entitlementProfile, overrides }
+
+PATCH /api/platform/tenants/:tenantId/entitlements/overrides
+  Auth: super_admin only
+  Body: { overrides: [{ moduleCode, overrideType, limitCode?, limitValue?, reason }], confirmation: true }
+  Response: { entitlementProfile, overrides, tenant, auditEvent }
+  Validation: ENTITLEMENT_REASON_MIN_LENGTH=10, max 50 overrides per batch,
+              known module codes only, known limit codes only for limit_override,
+              limitCode required for limit_override, limitValue ≥ 0 or null
+
+────────────────────────────────────────────────────────────────────────────────
+TEST RESULTS SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+
+Backend (vitest):
+  Test Files:  46 passed (46)
+  Tests:       2713 passed (2713)
+
+Frontend (vitest):
+  Test Files:  13 passed (13)
+  Tests:       822 passed (822)
+
+TypeScript:
+  api-server:   ✅ Done (0 new errors)
+  lib/*:        ✅ Done (typecheck:libs clean)
+  ops-platform: ⚠️  4 pre-existing errors (governance-audit TS2322,
+                    governance-violations TS2503, workflows isActive TS2353)
+                    All pre-existing; none introduced by P13-D.
+
+DB migration:
+  ✅ tenant_entitlement_overrides table created (pnpm --filter @workspace/db run push)
+
+────────────────────────────────────────────────────────────────────────────────
+NOTES
+────────────────────────────────────────────────────────────────────────────────
+
+- No payment, billing, invoice, or tax logic introduced anywhere.
+- No enforcement logic — entitlements are informational only.
+- No automatic workspace suspension or lifecycle state changes.
+- governance_console entitlement is tenant-workspace-scoped future feature only;
+  it does NOT expose the Super Admin Governance Console to workspace users.
+- Module implementations are entirely separate from entitlement access controls.
+- All overrides are audit-logged to activityLogsTable with full payload.
+- Upsert strategy: delete-then-insert (no DB unique constraint required on overrides).
+- Frontend renders enabled module badges, key limits grid, and override list
+  directly from the /entitlements GET response.

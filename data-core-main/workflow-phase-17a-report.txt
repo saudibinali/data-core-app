@@ -1,0 +1,150 @@
+================================================================================
+WORKFLOW PHASE 17-A — Platform User Directory & Lifecycle
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P17-A only — do NOT start P17-B)
+
+================================================================================
+1) PLATFORM USER MODEL
+================================================================================
+Storage: Extended existing `users` table (workspaceId IS NULL) per P14 pattern.
+No separate `platform_users` table.
+
+New columns (migration: scripts/apply-p17-platform-user-directory.cjs):
+  - platform_job_title, platform_department, platform_phone
+  - platform_user_type (platform_owner | platform_admin | platform_operator)
+  - platform_created_by, platform_updated_by
+  - platform_disabled_by, platform_disabled_at, platform_disable_reason
+  - platform_reactivated_by, platform_reactivated_at, platform_reactivation_reason
+
+Existing fields retained:
+  - email (normalized lowercase on create), fullName as displayName
+  - status: invited | active | disabled | suspended | locked
+  - platformRoleCode, isRootOwner, isProtected, lastLoginAt
+  - No password on this model (auth separate)
+  - No hard delete
+
+Unique index: users_email_lower_unique_idx on lower(trim(email))
+
+================================================================================
+2) LIFECYCLE RULES
+================================================================================
+Create (POST /platform/users):
+  - email required + valid, normalized lowercase
+  - displayName required (min 2 chars)
+  - userType or roleCode required; platform_owner create blocked
+  - default status: invited
+  - platformCreatedBy set from actor
+
+Profile update (PATCH /platform/users/:userId):
+  - displayName, jobTitle, department, phone only
+  - email update blocked (EMAIL_UPDATE_NOT_SUPPORTED)
+  - isRootOwner update blocked (ROOT_OWNER_FLAG_IMMUTABLE)
+  - protected/root targets require policy (non-root cannot manage root)
+
+Disable / suspend / lock (PATCH .../status):
+  - reason required (min 10) + confirmation
+  - platform.users.disable OR legacy platform.users.status.update
+  - records platformDisabledBy/At/Reason
+
+Reactivate (status → active):
+  - platform.users.reactivate OR legacy platform.users.status.update
+  - records platformReactivatedBy/At/Reason
+
+Guards:
+  - LAST_ACTIVE_OWNER_PROTECTED — cannot disable last active platform owner
+  - PROTECTED_ACCOUNT — non-root cannot disable root/protected
+  - No DELETE route
+
+================================================================================
+3) PERMISSIONS ADDED (48 total platform codes)
+================================================================================
+  - platform.users.read (existing)
+  - platform.users.create (existing)
+  - platform.users.update (NEW)
+  - platform.users.disable (NEW)
+  - platform.users.reactivate (NEW)
+  - platform.users.status.update (existing, legacy umbrella)
+  - platform.users.role.update (existing, P14-B — not redesigned)
+
+Role matrix (no redesign):
+  - root_platform_owner: all 48
+  - platform_admin: all 48 (cannot manage root via policy)
+  - finance/sales/support/auditor/read_only/workspace_support: unchanged (no new platform.users.* grants)
+
+================================================================================
+4) BACKEND APIs
+================================================================================
+  GET    /platform/users              — search, status, userType, pagination
+  GET    /platform/users/:userId
+  POST   /platform/users
+  PATCH  /platform/users/:userId      — basic profile
+  PATCH  /platform/users/:userId/status
+  PATCH  /platform/users/:userId/role — P14-B unchanged
+
+Not implemented (by design):
+  DELETE, password reset, MFA, SSO, tenant/workspace users, custom permissions
+
+================================================================================
+5) FRONTEND — Platform Users Page
+================================================================================
+Route: /super-admin/platform-users
+File: artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+
+  - Table: displayName, email, userType, status, jobTitle, department, lastLoginAt, createdAt
+  - Search + status + userType filters
+  - Create user dialog (userType + optional profile fields)
+  - Edit profile dialog (permission: platform.users.update)
+  - Disable / Suspend / Activate via status panel (disable/reactivate permissions)
+  - Role matrix section retained (read-only display, not redesigned)
+  - No Delete, Reset Password, Assign Permissions, MFA, SSO, Invite Email, Make/Remove Root Owner
+
+================================================================================
+6) AUDIT EVENTS
+================================================================================
+  - platform_user_created
+  - platform_user_profile_updated
+  - platform_user_disabled
+  - platform_user_suspended
+  - platform_user_reactivated
+  - platform_user_status_change_blocked
+
+Metadata: actorId, targetPlatformUserId, email, previousStatus, nextStatus, userType, reason, timestamp
+No secrets stored.
+
+================================================================================
+7) SAFETY GUARANTEES (all true)
+================================================================================
+PLATFORM_USER_DIRECTORY_SAFETY_CONTRACT:
+  platformUserDirectoryOnly, noCustomPermissionAssignment, noRoleMatrixRedesign,
+  noTenantUserManagement, noWorkspaceUserManagement, noPasswordManagement,
+  noMfaManagement, noSsoManagement, noInvitationEmailSending, noHardDeletePlatformUsers,
+  protectLastRootOwner, cannotModifyRootOwnerFlag, permissionGated, auditPlatformUserLifecycle
+
+================================================================================
+8) TEST RESULTS
+================================================================================
+api-server:
+  platform-user-lifecycle.test.ts — 13 passed
+  platform-permissions.test.ts — 66 passed (counts updated to 48)
+
+ops-platform:
+  phase-17a-platform-user-directory.test.ts — 13 passed
+
+================================================================================
+9) LIMITATIONS LEFT FOR P17-B (NOT STARTED)
+================================================================================
+Next phase P17-B: Custom Permission Assignment
+  - Per-user custom permission grants/denies
+  - Permission assignment UI
+  - Do NOT start P17-B in this delivery
+
+Also out of scope for P17-A (may come later):
+  - Invitation email sending
+  - Password / MFA / SSO management
+  - Tenant or workspace user directories
+  - Role matrix redesign
+
+================================================================================
+END PHASE 17-A REPORT
+================================================================================

@@ -1,0 +1,23 @@
+{
+  "name": "@workspace/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup-owner": "tsx ./src/setup-owner.ts",
+    "reset-dev": "tsx ./src/reset-dev.ts",
+    "check-workflow-triggers": "tsx ./src/check-workflow-triggers.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@workspace/db": "workspace:*",
+    "bcryptjs": "^3.0.3",
+    "drizzle-orm": "catalog:",
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/pg": "^8.11.10",
+    "tsx": "catalog:"
+  }
+}

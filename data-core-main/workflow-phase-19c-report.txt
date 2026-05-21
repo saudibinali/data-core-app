@@ -1,0 +1,151 @@
+================================================================================
+WORKFLOW PHASE 19-C REPORT — Enterprise Document Registry & Secure File Infrastructure
+================================================================================
+Date: 2026-05-19
+Phase: P19-C (Implementation)
+Prior: P19-A (Architecture), P19-B (SMTP & Notifications)
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P19-C introduces the first workspace-scoped canonical document registry with
+versioning, access audit, secure upload/download flows, minimal folder foundation,
+and import/export/generated_reports scaffolding. Legacy attachment fields and
+upload routes remain intact; new attachments dual-write into the registry via
+bridge helpers without destructive schema changes.
+
+Recommended next phase: P19-D — Reporting Engine & Enterprise Export Infrastructure.
+
+================================================================================
+TABLES ADDED
+================================================================================
+- documents
+- document_versions
+- document_folders
+- document_tags
+- document_access_logs
+- generated_reports
+- import_jobs
+- export_jobs
+
+Migration: lib/db/drizzle/0003_document_registry.sql
+
+================================================================================
+SERVICES ADDED
+================================================================================
+- DocumentService (beginUpload, completeUpload, registerExistingFile, createVersion,
+  listByEntity, issueSignedDownload, archive, softDelete)
+- DocumentAccessService (canAccess, logAccess, assertActiveDocument)
+- folder-service (employee, workspace, payroll, reports folders)
+- document-bridge (HR documents, contracts, leave attachments)
+- mime-policy (allowlist, size limits)
+- download-token (JWT signed download, TTL)
+
+================================================================================
+UPLOAD FLOW STATUS
+================================================================================
+New: POST /attachments/upload-request → presign + registry rows
+Complete: POST /attachments/:id/complete → active
+Legacy: POST /storage/uploads/request-url (unchanged)
+MIME + size validation on new flow
+
+Status: GO (new flow); PARTIAL (legacy presign without registry auto-link)
+
+================================================================================
+DOWNLOAD FLOW STATUS
+================================================================================
+Signed GCS GET URLs + JWT download tokens
+GET /attachments/:id/download
+GET /attachments/download/stream?token=
+Access logging on download
+Confidential document rules enforced
+
+Status: GO
+
+================================================================================
+ATTACHMENT BRIDGE STATUS
+================================================================================
+HR employee documents POST → bridgeHrEmployeeDocument
+HR contracts POST → bridgeContractAttachments
+Leave POST (attachmentUrls) → bridgeLeaveAttachments + column write
+Legacy fields preserved (object_path, attachments JSONB, attachment_urls)
+
+Status: GO (dual-write for new submissions); PARTIAL (historical rows unmigrated)
+
+================================================================================
+SECURITY STATUS
+================================================================================
+MIME allowlist                         GO
+Workspace path isolation               GO
+Signed URL TTL                         GO
+Confidential access rules              GO
+document_access_logs                   GO
+Malware scan                           BLOCKED (deferred)
+Public download for private docs       GO (blocked)
+
+================================================================================
+IMPORT/EXPORT FOUNDATION STATUS
+================================================================================
+import_jobs / export_jobs / generated_reports tables + minimal APIs
+No PDF rendering, no async workers
+
+Status: PARTIAL (schema + CRUD stubs only)
+
+================================================================================
+SMOKE TEST RESULTS
+================================================================================
+Suite: document-registry.smoke.test.ts
+Requires: DATABASE_URL, RUN_P19C_SMOKE != 0
+
+Coverage:
+- MIME allowlist
+- workspace isolation
+- upload-request registry row
+- signed download token
+- confidential access denial
+- access logs
+- no cross-workspace paths
+- generated_reports lifecycle
+
+Run: pnpm --filter api-server vitest run document-registry
+
+Executed 2026-05-19: 8/8 passed (document-registry.smoke.test.ts)
+
+================================================================================
+READINESS MATRIX
+================================================================================
+Capability                         | Status
+-----------------------------------|----------
+canonical documents                | GO
+secure uploads                     | GO
+signed downloads                   | GO
+attachment bridge                  | PARTIAL
+generated_reports foundation       | PARTIAL
+enterprise document readiness      | PARTIAL
+
+PARTIAL attachment bridge: dual-write on new legacy submissions only; no bulk
+migration of existing blobs.
+
+PARTIAL enterprise readiness: document registry exists; commercial invoice storage,
+form file table writes, and full migration remain future work.
+
+================================================================================
+REMAINING BLOCKERS (OUT OF SCOPE P19-C)
+================================================================================
+- Full document migration
+- PDF engine / report UI (P19-D)
+- OCR/AI
+- External DMS
+- Malware scanning implementation
+- Commercial invoice GCS unification
+
+================================================================================
+CONFIRMATION
+================================================================================
+P19-D NOT STARTED.
+No full document migration. No PDF engine. No OCR/AI. No report UI.
+No destructive attachment field removal.
+
+================================================================================
+END OF REPORT
+================================================================================

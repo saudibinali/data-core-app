@@ -1,0 +1,280 @@
+راجع:
+- workflow-phase-5c-report.txt
+- workflow-phase-5d-report.txt
+- workflow-phase-6a-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- simulation architecture notes
+- deterministic routing model
+- governance warnings
+- delay scheduling behavior
+- snapshot execution model
+
+ثم نفّذ فقط:
+P6-B — Simulation Engine Foundations
+
+ولا تنفّذ:
+- full runtime replay
+- retries
+- distributed simulation
+- DAG execution
+- production execution cloning
+- external side-effect mocking infrastructure
+
+عنوان المهمة:
+WORKFLOW PHASE 6-B — Simulation Engine & Workflow Preview Foundations
+
+المهمة الحالية:
+تمكين:
+workflow preview + deterministic simulation
+
+بدون:
+تشغيل workflow فعلي على production state.
+
+الهدف:
+السماح للإدمن:
+- يفهم routing
+- يشوف branch traversal
+- يكتشف unreachable behavior
+- يراجع delays/approvals
+- يتوقع execution shape
+
+قبل:
+publish أو التشغيل الحقيقي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EXECUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- resolveNextCursor()
+- validation engine
+- approval lifecycle
+- delay scheduling
+- execution snapshots
+- routing model
+
+حدّد:
+- ما الذي يمكن محاكاته deterministically
+- ما الذي يعتمد على runtime state حقيقي
+- أين side-effects يجب منعها
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN SIMULATION ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+SimulationEngine
+
+كمحرك مستقل عن:
+executor.ts
+
+المطلوب:
+- no DB writes
+- no notifications
+- no activity creation
+- no real approvals
+- no scheduler interaction
+
+simulation فقط:
+predictive traversal.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SIMULATION CONTEXT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+SimulationContext
+
+ليحتوي:
+- simulated event payload
+- mock stepOutputs
+- simulated approval decisions
+- simulated timestamps
+- routing assumptions
+
+المطلوب:
+deterministic repeatable runs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ROUTING PREVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+branch preview capability.
+
+المطلوب:
+لكل condition:
+- matched=true path
+- matched=false path
+- selected branches
+- skipped branches
+
+بدون:
+تنفيذ side effects.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — APPROVAL & DELAY SIMULATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم simulation behavior:
+
+Approval:
+- simulate approve
+- simulate reject
+- simulate timeout future
+
+Delay:
+- simulate wake-up time
+- estimate execution timeline
+- simulated waiting_delay lifecycle
+
+لكن:
+لا scheduler فعلي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — GOVERNANCE WARNINGS INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+validation warnings
+داخل simulation output.
+
+المطلوب:
+simulation يظهر:
+- unreachable steps
+- conditional dependencies
+- fanout estimates
+- long delay warnings
+- approval risk warnings
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — SIMULATION RESULT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+SimulationResult
+
+ليحتوي:
+- traversal path
+- visited steps
+- skipped steps
+- simulated statuses
+- estimated duration
+- approval points
+- delay points
+- warnings/notices
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+workflow_simulation_started
+
+B)
+workflow_simulation_completed
+
+C)
+workflow_simulation_failed
+
+D)
+workflow_simulation_branch_selected
+
+كلها تحتوي:
+- workflowId
+- workspaceId
+- workflowVersion
+- simulatedPathCount
+- warningsCount
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Simulation MUST NEVER:
+- mutate DB
+- create approvals
+- send notifications
+- create activities
+- trigger scheduler
+- mutate execution state
+
+أي side-effect:
+ممنوع بالكامل.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+linear workflow simulation
+
+T2:
+condition true-path simulation
+
+T3:
+condition false-path simulation
+
+T4:
+approval simulated approve path
+
+T5:
+approval simulated reject path
+
+T6:
+delay timeline estimation
+
+T7:
+simulation produces no DB writes
+
+T8:
+simulation integrates validation warnings
+
+T9:
+simulation deterministic across repeated runs
+
+T10:
+skipped branches visible in results
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- external API mocking
+- replay engine
+- production cloning
+- parallel graph simulation
+- distributed simulation workers
+- UI animation systems
+
+خلك:
+deterministic predictive traversal engine.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-6b-report.txt
+
+ويحتوي:
+- simulation architecture
+- traversal prediction model
+- routing preview behavior
+- approval/delay simulation behavior
+- governance integration
+- side-effect isolation guarantees
+- observability additions
+- tests results
+- remaining simulation limitations
+- readiness assessment قبل operational governance phase

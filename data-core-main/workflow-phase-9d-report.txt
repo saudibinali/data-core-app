@@ -1,0 +1,573 @@
+WORKFLOW PHASE 9-D REPORT
+Platform Workload Control Plane & Super-Admin Operational Visibility Foundations
+=================================================================================
+Date:    2026-05-15
+Status:  COMPLETE
+Tests:   1601 passed (28 files) — 0 failures — net +54 assertions over P9-C baseline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-D converts the per-workspace governance visibility produced by P9-A/B/C into
+a platform-wide operational control plane visible only to super-admin users.
+Where P9-C gave workspace admins a single-tenant view of their own workload
+health, P9-D gives the platform operator a cross-workspace aggregated view:
+containment distribution, fairness health classification, noisy-tenant roster,
+and scheduler pressure statistics — all computed deterministically, all read-only.
+
+Before P9-D:
+  • Platform governance APIs limited to GET /platform/stats and /platform/activity
+    (workspace/user counts only — no scheduler visibility).
+  • No cross-workspace workload aggregation.
+  • No platform-wide fairness health signal.
+  • No noisy-tenant oversight surface.
+  • Super-admin lacked operational scheduler context.
+
+After P9-D:
+  • 4 new super-admin-only governance endpoints under /platform/governance/*.
+  • PlatformGovernanceOverview — single-model cross-workspace snapshot.
+  • PlatformFairnessHealth — tri-dimensional health classifier (healthy/stressed/
+    degraded/critical) aggregating containment, pressure fraction, and noisy fraction.
+  • ContainmentDistribution + AdvisoryDistribution — precise workspace counts
+    by containmentStatus and advisoryPressureLevel.
+  • SchedulerPressureSummary — platform-wide totalActive, totalDelayed, avg/max
+    pressureScore, pressureDensity.
+  • NoisyTenantRecord list — workspaces with detected EXECUTION_MONOPOLY,
+    SCHEDULER_BACKLOG_FLOOD, ADVISORY_STORM, or CHRONIC_HOTSPOT_FLOOD behavior.
+  • 4 structured observability events for all control-plane operations.
+
+Explicitly excluded (will not build):
+  Autoscaling, tenant throttling, dynamic rate-limiting, realtime streaming,
+  distributed control planes, autonomous scheduler balancing, cross-region
+  federation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. PLATFORM GOVERNANCE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Data flow (per request):
+
+  [route handler]
+       │
+       ├─① DB: SELECT id, name FROM workspaces WHERE status IN ('active','suspended')
+       │        ORDER BY id
+       │
+       ├─② DB: SELECT workspace_id,
+       │              COUNT(*) FILTER (WHERE status='running')       AS activeExecutionCount,
+       │              COUNT(*) FILTER (WHERE status='waiting_delay') AS delayedExecutionCount
+       │        FROM workflow_executions
+       │        GROUP BY workspace_id
+       │
+       ├─③ Compute platformActiveExecutions = SUM(active) across all workspaces
+       │        (used for EXECUTION_MONOPOLY detection in evaluateWorkloadContainment)
+       │
+       ├─④ FOR EACH workspace:
+       │        evaluateWorkloadContainment({ workspaceId, activeCount, delayedCount,
+       │                                     platformActiveExecutions })
+       │        → TenantWorkloadPartition (P9-B engine)
+       │
+       └─⑤ [platform-governance engine]
+                 computeContainmentDistribution(partitions)
+                 computeAdvisoryDistribution(partitions)
+                 computeSchedulerPressureSummary(partitions)
+                 detectNoisyTenants(partitions, workspaceNames)
+                 classifyPlatformFairnessHealth(distribution, noisyCount, total)
+                 computeTopPressureWorkspaces(partitions, workspaceNames, 10)
+                 → PlatformGovernanceOverview
+
+Two DB queries for any number of workspaces — no N+1 query pattern.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. ENGINE: artifacts/api-server/src/lib/workflows/platform-governance.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New file (~390 lines). Pure, deterministic, advisory-only.
+No DB, no async, no mutations, no cross-tenant data leakage.
+
+EXPORTED TYPES (10)
+
+  PlatformFairnessHealth
+    "healthy" | "stressed" | "degraded" | "critical"
+    Platform-wide scheduler fairness classification (tri-dimensional).
+
+  ContainmentDistribution
+    { contained, at_risk, pressured, saturated, total }
+    Counts workspaces at each ContainmentStatus level.
+
+  AdvisoryDistribution
+    { none, low, medium, high, critical, total }
+    Counts workspaces at each AdvisoryPressureLevel.
+
+  SchedulerPressureSummary
+    { totalActiveExecutions, totalDelayedExecutions,
+      avgPressureScore, maxPressureScore, pressureDensity }
+    Aggregate execution pressure across all workspaces.
+    pressureDensity = fraction of workspaces with score > ELEVATED_PRESSURE_THRESHOLD (30).
+
+  TopPressureWorkspace
+    { workspaceId, workspaceName, pressureScore, containmentStatus,
+      noisyBehaviorDetected, noisyBehaviorCodes, activeExecutionCount,
+      delayedExecutionCount }
+    One entry per workspace in the topPressureWorkspaces list.
+
+  NoisyTenantRecord
+    { workspaceId, workspaceName, noisyCategories, pressureScore,
+      containmentStatus, activeExecutionCount, delayedExecutionCount }
+    One entry per workspace with noisyBehaviorDetected = true.
+    No internal config, no credentials, no sensitive tenant data.
+
+  PlatformWorkloadEntry
+    { workspaceId, workspaceName, partitionId, pressureScore,
+      executionPressureLevel, containmentStatus, activeExecutionCount,
+      delayedExecutionCount, noisyBehaviorDetected, noisyBehaviorCodes,
+      schedulerWeight, evaluatedAt }
+    Full workload entry for the paginated /workloads endpoint.
+
+  PlatformGovernanceOverview
+    { totalWorkspaces, activePartitionCount, fairnessHealth, noisyTenantCount,
+      schedulerPressureSummary, containmentDistribution, advisoryDistribution,
+      topPressureWorkspaces, requestScopeId, generatedAt }
+    Top-level model returned by GET /platform/governance/overview.
+
+  PlatformGovernanceInput
+    { workspaceCount, partitions, workspaceNames?, requestScopeId, generationTime? }
+    Input bundle for buildPlatformGovernanceOverview().
+
+EXPORTED FUNCTIONS (15)
+
+  makePlatformScopeId() → string
+    Generates "psc:<ms>-<seq>" per-request correlation IDs.
+    Module-level sequence counter; resetPlatformScopeSeq() for tests.
+
+  buildPlatformGovernanceOverview(input) → PlatformGovernanceOverview
+    Main entry point. Calls all sub-functions and emits overview event.
+
+  classifyPlatformFairnessHealth(distribution, noisyCount, totalPartitions)
+    → PlatformFairnessHealth
+    Tri-dimensional: max severity across saturated-count, pressured-fraction,
+    noisy-fraction dimensions. Empty platform → "healthy".
+
+  computeContainmentDistribution(partitions) → ContainmentDistribution
+    Pure count by p.containmentStatus.
+
+  computeAdvisoryDistribution(partitions) → AdvisoryDistribution
+    Pure count by p.advisoryPressureLevel.
+
+  computeSchedulerPressureSummary(partitions) → SchedulerPressureSummary
+    Sums active/delayed, computes avg/max pressure, pressureDensity.
+
+  computeTopPressureWorkspaces(partitions, workspaceNames, limit)
+    → TopPressureWorkspace[]
+    Sorts by pressureScore DESC, ties by workspaceId ASC. Sliced to limit.
+    Copies noisyBehaviorCodes arrays (no aliasing).
+
+  detectNoisyTenants(partitions, workspaceNames) → NoisyTenantRecord[]
+    Filters to noisyBehaviorDetected=true. Sorted DESC/ASC.
+    Copies noisyBehaviorCodes arrays.
+
+  buildPlatformWorkloadList(partitions, workspaceNames) → PlatformWorkloadEntry[]
+    Full sorted list for /workloads. Route slices by page/limit.
+
+  emitPlatformGovernanceOverviewEvent(...)   → platform_governance_overview_generated
+  emitPlatformFairnessHealthEvent(...)       → platform_fairness_health_evaluated
+  emitPlatformNoisyTenantEvent(...)          → platform_noisy_tenant_detected
+  emitPlatformSchedulerPressureEvent(...)    → platform_scheduler_pressure_evaluated
+
+CONSTANTS (8)
+
+  TOP_WORKSPACE_LIMIT                      = 10
+  ELEVATED_PRESSURE_THRESHOLD             = 30
+  FAIRNESS_CRITICAL_PRESSURE_FRACTION     = 0.50
+  FAIRNESS_DEGRADED_PRESSURE_FRACTION     = 0.25
+  FAIRNESS_STRESSED_PRESSURE_FRACTION     = 0.10
+  FAIRNESS_CRITICAL_SATURATED_COUNT       = 3
+  FAIRNESS_DEGRADED_SATURATED_COUNT       = 1
+  FAIRNESS_CRITICAL_NOISY_FRACTION        = 0.50
+  FAIRNESS_DEGRADED_NOISY_FRACTION        = 0.25
+  FAIRNESS_STRESSED_NOISY_FRACTION        = 0.10
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. FAIRNESS HEALTH AGGREGATION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+classifyPlatformFairnessHealth takes the maximum severity across 3 independent
+dimensions. This ensures any single dimension at critical level is surfaced even
+if the others are healthy.
+
+Dimension 1 — Saturated partition count:
+  ≥ 3  saturated workspaces → critical   (starvation floor active for 3+ tenants)
+  ≥ 1  saturated workspace  → degraded
+  0    saturated             → healthy
+
+Dimension 2 — Pressured+saturated fraction of total workspaces:
+  ≥ 50% (pressured + saturated) → critical
+  ≥ 25% (pressured + saturated) → degraded
+  ≥ 10% (pressured + saturated) → stressed
+  < 10%                         → healthy
+
+Dimension 3 — Noisy tenant fraction:
+  ≥ 50% workspaces noisy → critical   (majority of platform under noisy load)
+  ≥ 25% workspaces noisy → degraded
+  ≥ 10% workspaces noisy → stressed
+  < 10%                  → healthy
+
+Result: max("healthy", dim1, dim2, dim3) via FAIRNESS_SEVERITY table.
+Special case: 0 partitions → "healthy" (empty platform guard).
+
+Design rationale:
+  The tri-dimensional model prevents a single saturated workspace on a large
+  platform from being drowned by a "healthy average" — the saturated-count
+  dimension is absolute (not fractional) for exactly this reason.
+  Conversely, a platform with many slightly-elevated workspaces is caught by
+  the pressured-fraction dimension even if no single workspace is saturated.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NOISY TENANT OVERSIGHT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Noisy tenant detection is performed per-workspace by the P9-B engine
+(evaluateWorkloadContainment → detectNoisyBehavior). The platform layer
+aggregates the results and exposes them via GET /platform/governance/noisy-tenants.
+
+Four noisy behavior categories (P9-B definitions):
+
+  EXECUTION_MONOPOLY
+    Workspace holds > 60% of platform-wide active executions.
+    Detected when: workspace.active / platformActiveExecutions > 0.60.
+    Requires platformActiveExecutions to be supplied to evaluateWorkloadContainment.
+    This is the main reason the route computes the platform total first.
+
+  SCHEDULER_BACKLOG_FLOOD
+    Workspace's delayed queue exceeds schedulerBatchSize × 5 (default: 50).
+    Indicates a workspace is saturating the delayed-execution wakeup queue.
+
+  ADVISORY_STORM
+    Active governance signal count exceeds threshold AND advisory level
+    is "urgent" or "critical". Indicates governance alert volume beyond
+    operational response capacity.
+
+  CHRONIC_HOTSPOT_FLOOD
+    ≥ 3 workflows at urgent/critical priority AND concentration ratio > 50%.
+    Indicates persistent systemic degradation within the workspace.
+
+The platform layer:
+  • Filters partitions by noisyBehaviorDetected = true.
+  • Exposes noisyBehaviorCodes (array of category codes) — not the full
+    human-readable noisyBehaviorReasons, to avoid leaking internal counts.
+  • Sorts by pressureScore DESC for actionability.
+  • Advisory-only: no automatic throttling, no scheduler weight mutation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. SCHEDULER PRESSURE VISIBILITY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SchedulerPressureSummary fields and their interpretation:
+
+  totalActiveExecutions   — sum of running executions across all workspaces.
+                            Scheduler throughput indicator. Spikes here suggest
+                            a sudden burst workload across the platform.
+
+  totalDelayedExecutions  — sum of waiting_delay executions across all workspaces.
+                            Scheduler queue depth indicator. A large value with
+                            low active means many workflows are waiting for wakeup.
+
+  avgPressureScore        — mean of all workspace pressureScore.total values.
+                            Rounded to 2 decimal places. A rising average indicates
+                            general platform loading, not a single hotspot.
+
+  maxPressureScore        — highest individual workspace pressureScore.total.
+                            Identifies the single worst-case workspace.
+                            Cross-referenced with topPressureWorkspaces for name.
+
+  pressureDensity         — fraction of workspaces with pressureScore > 30.
+                            The threshold (ELEVATED_PRESSURE_THRESHOLD=30) is the
+                            P9-B "elevated" boundary (normal vs elevated pressure).
+                            pressureDensity = 0    → all workspaces normal.
+                            pressureDensity = 1    → all workspaces elevated+.
+                            pressureDensity = 0.25 → 1 in 4 workspaces elevated+.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. SUPER-ADMIN CONTROL PLANE APIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All 4 routes:
+  Auth:           requireAuth + requireSuperAdmin
+  DB writes:      NONE — read-only
+  Scheduler:      NOT TOUCHED — advisory-only
+  Tenant leakage: NONE — no per-tenant internals exposed (only workspaceName)
+
+GET /platform/governance/overview
+  Returns: PlatformGovernanceOverview
+  DB queries: 2 (workspaces + per-workspace execution counts)
+  Engine calls: fetchPlatformPartitions → buildPlatformGovernanceOverview
+  Use case: Super-admin operations dashboard, governance center landing view.
+  Event: platform_governance_overview_generated
+
+GET /platform/governance/workloads
+  Returns: { entries: PlatformWorkloadEntry[], pagination, fairnessHealth, requestScopeId }
+  DB queries: 2 (same pattern)
+  Engine calls: fetchPlatformPartitions → buildPlatformWorkloadList (+ slice)
+  Query params: page (1-based, default 1), limit (1–100, default 50)
+  Ordering: pressureScore DESC, workspaceId ASC (deterministic pagination)
+  Use case: Scheduler oversight panel — per-workspace workload drill-down.
+  Event: platform_scheduler_pressure_evaluated
+
+GET /platform/governance/fairness
+  Returns: { fairnessHealth, noisyTenantCount, totalWorkspaces, evaluatedPartitions,
+             containmentDistribution, advisoryDistribution, schedulerPressureSummary,
+             requestScopeId, evaluatedAt }
+  DB queries: 2 (same pattern)
+  Engine calls: fetchPlatformPartitions → computeContainmentDistribution +
+               computeAdvisoryDistribution + computeSchedulerPressureSummary +
+               classifyPlatformFairnessHealth
+  Use case: Fairness health panel — scheduler health governance console.
+  Event: platform_fairness_health_evaluated
+
+GET /platform/governance/noisy-tenants
+  Returns: { noisyTenants: NoisyTenantRecord[], noisyTenantCount, totalWorkspaces,
+             evaluatedPartitions, fairnessHealth, requestScopeId, evaluatedAt }
+  DB queries: 2 (same pattern)
+  Engine calls: fetchPlatformPartitions → detectNoisyTenants +
+               computeContainmentDistribution + classifyPlatformFairnessHealth
+  Use case: Noisy-tenant oversight panel — identify monopolizing workspaces.
+  Event: platform_noisy_tenant_detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. PLATFORM SERIALIZATION GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Deterministic ordering:
+  topPressureWorkspaces:  pressureScore DESC, workspaceId ASC
+  workloadEntries:        pressureScore DESC, workspaceId ASC (stable pagination)
+  noisyTenants:           pressureScore DESC, workspaceId ASC
+
+Bounded payload size:
+  topPressureWorkspaces:  capped at TOP_WORKSPACE_LIMIT (10)
+  workloads:              paginated by limit (max 100 per page)
+  noisy-tenants:          unbounded (bounded by workspace count; never exceeds N workspaces)
+
+Stable timestamps:
+  generatedAt / evaluatedAt: new Date().toISOString() at request time.
+  Partition evaluatedAt: set inside evaluateWorkloadContainment (P9-B).
+  Test overrides via generationTime input field.
+
+Audit-safe formatting:
+  No class instances in JSON output (all plain objects).
+  No undefined values in serialized fields.
+  No internal PressureScore sub-components exposed at platform level
+    (only pressureScore.total surfaced as pressureScore: number).
+  No sensitive tenant data: workspaceName only (no email, password, config, tokens).
+  noisyBehaviorCodes exposed (structured codes); noisyBehaviorReasons NOT exposed
+    (human-readable reasons contain workspace-internal counts).
+
+No hidden internal fields:
+  TopPressureWorkspace: 8 fields (enumerated in T7 test)
+  NoisyTenantRecord:    7 fields (enumerated in T7 test)
+  PlatformWorkloadEntry: 12 fields (enumerated in T7 test)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The 4 P9-D endpoints are the data source for:
+
+  Super-admin dashboard (/super-admin)
+    GET /platform/governance/overview → fairnessHealth badge, noisyTenantCount,
+    topPressureWorkspaces preview, activePartitionCount.
+
+  Platform workload oversight panel (/super-admin/workloads or similar)
+    GET /platform/governance/workloads → per-workspace workload table with
+    sorting, pagination, pressure indicators.
+
+  Scheduler governance console (/super-admin/scheduler-health or similar)
+    GET /platform/governance/fairness → fairnessHealth classification,
+    containment distribution chart, scheduler pressure KPIs.
+
+  Noisy-tenant oversight panel (/super-admin/governance or similar)
+    GET /platform/governance/noisy-tenants → noisy workspace list with
+    category codes and pressure scores for operator review.
+
+All integration is advisory-only: no UI action should trigger scheduler
+mutation based on these responses. Display and monitoring only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4 new structured log events emitted via logger.info():
+
+A) platform_governance_overview_generated
+   Emitted by: buildPlatformGovernanceOverview() (engine — all callers benefit)
+   Fields: event, requestScopeId, totalWorkspaces, fairnessHealth,
+           noisyTenantCount, containmentDistribution, action="generated", generatedAt
+
+B) platform_fairness_health_evaluated
+   Emitted by: GET /platform/governance/fairness route handler
+   Fields: event, requestScopeId, totalWorkspaces, fairnessHealth,
+           noisyTenantCount, containmentDistribution, action="evaluated"
+
+C) platform_noisy_tenant_detected
+   Emitted by: GET /platform/governance/noisy-tenants route handler
+   Fields: event, requestScopeId, totalWorkspaces, fairnessHealth,
+           noisyTenantCount, containmentDistribution, action="detected"
+
+D) platform_scheduler_pressure_evaluated
+   Emitted by: GET /platform/governance/workloads route handler
+   Fields: event, requestScopeId, totalWorkspaces, fairnessHealth,
+           noisyTenantCount, containmentDistribution, action="evaluated"
+
+All events carry: requestScopeId, totalWorkspaces, fairnessHealth,
+noisyTenantCount, containmentDistribution, action — as specified.
+
+Platform scope ID format: "psc:<ms>-<seq>" (no workspaceId — platform requests
+are not workspace-scoped by design; super_admin has workspaceId = null).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/platform-governance.test.ts
+
+T1  platform overview deterministic (6 assertions)
+    same input + time → identical JSON; requestScopeId preserved; generatedAt
+    matches injected time; totalWorkspaces = input workspaceCount; noisyTenantCount
+    counts only noisy partitions; empty platform → zero deterministic overview.
+
+T2  fairness health classification stable (9 assertions)
+    empty → healthy; all contained → healthy; 3 saturated → critical;
+    1 saturated → degraded; 50% pressured+saturated → critical;
+    50%+ noisy fraction → critical; 25%+ noisy → degraded;
+    10% noisy → stressed; stable across repeated calls.
+
+T3  noisy tenant aggregation correct (5 assertions)
+    only noisy partitions included; sorted by pressureScore DESC then workspaceId ASC;
+    workspaceName from name map; absent name falls back to "workspace:<id>";
+    empty partitions → empty list.
+
+T4  containment distribution deterministic (5 assertions)
+    counts each status correctly; total = sum of all counts; empty → all zeros;
+    same input → same distribution; advisory distribution total = partition count.
+
+T5  top pressure workspaces ordered correctly (5 assertions)
+    sorted DESC by pressureScore; capped at limit; overview respects
+    TOP_WORKSPACE_LIMIT; workspaceId preserved; tie-breaking by workspaceId ASC.
+
+T6  bounded payload serialization stable (4 assertions)
+    overview fully JSON-serializable; no undefined values in JSON; round-trip
+    preserves all top-level fields; workload list fully serializable.
+
+T7  super-admin access sentinel (5 assertions)
+    NoisyTenantRecord exposes only 7 permitted fields; TopPressureWorkspace
+    has no internal config fields; makePlatformScopeId returns "psc:"-prefixed
+    string; empty platform overview has no private data; PlatformWorkloadEntry
+    exposes only 12 operational fields.
+
+T8  platform observability events scoped correctly (4 assertions)
+    all 4 emit functions accept correct args without throwing.
+
+T9  no scheduler mutation occurs (5 assertions)
+    computeContainmentDistribution does not mutate input; buildPlatformGovernanceOverview
+    does not mutate partitions; TopPressureWorkspace.noisyBehaviorCodes is a copy;
+    NoisyTenantRecord.noisyCategories is a copy; computeSchedulerPressureSummary pure.
+
+T10 control plane remains read-only (6 assertions)
+    overview has no function properties; computeTopPressureWorkspaces returns plain
+    objects; engine has no async behavior; scheduler pressure summary deterministic;
+    makePlatformScopeId generates unique IDs; workload list sort is stable.
+
+Total assertions: 54 new (T1–T10)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. REMAINING CONTROL-PLANE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following gaps are intentionally deferred (per P9-D scope constraints):
+
+A) EXECUTION_MONOPOLY detection requires platformActiveExecutions to be non-zero.
+   The current route correctly computes this total, but the value is only as fresh
+   as the DB snapshot at request time. There is no continuous platform-execution
+   counter — this is acceptable for advisory purposes.
+
+B) platformDelayedBacklog is not passed to evaluateWorkloadContainment in the P9-D
+   routes. It is an optional field in WorkloadContainmentInput; when absent, per-
+   workspace SCHEDULER_BACKLOG_FLOOD detection uses only the workspace's own delayed
+   count, not a platform-wide baseline. Adding it would improve BACKLOG_FLOOD signal
+   accuracy but is low priority at current platform scales.
+
+C) Historical trending (fairnessHealth over time) is not stored. Each request
+   produces a fresh snapshot. Trend analysis would require periodic snapshots
+   written to a governance_snapshots table — deferred to a future phase.
+
+D) P8-E hotspotConcentrationRatio and P8-F advisoryLevel are not fetched per-workspace
+   in the P9-D routes. They are optional fields in WorkloadContainmentInput. The current
+   implementation uses only activeExecutionCount and delayedExecutionCount from DB.
+   Enriching with P8-E/F data would increase noisy-tenant signal quality (CHRONIC_HOTSPOT
+   detection, ADVISORY_STORM) but requires additional DB queries per workspace.
+
+E) The /workloads endpoint does not support filtering by containmentStatus or
+   fairnessHealth. Filtering is a future enhancement once the UI surface is defined.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. READINESS ASSESSMENT (pre-fairness orchestration phase)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Completed foundations:
+
+  P9-A: Tenant isolation enforcement + risk assessment
+        TenantIsolationContext, assessTenantIsolationRisk, 6 violation codes.
+        ✓ Foundation for per-workspace isolation-health reporting.
+
+  P9-B: Workload partition engine
+        TenantWorkloadPartition, 4-category noisy detection, starvation floor 0.25.
+        ✓ Foundation for per-workspace and platform pressure scoring.
+
+  P9-C: Tenant governance view composition
+        TenantGovernanceView, classifyIsolationHealth, computeSchedulerFairnessStatus.
+        ✓ Foundation for workspace-scoped governance API surface.
+
+  P9-D: Platform workload control plane (this phase)
+        PlatformGovernanceOverview, tri-dimensional fairness classification,
+        4 super-admin governance endpoints, 4 observability events.
+        ✓ Complete platform oversight layer — no blocking dependencies.
+
+What is in place before a fairness orchestration phase:
+  ✓ Cross-workspace containment distribution (who is pressured/saturated)
+  ✓ Noisy tenant identification with category codes (no manual lookup needed)
+  ✓ Scheduler fairness health with dimensional breakdown
+  ✓ Platform-wide execution totals (required for monopoly detection)
+  ✓ Per-workspace scheduler weight already computed by P9-B (0.25–1.00)
+  ✓ All observability events in place for telemetry pipelines
+  ✓ Read-only guarantee documented and enforced — no inadvertent mutations
+
+Suggested pre-conditions for a fairness orchestration phase (P9-E or P10):
+  • Define the write-path: which authority decides scheduler weight changes
+    (human operator via dashboard action vs. autonomous recommendation engine)?
+  • Decide persistence layer for fairness decisions (governance_policies table?
+    in-memory scheduler state? per-workspace configuration?).
+  • Define rollback semantics: how does a weight change get reverted?
+  • P9-D endpoints provide the read surface; the orchestration phase adds
+    POST /platform/governance/fairness/adjust or similar write-path.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED   artifacts/api-server/src/lib/workflows/platform-governance.ts   (~390 lines)
+  CREATED   artifacts/api-server/src/lib/workflows/__tests__/platform-governance.test.ts  (~370 lines)
+  MODIFIED  artifacts/api-server/src/routes/platform.ts
+            — 3 new imports: workflowExecutionsTable, evaluateWorkloadContainment,
+              11 from platform-governance
+            — fetchPlatformPartitions() shared helper (2 DB queries, partition loop)
+            — 4 new route handlers (~130 lines added)
+  CREATED   workflow-phase-9d-report.txt (this file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUMULATIVE TEST COUNTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Phase 9-A baseline:  1447 tests (25 files)
+  Phase 9-B additions:   +51 tests → 1498 tests (26 files)
+  Phase 9-C additions:   +49 tests → 1547 tests (27 files)
+  Phase 9-D additions:   +54 tests → 1601 tests (28 files)
+  Total:               1601 tests, 28 files, 0 failures

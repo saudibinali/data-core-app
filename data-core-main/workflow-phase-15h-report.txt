@@ -1,0 +1,216 @@
+================================================================================
+WORKFLOW PHASE 15-H — Final Commercial Administration Closure
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Phase 15 closure — final QA, tenant commercial activity feed, documentation.
+No new major product scope. No payment gateway, accounting, email, or automation.
+
+================================================================================
+1) FINAL REVIEW P15-A THROUGH P15-G
+================================================================================
+
+P15-A — Commercial Account & Billing Contacts
+  ✓ commercial.ts routes, CommercialAccountSection, use-commercial hooks
+  ✓ Permissions: commercial.accounts.*, commercial.contacts.*
+
+P15-B — Contract Terms & Renewal Commitments
+  ✓ commercial-contracts routes, ContractTermsSection
+  ✓ Permissions: commercial.contracts.*
+
+P15-C — Invoice Records & Uploaded PDFs
+  ✓ commercial-invoices routes, InvoicesSection, invoice-document-storage
+  ✓ Permissions: commercial.invoices.*, commercial.invoiceDocuments.*
+
+P15-D — Tenant Billing Portal Visibility
+  ✓ tenant-billing.ts GET-only APIs
+  ✓ billing-invoices.tsx read-only, tenant.billing.* permissions
+  ✓ No upload/edit/pay on tenant side
+
+P15-E — Manual Payment & Collection Tracking
+  ✓ commercial_payment_records, CollectionTrackingPanel
+  ✓ commercial.payments.read/record/verify
+
+P15-F — Commercial Risk & Renewal Readiness
+  ✓ commercial-risk-engine (computed), GET risk APIs
+  ✓ commercial.risk.read, /super-admin/commercial-risk
+
+P15-G — Unified Commercial Console
+  ✓ CommercialConsole accordion sections in Tenant Registry
+  ✓ Overview summary cards, risk integration, deep links
+
+================================================================================
+2) WHAT P15-H CHANGED
+================================================================================
+
+Implemented (small scope):
+  - GET /api/platform/tenants/:tenantId/commercial-activity
+  - commercial-activity-helpers.ts (prefix filter, metadata summary, redaction via enrichRow)
+  - CommercialActivitySection.tsx + useTenantCommercialActivity hook
+  - Commercial Console activity section now live (replaces P15-G placeholder)
+  - docs/commercial-administration.md
+  - phase-15-closure.test.ts + commercial-activity tests
+  - Updated commercial-console-integration tests
+
+Not changed:
+  - Permission count (32 platform codes)
+  - Role matrix
+  - No new write APIs beyond existing phases
+
+================================================================================
+3) COMMERCIAL ACTIVITY DECISION
+================================================================================
+
+Decision: IMPLEMENTED (safe, read-only, tenant-scoped).
+
+Endpoint:
+  GET /platform/tenants/:tenantId/commercial-activity
+  Permissions: platform.activity.read OR audit.read (requireAnyPlatformPermission)
+  Super-admin required
+  Default limit: 30, max: 50
+  Filters: workspaceId = tenantId AND action LIKE 'commercial_%'
+  Post-filter: commercial_account_, commercial_billing_contact_, commercial_contract_,
+               commercial_invoice_, commercial_payment_, commercial_risk_, commercial_access_denied
+
+Response fields per item:
+  id, action, actionLabel, actionLabelAr, severity, result,
+  actorId, actorDisplayName, metadataSummary (safe keys only), createdAt
+
+Safety:
+  - Uses parseAndRedactMetadata via enrichRow (no secrets)
+  - No audit log on read (avoids noise)
+  - GET only — no POST/PATCH/DELETE
+
+Frontend:
+  Commercial tab → Commercial Activity accordion → list with loading/empty/error states
+
+================================================================================
+4) FINAL PERMISSIONS
+================================================================================
+
+Platform commercial (14):
+  commercial.accounts.read / .update
+  commercial.contacts.read / .update
+  commercial.contracts.read / .update
+  commercial.invoices.read / .update
+  commercial.invoiceDocuments.read / .upload
+  commercial.payments.read / .record / .verify
+  commercial.risk.read
+
+Tenant billing (2 — workspace scope, not in PLATFORM_PERMISSION_CODES):
+  tenant.billing.invoices.read
+  tenant.billing.invoiceDocuments.download
+
+Total platform permission codes: 32
+
+No custom per-user permissions. No role matrix redesign in P15-H.
+
+================================================================================
+5) FINAL SAFETY GUARANTEES
+================================================================================
+
+COMMERCIAL_SAFETY_CONTRACT — all flags verified true including:
+  noElectronicPayment, noStripe, noCheckout, noCardStorage, noAutoCharge,
+  noPaymentGateway, noInvoiceGenerationEngine, uploadedInvoicePdfOnly,
+  noTaxCalculation, noZatcaIntegration, noAccountingLedger, noEmailSending,
+  manualPaymentsOnly, noBankApiIntegration, noTenantPaymentActions,
+  noCustomerPaymentPortal, commercialRiskReadOnly, noAutomatedDunning,
+  noAutomatedRenewalActions, noAutoStatusChanges,
+  commercialConsoleReadOnlyIntegration, noDestructiveCommercialActions,
+  sectionPermissionGated, riskReadOnlyIntegrated
+
+Import-time guard throws if any flag is not true.
+
+================================================================================
+6) ROUTE & UI QA
+================================================================================
+
+Verified (static + existing tests):
+  ✓ Tenant Registry → Commercial tab → CommercialConsole
+  ✓ Sections gated by permissions (account, contracts, invoices, collection, risk, activity)
+  ✓ Risk page deep links: ?tenantId=&tab=commercial
+  ✓ Invoice PDF upload/download (platform commercial-invoices routes)
+  ✓ Tenant billing page read-only (billing-invoices.tsx)
+  ✓ Collection panel — manual payments only, no Pay Now
+  ✓ Risk section — read-only badges and recommendation keys
+  ✓ Activity section — live feed when platform.activity.read or audit.read
+
+================================================================================
+7) BACKEND QA
+================================================================================
+
+Verified:
+  ✓ No DELETE on commercial entity routes
+  ✓ No Stripe/checkout/card/payment gateway integration endpoints
+  ✓ No invoice generation or tax/ZATCA endpoints in commercial module
+  ✓ No email sending from commercial routes
+  ✓ tenant-billing.ts — GET only
+  ✓ commercial-risk.ts — GET only
+  ✓ commercial-activity.ts — GET only (P15-H)
+
+================================================================================
+8) DOCUMENTATION
+================================================================================
+
+Created: docs/commercial-administration.md
+
+Contents:
+  - Purpose and scope
+  - What platform manages / does not do
+  - Lifecycle (account → contacts → contract → invoice PDF → collection → risk)
+  - Permissions summary
+  - Safety boundaries
+  - UI locations and deep links
+  - Tenant visibility rules
+  - API overview
+  - Limitations
+
+================================================================================
+9) TESTS RESULTS
+================================================================================
+
+New/updated:
+  api-server:
+    commercial-activity-helpers.test.ts
+    commercial-activity.test.ts
+  ops-platform:
+    phase-15-closure.test.ts (49 tests)
+    commercial-console-integration.test.ts (activity section)
+    commercial-config.test.ts (unchanged P15-G flags)
+
+Results:
+  api-server:  69 files, 3631 tests passed
+  ops-platform: 32 files, 1331 tests passed
+
+Coverage highlights:
+  - Permission count 32
+  - Safety contract flags
+  - No forbidden route integrations
+  - Commercial console + tenant billing + risk deep link smoke
+  - Documentation file exists
+  - Activity feed GET-only
+
+================================================================================
+10) FINAL CLOSURE DECISION
+================================================================================
+
+Phase 15 delivers a complete Commercial Administration capability for
+Platform/Super Admin with controlled tenant read-only billing visibility:
+
+  - Structured commercial master data and contracts
+  - Manual invoice records with uploaded PDFs only
+  - Manual collection tracking without electronic payment
+  - Computed risk and renewal readiness intelligence
+  - Unified commercial console in Tenant Registry
+  - Tenant-scoped commercial audit activity feed (P15-H)
+
+All safety boundaries hold. No scope expansion into accounting, tax, email,
+automation, or payment gateways.
+
+PHASE 15 — COMMERCIAL ADMINISTRATION: COMPLETE
+
+(No Phase 16 work started.)
+
+================================================================================
+END OF REPORT
+================================================================================

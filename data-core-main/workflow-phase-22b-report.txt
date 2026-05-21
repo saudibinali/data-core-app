@@ -1,0 +1,154 @@
+================================================================================
+WORKFLOW PHASE 22B REPORT
+Canonical Finance DB & Journal Foundation
+Generated: 2026-05-19
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P22-B implements the first executable canonical finance foundation: migration 0013
+(eleven finance tables + workspace settings), COA services with three seed templates,
+finance periods and locks, prepared journal batches with double-entry validation,
+account mappings, finance permissions, report definitions, and transitional integration
+with FinancialExportService — without accounting posting, bank integrations, or ERP APIs.
+
+Recommended next: P22-C — Finance Prepare Engine & Trial Balance Foundation.
+
+TABLES ADDED
+------------
+finance_workspace_settings
+finance_fiscal_years
+finance_periods
+finance_chart_of_accounts
+finance_journals
+finance_posting_batches
+finance_journal_entries
+finance_cost_centers
+finance_dimensions
+finance_dimension_values
+finance_account_mappings
+finance_locks
+finance_audit_logs
+
+Migration: lib/db/drizzle/0013_finance_canonical_foundation.sql
+Schema: lib/db/src/schema/finance-canonical.ts
+
+SERVICES ADDED
+--------------
+ChartOfAccountsService
+FinanceEnablementService (+ COA templates)
+FinancePeriodService
+FinanceLockService
+FinanceJournalService (prepared only)
+FinanceAccountMappingService
+finance-validation.ts
+finance-audit.ts
+finance-permissions.ts
+finance-reports.ts
+
+Routes: artifacts/api-server/src/routes/finance-canonical.ts
+
+COA STATUS — GO
+---------------
+[GO] Create / update / deactivate accounts
+[GO] Hierarchy validation (parent type, non-postable parent)
+[GO] Postable + active validation
+[GO] Bilingual name fields (name + name_ar)
+[GO] Three templates: coa.generic.sme, coa.ksa.payroll, coa.ifrs.lite
+[GO] Seed on POST /finance/enable
+
+JOURNAL PERSISTENCE STATUS — GO (prepared only)
+-----------------------------------------------
+[GO] finance_posting_batches (status: prepared | void)
+[GO] finance_journal_entries (status: prepared)
+[GO] Balanced entry validation
+[GO] Idempotency key per payroll run
+[GO] Auto-balance to payroll payable account
+[GO] No posting transition (no posted status writes)
+
+FINANCE LOCKS STATUS — GO
+-------------------------
+[GO] Lock / break-glass unlock
+[GO] Writable period validation
+[GO] Hard-close coordination hook
+[GO] Payroll lock coordination check
+
+EXPORT INTEGRATION STATUS — GO
+------------------------------
+[GO] buildGlJournal() backward compatible (ephemeral lines)
+[GO] Optional persist via workspace setting or FINANCE_PERSIST_PREPARED_BATCHES
+[GO] POST /finance/batches/prepare/payroll-run/:runId
+[PARTIAL] Persist skipped gracefully if finance not enabled
+
+SECURITY STATUS — GO
+--------------------
+[GO] finance.* permission keys (7)
+[GO] requireFinancePermission middleware
+[GO] finance_audit_logs persistence
+[GO] Workspace isolation on all queries
+[GO] Export authorization for finance.* reports
+
+REPORTING STATUS — GO
+---------------------
+[GO] finance.coa
+[GO] finance.prepared.batch
+[GO] finance.cost.center.summary
+[GO] Integrated with export_jobs / generated_reports
+
+SMOKE TEST RESULTS
+------------------
+File: artifacts/api-server/src/lib/finance/__tests__/finance-foundation.smoke.test.ts
+
+Tests cover:
+  - Finance permission keys
+  - COA template registry
+  - Balanced journal validation
+  - Account activation / postable rules
+  - Hard-closed period validation
+  - COA hierarchy guard (unit mock)
+  - Idempotency key format
+  - No postBatch on journal service
+
+DOCUMENTATION
+-------------
+[GO] p22-b-finance-foundation-implementation.md
+[GO] workflow-phase-22b-report.txt
+
+READINESS GATES
+---------------
+| Area                              | Status   |
+|-----------------------------------|----------|
+| canonical finance DB              | GO       |
+| COA foundation                    | GO       |
+| prepared journal foundation       | GO       |
+| finance governance                | GO       |
+| ERP finance foundation readiness  | PARTIAL  |
+
+PARTIAL ERP rationale:
+- Prepared batches and COA exist; no posted ledger, trial balance, or ERP adapters.
+
+REMAINING BLOCKERS
+------------------
+1. Accounting posting engine (P22-C+)
+2. Trial balance report
+3. Finance operations UI
+4. Strict COA validation on legacy payroll component text codes until mappings seeded
+5. Bank / AR / AP / tax (explicitly out of scope)
+
+CONFIRMATIONS
+-------------
+[x] No accounting posting implementation
+[x] No bank integrations
+[x] No invoicing rollout
+[x] No procurement rollout
+[x] No tax engine
+[x] No destructive migration
+[x] P22-C NOT started
+
+RECOMMENDED NEXT PHASE
+----------------------
+P22-C — Finance Prepare Engine & Trial Balance Foundation
+
+================================================================================
+END OF REPORT
+================================================================================

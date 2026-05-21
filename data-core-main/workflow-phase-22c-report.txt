@@ -1,0 +1,129 @@
+================================================================================
+WORKFLOW PHASE 22C REPORT
+Finance Prepare Engine & Trial Balance Foundation
+Generated: 2026-05-19
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P22-C delivers the first Finance Prepare Engine on canonical P22-B tables: payroll
+batch preparation with readiness-driven statuses (prepared / validation_warning /
+blocked / void), trial balance from prepared entries only, read-only ledger APIs,
+reconciliation foundation, posting-readiness assessment (READY/WARNING/BLOCKED),
+five operational finance reports, monitoring metrics, validation hardening, and
+expanded permissions — with explicit exclusion of accounting posting, bank
+integrations, invoicing, procurement, and tax engine.
+
+Recommended next: P22-D — Finance Operations Center & Posting Governance.
+Do not start P22-D in this delivery.
+
+PREPARE ENGINE STATUS — GO
+--------------------------
+[GO] FinancePrepareEngine.preparePayrollBatch
+[GO] Payroll run → prepared batch + journal lines
+[GO] Validate journals, mappings, dimensions, writable periods
+[GO] Auto-balance to payroll payable
+[GO] Reconciliation metadata stored on batch
+[GO] Status remains prepared family only (no posted)
+[GO] Idempotent reuse for active batches
+[GO] POST /finance/ops/prepare/payroll-run/:runId
+[GO] FinancialExportService delegates to prepare engine
+
+TRIAL BALANCE STATUS — GO
+-------------------------
+[GO] TrialBalanceService (opening / period / closing per account)
+[GO] Period and fiscal year filtering
+[GO] Workspace isolation
+[GO] Prepared entries + active batches only
+[GO] GET /finance/ops/trial-balance
+[GO] Report key finance.trial_balance
+
+LEDGER QUERY STATUS — GO
+------------------------
+[GO] Account ledger, activity, batch details
+[GO] Period summary, cost center summary
+[GO] Read-only (no posting operations)
+[GO] GET /finance/ops/ledger/*
+
+RECONCILIATION STATUS — GO
+--------------------------
+[GO] Payroll run ↔ batch reconciliation
+[GO] Orphan entry detection
+[GO] Imbalance detection
+[GO] Missing mapping detection
+[GO] Duplicate batch detection
+[GO] GET /finance/ops/reconciliation*
+
+POSTING READINESS STATUS — GO
+-----------------------------
+[GO] FinancePostingReadinessService
+[GO] READY / WARNING / BLOCKED levels
+[GO] Balanced journals, accounts, periods, idempotency checks
+[GO] GET /finance/ops/readiness/*
+
+REPORTING STATUS — GO
+---------------------
+[GO] finance.trial_balance
+[GO] finance.account_ledger
+[GO] finance.batch_activity
+[GO] finance.reconciliation
+[GO] finance.mapping_gaps
+[GO] Registry + export authorization + POST /finance/ops/reports/generate
+
+VALIDATION STATUS — GO
+----------------------
+[GO] Normal balance validation
+[GO] Duplicate line detection
+[GO] Zero-value entry filtering
+[GO] Orphan account detection (readiness)
+[GO] Hierarchy validation (COA service, P22-B)
+[GO] Batch lifecycle: prepared | validation_warning | blocked | void
+
+SECURITY STATUS — GO
+--------------------
+[GO] Immutable prepared entries (insert-only API surface)
+[GO] Finance export authorization per report permission
+[GO] finance.ledger.view, finance.reconcile permissions
+[GO] Audit hooks on prepare and void
+[GO] Workspace isolation on all finance queries
+
+MIGRATION
+---------
+0014_finance_prepare_trial_balance.sql
+  - readiness_status, validation_json, reconciliation_json on batches
+  - idx_finance_batches_status
+
+SMOKE TEST RESULTS
+------------------
+finance-foundation.smoke.test.ts — updated (9 permissions, void surface)
+finance-prepare.smoke.test.ts — P22-C validation, lifecycle, service surfaces
+Run: pnpm --filter @workspace/api-server run test
+
+GATE DECISIONS
+--------------
+Finance prepare engine:           GO
+Trial balance foundation:         GO
+Reconciliation foundation:        GO
+Finance operational readiness:    PARTIAL (no UI ops center; metrics API only)
+ERP finance readiness:            PARTIAL (no posting, no bank/ERP APIs)
+
+REMAINING BLOCKERS
+------------------
+- No accounting posting transition (by design until P22-D governance)
+- No Finance Operations Center UI
+- Blocked batches throw when finance period/journal missing (cannot persist)
+- DB-level immutability triggers not added
+- Opening balances rely on prior prepared entry dates only
+- Bank, invoicing, procurement, tax — out of scope
+
+CONFIRMATION
+------------
+No accounting posting implemented.
+No bank integrations.
+No invoicing rollout.
+No procurement rollout.
+No tax engine.
+No destructive migration.
+P22-D not started.
+
+================================================================================

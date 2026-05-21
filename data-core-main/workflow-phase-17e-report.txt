@@ -1,0 +1,177 @@
+WORKFLOW PHASE 17-E — Platform User Invitation / Activation
+================================================================
+Completed: 2026-05-18
+Scope: Invitation/activation flow only (no email, no password reset system, no MFA/SSO, no tenant/workspace invitations)
+
+NEXT PHASE (NOT STARTED): P17-F — Platform Users Console Integration
+
+────────────────────────────────────────────────────────────────
+1) INVITATION MODEL
+────────────────────────────────────────────────────────────────
+Table: platform_user_invitations
+Schema: lib/db/src/schema/platform-user-invitations.ts
+Migration: scripts/apply-p17e-platform-user-invitations.cjs
+
+Fields:
+  id, platformUserId, email, tokenHash, status (pending|accepted|expired|revoked),
+  expiresAt, acceptedAt, revokedAt, revokedBy, revokeReason, createdBy, createdAt, updatedAt
+
+Rules enforced:
+  - platformUserId references users with workspaceId IS NULL (platform users only)
+  - email normalized to lowercase on write
+  - token stored as SHA-256 hash only (tokenHash)
+  - Partial unique index: one pending invitation per platformUserId
+  - No hard delete (status transitions only)
+  - Revoke requires reason (min 10 characters)
+  - accepted / expired / revoked invitations are not reusable
+
+────────────────────────────────────────────────────────────────
+2) TOKEN RULES
+────────────────────────────────────────────────────────────────
+Helpers: artifacts/api-server/src/lib/platform-user-invitation-token.ts
+  - generatePlatformInvitationToken() — 32-byte crypto random, base64url
+  - hashPlatformInvitationToken(token) — SHA-256 hex
+  - verifyPlatformInvitationToken(token, storedHash) — timing-safe compare
+
+Config: platform-user-invitation-config.ts
+  - Default expiry: 7 days (PLATFORM_INVITATION_DEFAULT_EXPIRY_DAYS)
+  - Configurable via expiryDays on create/resend API body
+  - expireInvitationIfNeeded() marks pending → expired on read/verify when past expiresAt
+  - Plain token returned once on create/resend only (activationToken + activationUrl)
+  - Plain token never written to audit logs
+
+────────────────────────────────────────────────────────────────
+3) LIFECYCLE OPERATIONS
+────────────────────────────────────────────────────────────────
+Service: artifacts/api-server/src/lib/platform-user-invitations.ts
+
+  createPlatformUserInvitation(platformUserId, actorId)
+    - Revokes existing pending with reason: system_replaced_by_new_invitation
+    - Requires target status = invited
+    - Returns activationToken + activationUrl once
+
+  resendPlatformUserInvitation(platformUserId, actorId)
+    - Rotates token via create flow + audits platform_user_invitation_resent
+
+  revokePlatformUserInvitation(invitationId, actorId, reason)
+    - status → revoked, reason required
+
+  acceptPlatformUserInvitation(token, activationPayload)
+    - Validates token, pending, not expired/revoked/accepted
+    - Sets user status → active, bcrypt password, employeeNumber
+    - Rejects disabled/suspended/locked users
+    - Does not store password on invitation row
+
+  listPlatformUserInvitations / verifyPlatformInvitation / findInvitationByToken
+
+────────────────────────────────────────────────────────────────
+4) PERMISSIONS ADDED
+────────────────────────────────────────────────────────────────
+  platform.invitations.read
+  platform.invitations.create
+  platform.invitations.revoke
+
+Role matrix (no redesign):
+  root_platform_owner: read, create, revoke
+  platform_admin: read, create, revoke (P17-C blocks protected/root targets in service)
+  auditor / read_only_operator: read only
+  finance_admin / sales_admin / support_admin / workspace_support: none
+
+Total platform permission codes: 55 (was 52)
+
+────────────────────────────────────────────────────────────────
+5) BACKEND APIs
+────────────────────────────────────────────────────────────────
+Routes: artifacts/api-server/src/routes/platform-user-invitations.ts
+
+Authenticated:
+  GET  /platform/users/:userId/invitations          (platform.invitations.read)
+  POST /platform/users/:userId/invitations          (platform.invitations.create)
+  POST /platform/users/:userId/invitations/resend   (platform.invitations.create)
+  POST /platform/invitations/:invitationId/revoke   (platform.invitations.revoke, reason required)
+
+Public activation:
+  GET  /platform/invitations/verify?token=...
+  POST /platform/invitations/accept
+
+List responses exclude token/tokenHash. Create/resend include shownOnce: true.
+
+────────────────────────────────────────────────────────────────
+6) ACTIVATION API / PAGE
+────────────────────────────────────────────────────────────────
+Activation path: /platform/activate?token=...
+Frontend page: artifacts/ops-platform/src/pages/platform-activate.tsx
+  - Verifies token, shows masked email + expiry
+  - Accept form: displayName (optional), employeeNumber (optional), password (required for ops login)
+  - Success → redirect hint to /sign-in
+
+────────────────────────────────────────────────────────────────
+7) PROTECTION INTEGRATION (P17-C)
+────────────────────────────────────────────────────────────────
+canActorManageTargetInvitations():
+  - Non-root cannot create/resend/revoke for root owners (ROOT_OWNER_IMMUTABLE)
+  - Non-root cannot manage protected users (PROTECTED_USER_REQUIRES_ROOT)
+  - platform_user_invitation_blocked audited on policy denial
+  - Accept rejects disabled/suspended/locked users
+
+────────────────────────────────────────────────────────────────
+8) FRONTEND — Invitation & Activation
+────────────────────────────────────────────────────────────────
+Component: artifacts/ops-platform/src/components/platform-users/InvitationActivationSection.tsx
+Integrated in: super-admin-platform-users.tsx user detail panel
+
+Shows: status, expiresAt, acceptedAt, revokedAt, revokeReason, created metadata
+Actions (permission-gated): Create Invitation, Resend Invitation, Revoke Invitation
+Create/resend: one-time activation URL + Copy + dismiss warning (ACTIVATION_LINK_ONCE_NOTICE)
+No email UI, no tokenHash display, no forbidden terms (see safety contract)
+
+────────────────────────────────────────────────────────────────
+9) AUDIT EVENTS
+────────────────────────────────────────────────────────────────
+Taxonomy: platform-audit-events.ts
+  platform_user_invitation_created
+  platform_user_invitation_resent
+  platform_user_invitation_revoked
+  platform_user_invitation_accepted
+  platform_user_invitation_expired
+  platform_user_invitation_blocked
+
+Metadata: actorId, targetPlatformUserId, invitationId, email, status, reason, expiresAt, timestamp
+Never: plain token, tokenHash
+
+────────────────────────────────────────────────────────────────
+10) SAFETY GUARANTEES (all true)
+────────────────────────────────────────────────────────────────
+PLATFORM_INVITATION_SAFETY_CONTRACT:
+  platformInvitationActivationOnly, noEmailSending, noSmtp, noPasswordReset,
+  noMfaManagement, noSsoManagement, noTenantInvitations, noWorkspaceInvitations,
+  noRootOwnerPromotion, tokenStoredHashedOnly, tokenShownOnce, invitationExpiryRequired,
+  noHardDeleteInvitations, protectedUserPolicyEnforced, auditInvitationLifecycle, permissionGated
+
+────────────────────────────────────────────────────────────────
+11) TEST RESULTS
+────────────────────────────────────────────────────────────────
+API server:
+  platform-user-invitation-token.test.ts — PASS (5)
+  platform-user-invitations-policy.test.ts — PASS (11)
+  platform-permissions.test.ts — PASS (updated to 55 codes, platform_admin 53)
+
+Ops platform:
+  phase-17e-platform-invitations.test.ts — PASS (16)
+  Phase regression counts updated 52 → 55 across P16/P17 tests
+
+Coverage includes: token hashing, permissions matrix, protected-user policy, static route/UI
+checks, no SMTP/email paths, activation page route, schema fields, safety contract.
+
+────────────────────────────────────────────────────────────────
+12) LIMITATIONS LEFT FOR P17-F (NOT STARTED)
+────────────────────────────────────────────────────────────────
+P17-F — Platform Users Console Integration:
+  - Deeper console UX wiring, bulk operations, unified user lifecycle panels
+  - Email delivery integration (explicitly out of P17-E scope)
+  - Password reset / MFA / SSO flows
+  - Tenant/workspace invitation systems
+  - Full E2E integration tests against live database
+
+Apply migration when deploying:
+  DATABASE_URL=... node scripts/apply-p17e-platform-user-invitations.cjs

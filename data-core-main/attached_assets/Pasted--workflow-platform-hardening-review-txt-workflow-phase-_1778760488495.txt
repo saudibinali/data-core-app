@@ -1,0 +1,269 @@
+راجع:
+- workflow-platform-hardening-review.txt
+- workflow-phase-5d-report.txt
+- workflow-phase-6a-report.txt
+- workflow-phase-6b-report.txt
+خصوصًا:
+- operational governance section
+- tenant health notes
+- automation storm detection
+- stuck execution visibility
+- governance observability model
+
+ثم نفّذ فقط:
+P6-C — Operational Governance Foundations
+
+ولا تنفّذ:
+- external observability SaaS
+- Prometheus/Grafana integrations
+- distributed metrics pipelines
+- AI anomaly systems
+- multi-region telemetry
+- Kubernetes monitoring stacks
+
+عنوان المهمة:
+WORKFLOW PHASE 6-C — Operational Governance & Platform Monitoring Foundations
+
+المهمة الحالية:
+تحويل:
+workflow observability
+
+من:
+raw runtime events
+
+إلى:
+operational governance visibility
+
+الهدف:
+تمكين:
+- tenant health visibility
+- workflow execution monitoring
+- stuck execution detection
+- automation storm visibility
+- governance dashboards foundations
+
+بطريقة:
+deterministic platform operations model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT OBSERVABILITY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- structured runtime logs
+- approval events
+- scheduler events
+- simulation events
+- validation events
+- publish lifecycle events
+- execution lifecycle states
+
+حدّد:
+- ما الذي يمكن قياسه operationally الآن
+- أين توجد blind spots
+- أين لا توجد aggregate visibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN OPERATIONAL METRICS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+OperationalMetricsSnapshot
+
+ليحتوي:
+- activeExecutions
+- waitingApprovalExecutions
+- waitingDelayExecutions
+- failedExecutions
+- timedOutExecutions
+- cancelledExecutions
+- completedExecutions
+- averageExecutionDuration
+- approvalBacklogCount
+- delayBacklogCount
+- estimatedNotificationFanout
+- workflowErrorRate
+
+مع:
+tenant-scoped semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — STUCK EXECUTION DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم detection rules لـ:
+- approvals waiting too long
+- delays overdue
+- executions with no progress
+- scheduler starvation indicators
+
+المطلوب:
+deterministic thresholds
+بدون AI heuristics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — AUTOMATION STORM DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف تكتشف:
+- notification explosions
+- runaway workflows
+- excessive branch amplification
+- repeated execution bursts
+
+المطلوب:
+simple deterministic detection.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TENANT HEALTH MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TenantHealthSummary
+
+ليحتوي:
+- execution pressure
+- error concentration
+- delay backlog
+- approval backlog
+- notification amplification risk
+- workflow complexity indicators
+
+مع:
+simple severity model:
+healthy / warning / degraded / critical
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — OPERATIONAL QUERY LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+query layer
+لجمع:
+- aggregate metrics
+- workflow-level health
+- tenant-level health
+- recent failures
+- stuck execution lists
+
+لكن:
+لا تبنِ dashboards UI بعد.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY EVENTS EXPANSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف structured events:
+
+A)
+tenant_health_snapshot_generated
+
+B)
+workflow_operational_warning
+
+C)
+stuck_execution_detected
+
+D)
+automation_storm_detected
+
+E)
+scheduler_backlog_detected
+
+كلها تحتوي:
+- workspaceId
+- workflowId (if applicable)
+- severity
+- metricsSnapshot
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — GOVERNANCE ALERT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceAlert
+
+ليحتوي:
+- severity
+- code
+- title
+- description
+- affectedWorkflowIds
+- affectedExecutionIds
+- detectedAt
+- recommendedAction
+
+مع:
+stable operational codes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+tenant metrics aggregation
+
+T2:
+approval backlog detection
+
+T3:
+delay backlog detection
+
+T4:
+stuck execution detection
+
+T5:
+automation storm detection
+
+T6:
+severity classification
+
+T7:
+metrics remain deterministic
+
+T8:
+cancelled/timed_out excluded correctly from active counts
+
+T9:
+workflowErrorRate calculation
+
+T10:
+health summaries generated without DB mutation side effects
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- async analytics pipelines
+- external telemetry vendors
+- AI classification
+- predictive ML scoring
+- distributed monitoring agents
+
+خلك:
+deterministic operational governance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-6c-report.txt
+
+ويحتوي:
+- operational governance architecture
+- metrics aggregation model
+- stuck detection model
+- automation storm detection model
+- tenant health classification
+- governance alert model
+- observability additions
+- tests results
+- operational blind spots remaining
+- readiness assessment قبل enterprise scaling phase

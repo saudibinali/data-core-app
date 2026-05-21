@@ -1,0 +1,526 @@
+WORKFLOW PHASE 6-C REPORT
+Operational Governance & Platform Monitoring Foundations
+=========================================================
+Date:      2026-05-14
+Phase:     6-C
+Status:    COMPLETE
+Tests:     656 / 656 passing (69 new in governance.test.ts)
+TypeCheck: Clean (0 errors)
+
+
+OBJECTIVE
+─────────
+Transform raw workflow runtime events into structured operational visibility:
+deterministic tenant health snapshots, stuck execution detection, automation
+storm detection, governance alert model, and a query layer for aggregate
+metrics.  No external SaaS, no Prometheus/Grafana, no AI/ML, no async
+analytics pipelines.
+
+
+DELIVERABLES
+────────────
+
+T001 — governance.ts (new file)
+  artifacts/api-server/src/lib/workflows/governance.ts
+
+  Two-layer design:
+    • Pure model functions  — synchronous, no I/O, fully testable
+    • DB query layer        — async READ-ONLY wrappers; no mutations
+
+T002 — governance.test.ts (new file, 69 tests)
+  artifacts/api-server/src/lib/workflows/__tests__/governance.test.ts
+
+  Test groups: T1–T15 (see TESTS section below).
+
+
+OPERATIONAL METRICS MODEL
+──────────────────────────
+
+OperationalMetricsSnapshot
+  workspaceId                 — workspace this snapshot is for
+  capturedAt                  — moment the snapshot was computed
+  activeExecutions            — status IN ('pending', 'running')
+  waitingApprovalCount        — status = 'waiting_approval'
+  waitingDelayCount           — status = 'waiting_delay'
+  completedExecutions         — status='completed', started in last 24h
+  failedExecutions            — status IN ('failed', 'error'), last 24h
+  timedOutExecutions          — status='timed_out', last 24h
+  cancelledExecutions         — status='cancelled', last 24h
+  approvalBacklogCount        — waiting_approval for > 24h (configurable)
+  delayBacklogCount           — waiting_delay past wakeAt by > 15min
+  averageExecutionDurationMs  — avg wall-clock for recent completed rows
+  workflowErrorRate           — failedExecutions / (completed + failed); 0–1
+  estimatedNotificationFanout — set by DB layer from active workflow defs
+
+Counting semantics:
+  "active" counts are time-unbounded — include all non-terminal executions
+  "recent" counts cover startedAt > now() - 24h — for error rate / completions
+
+workflowErrorRate divides only by completedExecutions + failedExecutions.
+  Cancelled, timed-out, and still-running executions are excluded.
+  Result is 0 when no executions completed or failed in the window.
+
+
+STUCK EXECUTION DETECTION
+──────────────────────────
+
+detectStuckFromRows(rows, now) → StuckExecutionInfo[]
+
+Three detection rules (deterministic, threshold-based, no heuristics):
+
+  running_too_long
+    status='running' AND (now - startedAt) > RUNNING_TOO_LONG_HOURS (2h)
+    Indicates: step handler hung, DB lock held, or executor crashed mid-step.
+
+  approval_overdue
+    status='waiting_approval' AND (now - startedAt) > APPROVAL_BACKLOG_THRESHOLD_HOURS (24h)
+    Indicates: approver absent, notification not delivered, escalation needed.
+
+  delay_overdue
+    status='waiting_delay' AND wakeAt IS NOT NULL AND
+    (now - wakeAt) > DELAY_OVERDUE_GRACE_MINUTES * 60s (15min grace)
+    Indicates: scheduler stopped, DB contention, or wake_at never reached.
+
+StuckExecutionInfo fields:
+  executionId       — row PK
+  workflowId        — parent workflow definition
+  workspaceId       — scoped workspace
+  status            — current execution status
+  stuckReason       — one of the three reasons above
+  stuckDurationMs   — total time in the stuck state
+  overdueMs         — time past the governance threshold (stuckDurationMs - threshold)
+
+
+AUTOMATION STORM DETECTION
+───────────────────────────
+
+detectStormFromRows(rows, windowMinutes, now) → StormDetectionResult
+
+Rolling-window burst detection:
+  Count executions where startedAt > (now - windowMinutes * 60s).
+  windowMinutes defaults to STORM_WINDOW_MINUTES = 5.
+
+Thresholds:
+  count >= STORM_THRESHOLD_CRITICAL (100) → severity="critical"
+  count >= STORM_THRESHOLD_WARNING  (20)  → severity="warning"
+  otherwise                               → severity="none"
+
+StormDetectionResult:
+  count         — executions started in the window
+  severity      — "none" | "warning" | "critical"
+  windowMinutes — window used for this result
+
+Storm detection covers:
+  • Runaway trigger loops (e.g., ticket.updated workflow triggers itself)
+  • Batch import events hitting multiple workflows simultaneously
+  • Misconfigured automation with no guard conditions
+
+
+GOVERNANCE ALERT MODEL
+───────────────────────
+
+generateGovernanceAlerts(metrics, stuck, storm, workspaceId, now) → GovernanceAlert[]
+
+PURE function — same metrics/stuck/storm → same alert list (count, codes, severities).
+
+Alert codes (stable, forward-compatible):
+
+  GOV-01_APPROVAL_BACKLOG
+    Fires when: approvalBacklogCount >= 5 (warning) or >= 20 (critical)
+    Means: approval steps have been waiting longer than expected.
+    Action: escalate to approvers or configure approval timeout policies.
+
+  GOV-02_DELAY_BACKLOG
+    Fires when: delayBacklogCount >= 5 (warning) or >= 20 (critical)
+    Means: delayed executions are not being resumed by the scheduler.
+    Action: verify WorkflowScheduler is running; check poll cycle logs.
+
+  GOV-03_HIGH_ERROR_RATE
+    Fires when: workflowErrorRate >= 0.20 (warning) or >= 0.50 (critical)
+    Means: a significant fraction of recent executions have failed.
+    Action: review failed execution errors; inspect step handler configs.
+
+  GOV-04_EXECUTION_PRESSURE
+    Fires when: totalActive >= 50 (warning) or >= 200 (critical)
+    totalActive = activeExecutions + waitingApprovalCount + waitingDelayCount
+    Means: workspace has an unusually high number of concurrent executions.
+    Action: check for high-volume trigger events; add trigger conditions.
+
+  GOV-05_STUCK_EXECUTIONS
+    Fires when: stuckExecutions.length >= 1 (warning) or >= 5 (critical)
+    Means: individual executions are not progressing past a threshold.
+    Action: force-timeout via POST /workflows/executions/:id/timeout.
+
+  GOV-06_AUTOMATION_STORM
+    Fires when: stormResult.severity in ("warning", "critical")
+    Means: execution burst detected in the rolling window.
+    Action: identify triggering event source; deactivate runaway workflows.
+
+GovernanceAlert fields:
+  code                  — stable GOV-NN_DESCRIPTION
+  severity              — "info" | "warning" | "critical"
+  title                 — human-readable one-liner
+  description           — detailed explanation with metric values
+  workspaceId           — scoped workspace
+  affectedWorkflowIds   — []:  populated where calculable from input data
+  affectedExecutionIds  — IDs of stuck executions involved (when available)
+  detectedAt            — timestamp of detection (the provided 'now')
+  recommendedAction     — operational next step
+
+
+TENANT HEALTH MODEL
+────────────────────
+
+TenantHealthSummary
+  workspaceId        — workspace this summary is for
+  capturedAt         — moment of computation
+  severity           — "healthy" | "warning" | "degraded" | "critical"
+  metrics            — OperationalMetricsSnapshot
+  alerts             — GovernanceAlert[] (all generated alerts)
+  stuckExecutions    — StuckExecutionInfo[] (all stuck)
+  stormResult        — StormDetectionResult (storm window analysis)
+  indicators         — TenantHealthIndicators (per-dimension)
+
+TenantHealthIndicators (per-dimension severity):
+  executionPressure         — based on totalActive vs thresholds
+  errorConcentration        — based on workflowErrorRate
+  approvalBacklog           — based on approvalBacklogCount
+  delayBacklog              — based on delayBacklogCount
+  stuckExecutionRisk        — based on stuckExecutions.length
+
+classifyOverallSeverity(alerts) → TenantHealthSeverity:
+  "critical"  — any alert is critical
+  "degraded"  — more than 3 alerts (any severity)
+  "warning"   — any alert is warning
+  "healthy"   — no alerts
+
+Severity escalation is intentionally conservative:
+  A workspace with 4 minor warnings is "degraded" not just "warning" — to
+  signal that multiple independent problems may indicate a systemic issue.
+
+
+OPERATIONAL QUERY LAYER
+────────────────────────
+
+DB query functions (async, READ-ONLY):
+
+  queryExecutionRows(workspaceId, database, now)
+    Fetches minimal execution columns needed for governance:
+      id, workflowId, workspaceId, status, startedAt, completedAt,
+      timeoutAt, wakeAt, error
+    WHERE workspaceId = $1 AND (
+      status IN ('pending', 'running', 'waiting_approval', 'waiting_delay')
+      OR startedAt > now() - QUERY_LOOKBACK_HOURS (72h)
+    )
+    Single query with OR predicate — covers both active (no age limit)
+    and recent terminal (72h lookback) in one round-trip.
+
+  computeOperationalMetrics(workspaceId, database?, now?)
+    → Promise<OperationalMetricsSnapshot>
+    Calls queryExecutionRows + computeMetricsFromRows.
+
+  detectStuckExecutions(workspaceId, database?, now?)
+    → Promise<StuckExecutionInfo[]>
+    Calls queryExecutionRows + detectStuckFromRows.
+
+  evaluateTenantHealth(workspaceId, database?, now?)
+    → Promise<TenantHealthSummary>
+    Full pipeline: query → metrics → stuck → storm → alerts → classify → log.
+    Emits all 5 observability events (see below).
+
+Query guarantees:
+  • Zero INSERT/UPDATE/DELETE — structural guarantee (only .select() used)
+  • No locks — standard Drizzle SELECT, no FOR UPDATE
+  • Idempotent — can be called any number of times without side effects
+  • Safe for dashboards — low-cost reads, index-covered queries
+
+
+PURE MODEL LAYER
+────────────────
+
+computeMetricsFromRows(rows, workspaceId, now)
+  Single-pass over rows. No sorting, no external data. O(n) time.
+
+detectStuckFromRows(rows, now)
+  Single-pass over rows. Returns only stuck entries. O(n) time.
+
+detectStormFromRows(rows, windowMinutes, now)
+  Single-pass filter by startedAt > windowStart. O(n) time.
+
+generateGovernanceAlerts(metrics, stuck, storm, workspaceId, now)
+  Pure decision tree over pre-computed values. O(1) time.
+
+classifyIndicators(metrics, stuck)
+  Pure threshold comparison. O(1) time.
+
+classifyOverallSeverity(alerts)
+  Single pass over alert list. O(n) time.
+
+classifyTenantHealth(metrics, alerts, stuck, storm, workspaceId, now)
+  Composes the above. No I/O.
+
+All pure functions are synchronous (return values, not Promises).
+TypeScript enforces this — governance.ts has no `async` pure functions.
+
+
+OBSERVABILITY EVENTS
+─────────────────────
+
+Five new structured log events emitted by evaluateTenantHealth():
+
+  tenant_health_snapshot_generated  (always — every evaluation)
+    workspaceId, severity, alertCount, stuckCount, stormSeverity,
+    activeExecutions, waitingApproval, waitingDelay,
+    approvalBacklog, delayBacklog, workflowErrorRate, alertCodes
+
+  stuck_execution_detected  (when stuckExecutions.length > 0)
+    workspaceId, stuckCount, stuckReasons[], affectedExecutionIds[],
+    severity, metricsSnapshot
+
+  automation_storm_detected  (when storm.severity != "none")
+    workspaceId, stormCount, windowMinutes, severity, metricsSnapshot
+
+  scheduler_backlog_detected  (when delayBacklogCount >= DELAY_BACKLOG_WARNING)
+    workspaceId, delayBacklogCount, severity, metricsSnapshot
+
+  workflow_operational_warning  (one per warning/critical alert)
+    workspaceId, alertCode, alertSeverity, alertTitle,
+    affectedWorkflowIds[], affectedExecutionIds[], metricsSnapshot
+
+All events use logger.warn (for warning/critical) or logger.info (snapshot).
+Action field values are stable — searchable in the same structured log
+stream as all other P4–P6 workflow events.
+
+Full event taxonomy (P4–P6):
+  P4: approval_requested/decision_recorded/decision_rejected/resume_completed/
+       resume_race_lost, execution_cancelled/delay_paused/delay_resumed, etc.
+  P5: execution_snapshot_created, workflow_activated/validation_completed, etc.
+  P6A: execution_delay_started/paused/resumed, scheduler_poll_cycle, etc.
+  P6B: workflow_simulation_started/completed/branch_selected
+  P6C: tenant_health_snapshot_generated, stuck_execution_detected,
+       automation_storm_detected, scheduler_backlog_detected,
+       workflow_operational_warning
+
+
+GOVERNANCE THRESHOLDS (all exported)
+───────────────────────────────────
+
+APPROVAL_BACKLOG_THRESHOLD_HOURS = 24   approval waiting > 24h → stuck/backlog
+DELAY_OVERDUE_GRACE_MINUTES      = 15   past wakeAt by > 15min → overdue
+RUNNING_TOO_LONG_HOURS           = 2    running > 2h → stuck
+HIGH_ERROR_RATE_THRESHOLD        = 0.20 error rate warning
+CRITICAL_ERROR_RATE_THRESHOLD    = 0.50 error rate critical
+MAX_ACTIVE_WARNING               = 50   active execution pressure warning
+MAX_ACTIVE_CRITICAL              = 200  active execution pressure critical
+MAX_APPROVAL_BACKLOG_WARNING     = 5    approval backlog warning
+MAX_APPROVAL_BACKLOG_CRITICAL    = 20   approval backlog critical
+DELAY_BACKLOG_WARNING            = 5    delay backlog warning
+DELAY_BACKLOG_CRITICAL           = 20   delay backlog critical
+STORM_WINDOW_MINUTES             = 5    rolling window for storm detection
+STORM_THRESHOLD_WARNING          = 20   executions in window → warning
+STORM_THRESHOLD_CRITICAL         = 100  executions in window → critical
+METRICS_LOOKBACK_HOURS           = 24   recent history window
+QUERY_LOOKBACK_HOURS             = 72   DB query lookback for terminal rows
+
+
+TESTS RESULTS
+─────────────
+
+69 new tests in governance.test.ts.  All 656 tests pass.
+
+T1   Tenant metrics aggregation (6 tests)
+     ✓ counts active executions (pending + running only)
+     ✓ waitingApprovalCount and waitingDelayCount are separate buckets
+     ✓ counts recent completed/failed/timed_out/cancelled
+     ✓ excludes terminal executions older than 24h
+     ✓ computes averageExecutionDurationMs from completed rows
+     ✓ capturedAt and workspaceId are set correctly
+
+T2   Approval backlog detection (3 tests)
+     ✓ recent waiting_approval = 0 backlog
+     ✓ overdue waiting_approval = 1 backlog
+     ✓ backlog count is subset of total waitingApprovalCount
+
+T3   Delay backlog detection (4 tests)
+     ✓ future wakeAt = 0 backlog
+     ✓ within grace period (correct threshold application)
+     ✓ past wakeAt beyond grace = 1 backlog
+     ✓ null wakeAt = 0 backlog (null-safe)
+
+T4   Stuck execution detection (6 tests)
+     ✓ running within threshold = not stuck
+     ✓ running past RUNNING_TOO_LONG_HOURS = stuck (running_too_long)
+     ✓ waiting_approval past threshold = stuck (approval_overdue)
+     ✓ waiting_delay past grace = stuck (delay_overdue)
+     ✓ multiple stuck with different reasons in one call
+     ✓ stuckDurationMs and overdueMs positive and in correct order
+
+T5   Automation storm detection (5 tests)
+     ✓ below warning threshold → severity=none
+     ✓ at warning threshold exactly → severity=warning
+     ✓ at critical threshold exactly → severity=critical
+     ✓ excludes executions outside the rolling window
+     ✓ windowMinutes reflected in result
+
+T6   Severity classification (6 tests)
+     ✓ no alerts → healthy
+     ✓ one warning → warning
+     ✓ one critical → critical
+     ✓ >3 warnings → degraded
+     ✓ critical outranks degraded
+     ✓ critical error rate in classifyTenantHealth → severity=critical
+
+T7   Metrics deterministic (3 tests)
+     ✓ same rows + same now → identical metrics (3 consecutive calls)
+     ✓ same rows + same now → identical stuck detection
+     ✓ same rows + same now → identical storm detection
+
+T8   Cancelled / timed_out excluded from active (5 tests)
+     ✓ cancelled not counted as active
+     ✓ timed_out not counted as active
+     ✓ cancelled in cancelledExecutions, not active
+     ✓ timed_out in timedOutExecutions, not active
+     ✓ total active = running + pending only
+
+T9   workflowErrorRate calculation (7 tests)
+     ✓ 0 completed + 0 failed → 0 (no division by zero)
+     ✓ 1 completed + 0 failed → 0
+     ✓ 0 completed + 1 failed → 1.0
+     ✓ 1 completed + 1 failed → 0.5
+     ✓ 3 completed + 1 failed → 0.25
+     ✓ status='error' counts as failed
+     ✓ old failures (>24h) do not affect error rate
+
+T10  Health summaries without DB side effects (3 tests)
+     ✓ classifyTenantHealth returns plain object (not Promise)
+     ✓ all pure functions return synchronously
+     ✓ empty workspace → healthy, no alerts, no stuck
+
+T11  generateGovernanceAlerts correct codes (8 tests)
+     ✓ approval backlog warning → GOV-01 warning
+     ✓ approval backlog critical → GOV-01 critical
+     ✓ delay backlog → GOV-02_DELAY_BACKLOG
+     ✓ high error rate → GOV-03_HIGH_ERROR_RATE
+     ✓ execution pressure → GOV-04_EXECUTION_PRESSURE
+     ✓ stuck executions → GOV-05_STUCK_EXECUTIONS
+     ✓ automation storm → GOV-06_AUTOMATION_STORM
+     ✓ below all thresholds → no alerts
+
+T12  classifyIndicators per-dimension severity (4 tests)
+     ✓ healthy workspace → all indicators healthy
+     ✓ 1 stuck → stuckExecutionRisk=warning
+     ✓ 5+ stuck → stuckExecutionRisk=critical
+     ✓ critical error rate → errorConcentration=critical
+
+T13  classifyOverallSeverity escalation (4 tests)
+     ✓ empty alerts → healthy
+     ✓ 1 warning → warning (not degraded)
+     ✓ 4 warnings → degraded
+     ✓ any critical → critical overrides degraded
+
+T14  StuckExecutionInfo fields (1 test)
+     ✓ all required fields populated for running_too_long
+
+T15  Storm detection threshold boundaries (4 tests)
+     ✓ STORM_THRESHOLD_WARNING - 1 → none
+     ✓ STORM_THRESHOLD_WARNING exactly → warning
+     ✓ STORM_THRESHOLD_CRITICAL - 1 → warning
+     ✓ STORM_THRESHOLD_CRITICAL exactly → critical
+
+
+OPERATIONAL BLIND SPOTS REMAINING
+───────────────────────────────────
+
+1.  NO CROSS-WORKSPACE PLATFORM HEALTH
+    evaluateTenantHealth() is workspace-scoped.  A platform-level health
+    snapshot (aggregating all workspaces) does not yet exist.  A super_admin
+    dashboard would need to call evaluateTenantHealth() once per workspace
+    and merge results — currently no batch API exists for this.
+
+2.  estimatedNotificationFanout IS ALWAYS 0
+    Computing notification fanout requires fetching active workflow
+    definitions and running validateWorkflow() on each.  This is currently
+    not implemented in the DB query layer.  The field is reserved and set to
+    0.  A P6-D or dashboard phase should populate it with a separate query:
+      SELECT steps FROM workflow_definitions
+      WHERE workspace_id=$1 AND is_active=true
+    Then sum each definition's maxNotificationCount from runValidationEngine().
+
+3.  NO TIME-SERIES HISTORY
+    All snapshots are point-in-time.  There is no mechanism to store historical
+    health snapshots for trending ("is error rate rising?", "approvals
+    increasing over 7 days?").  A future schema addition could write
+    TenantHealthSummary to a governance_snapshots table on a schedule.
+
+4.  APPROVAL BACKLOG USES startedAt, NOT last_stepped_at
+    approvalBacklogCount measures how long since the execution STARTED, not
+    how long since the approval step was reached.  An execution that runs
+    10 steps before reaching an approval step will appear backlogged earlier
+    than warranted.  A future improvement would add a waiting_since_at column
+    set when transitioning to waiting_approval.
+
+5.  NO PER-WORKFLOW HEALTH BREAKDOWN
+    All metrics are workspace-aggregated.  A noisy workflow (one definition
+    with 90% error rate) is hidden inside workspace-level stats.  A P6-D
+    addition would be computeWorkflowLevelMetrics(workflowId, database, now)
+    that scopes the same logic to a single workflow definition.
+
+6.  AUTOMATION STORM DETECTION IS TENANT-LOCAL
+    Storm detection counts executions across all workflows in the workspace.
+    A more precise detector would count per-workflow-definition:
+    "workflow X triggered 50 times in 5 minutes" is more actionable than
+    "50 total executions across all workflows."
+
+7.  evaluateTenantHealth HAS NO CACHING
+    Calling evaluateTenantHealth() on every dashboard request will issue a
+    DB query each time.  For high-traffic admin dashboards, a time-based
+    cache (e.g., 30s TTL) would reduce load.  Not yet implemented.
+
+8.  NO ALERT ACKNOWLEDGMENT MODEL
+    GovernanceAlerts are generated fresh every call — there is no notion of
+    "acknowledged" or "suppressed" alerts.  The same GOV-01 alert can fire
+    on every evaluation until the backlog is resolved.  A future governance
+    inbox model could track acknowledgment.
+
+9.  SCHEDULER HEALTH IS INFERRED, NOT DIRECT
+    scheduler_backlog_detected fires when delayBacklogCount > threshold.
+    This is an indirect signal — the scheduler might be running fine but the
+    system is simply under high load.  The scheduler does not yet expose a
+    direct health endpoint or heartbeat.  A direct scheduler liveness check
+    would be more precise.
+
+
+READINESS ASSESSMENT — BEFORE ENTERPRISE SCALING PHASE
+────────────────────────────────────────────────────────
+
+READY (P6-C provides):
+  ✓ Tenant-scoped operational metrics with correct bucket semantics
+  ✓ Stuck execution detection (3 independent rules, deterministic)
+  ✓ Automation storm detection (rolling window, clear thresholds)
+  ✓ Governance alert model (6 stable codes, warning/critical tiers)
+  ✓ Per-dimension health indicators
+  ✓ Overall health severity (healthy/warning/degraded/critical)
+  ✓ Full observability event coverage (5 new actions)
+  ✓ READ-ONLY query layer — safe for dashboards, zero DB side effects
+  ✓ Pure model layer — all governance logic is unit-testable
+  ✓ 69 tests, 656 total passing, 0 TypeScript errors
+
+NOT YET READY (gaps for enterprise scaling):
+  ✗ No platform-wide aggregate health (cross-workspace rollup)
+  ✗ No per-workflow metric breakdown
+  ✗ No historical snapshots / trend data
+  ✗ estimatedNotificationFanout unpopulated
+  ✗ No alert acknowledgment / suppression model
+  ✗ No query caching for high-frequency dashboard use
+  ✗ No HTTP API exposing these metrics (endpoints not yet wired)
+  ✗ No frontend dashboard consuming these metrics
+
+SUGGESTED NEXT STEPS:
+  • P6-D: Wire governance functions into Express routes:
+      GET /api/governance/health             → evaluateTenantHealth()
+      GET /api/governance/metrics            → computeOperationalMetrics()
+      GET /api/governance/stuck              → detectStuckExecutions()
+      GET /api/super-admin/platform/health   → cross-workspace rollup
+  • P6-E: Frontend governance dashboard (health indicators, alert list)
+  • P7-A: Historical health snapshots (governance_snapshots table + trend charts)
+  • P7-B: Per-workflow metric breakdown (computeWorkflowLevelMetrics)

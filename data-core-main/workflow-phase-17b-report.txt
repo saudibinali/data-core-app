@@ -1,0 +1,139 @@
+================================================================================
+WORKFLOW PHASE 17-B — Custom Permission Assignment
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P17-B only — do NOT start P17-C)
+
+================================================================================
+1) PERMISSION OVERRIDE MODEL
+================================================================================
+Table: platform_user_permission_overrides
+Migration: scripts/apply-p17b-platform-permission-overrides.cjs
+
+Fields:
+  id, platform_user_id (FK users, platform only workspaceId IS NULL)
+  permission_code (platform catalog only)
+  effect: grant | deny
+  reason (required), created_by, updated_by
+  removed_at, removed_by, remove_reason (soft remove — no hard delete without audit)
+  created_at, updated_at
+
+Constraints:
+  UNIQUE (platform_user_id, permission_code) WHERE removed_at IS NULL
+
+================================================================================
+2) EFFECTIVE PERMISSION RESOLVER
+================================================================================
+Library: artifacts/api-server/src/lib/platform-effective-permissions.ts
+
+resolvePlatformUserEffectivePermissions(platformUserId):
+  1. Load platform user (workspaceId IS NULL)
+  2. rolePermissions from role matrix
+  3. Apply grant overrides (add)
+  4. Apply deny overrides (remove) — deny wins
+  5. root_platform_owner / isRootOwner: full catalog, overrides ignored, restrictedByProtection=true
+
+Returns: rolePermissions[], grantedOverrides[], deniedOverrides[],
+         effectivePermissions[], restrictedByProtection
+
+Wiring (documented):
+  - requirePlatformPermission / requireAnyPlatformPermission → actor effective set (cached on req)
+  - GET /platform/me → effectivePermissions[] from resolver
+  - NOT wired: workspace-scoped member RBAC (unchanged)
+
+================================================================================
+3) PROTECTION RULES
+================================================================================
+Library: artifacts/api-server/src/lib/platform-permission-override-policy.ts
+
+  - No self permission modification
+  - Non-root cannot modify root/protected user overrides
+  - Self-escalation blocked for platform.users.* and platform.permissions.*
+  - platform_admin cannot grant permissions they lack (effective set)
+  - Root-only grant/deny of sensitive permissions (disable, reactivate, role.update,
+    permissions.update, workspaceAccess.update, subscriptions.status.change)
+  - Last active platform owner: critical permissions cannot be denied
+  - Unknown / tenant / workspace permission codes rejected
+  - Reason min 10 characters required
+
+================================================================================
+4) PERMISSIONS ADDED (50 total platform codes)
+================================================================================
+  - platform.permissions.read (NEW)
+  - platform.permissions.update (NEW, root-only in role matrix)
+
+Role matrix (partial adjustment — not full redesign):
+  - root_platform_owner: all 50
+  - platform_admin: 49 (all except platform.permissions.update)
+  - support/sales/finance/auditor/read_only: +platform.permissions.read (catalog)
+  - workspace_support: unchanged (no platform.permissions.*)
+
+================================================================================
+5) BACKEND APIs
+================================================================================
+  GET  /platform/permissions/catalog
+  GET  /platform/users/:userId/permissions
+  PUT  /platform/users/:userId/permissions/overrides (bulk replace, reason required)
+  PATCH /platform/users/:userId/permissions/overrides/:permissionCode
+  DELETE /platform/users/:userId/permissions/overrides/:permissionCode (soft remove + audit)
+
+Not implemented: tenant/workspace assignment, role matrix redesign, password/MFA/SSO
+
+================================================================================
+6) FRONTEND — Custom Permissions Section
+================================================================================
+Component: artifacts/ops-platform/src/components/platform-users/CustomPermissionsSection.tsx
+Embedded in Platform User detail (super-admin-platform-users.tsx)
+
+Features:
+  - Permission catalog list with search/filter
+  - Badges: Role, Grant, Deny, Effective/Denied
+  - Grant / Deny / Clear Override (reason required)
+  - Gated: platform.permissions.read / platform.permissions.update
+  - Root/protected users: read-only notice (immutable)
+
+Hooks: artifacts/ops-platform/src/lib/platform-user-permissions-hooks.ts
+
+================================================================================
+7) AUDIT EVENTS
+================================================================================
+  - platform_permission_override_granted
+  - platform_permission_override_denied
+  - platform_permission_override_removed
+  - platform_permission_overrides_bulk_updated
+  - platform_permission_change_blocked
+
+Metadata: actorId, targetPlatformUserId, permissionCode, effect, previousEffect,
+          nextEffect, reason, timestamp
+
+================================================================================
+8) SAFETY GUARANTEES (all true)
+================================================================================
+PLATFORM_PERMISSION_ASSIGNMENT_SAFETY_CONTRACT — all 14 flags true
+
+================================================================================
+9) TEST RESULTS
+================================================================================
+api-server:
+  platform-effective-permissions.test.ts — passed
+  platform-permission-override-policy.test.ts — passed
+  platform-permissions.test.ts — passed (counts updated to 50 / platform_admin 49)
+
+ops-platform:
+  phase-17b-platform-permission-assignment.test.ts — passed
+
+================================================================================
+10) LIMITATIONS LEFT FOR P17-C (NOT STARTED)
+================================================================================
+Next phase P17-C: Super Admin Protection Policies
+
+Also out of scope:
+  - Full role matrix redesign
+  - Tenant/workspace custom permissions
+  - Invitation email, password/MFA/SSO
+  - platform_admin override mutation (root only for platform.permissions.update)
+  - Frontend effective permissions for non-/platform/me clients (use server /platform/me)
+
+================================================================================
+END PHASE 17-B REPORT
+================================================================================

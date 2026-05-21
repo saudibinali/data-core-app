@@ -1,0 +1,151 @@
+================================================================================
+WORKFLOW PHASE 18-A — Workspace HR Architecture Consolidation Decisions
+================================================================================
+Date: 2026-05-19
+Mode: DECISIONS / DOCUMENTATION ONLY (no implementation)
+
+================================================================================
+SUMMARY
+================================================================================
+P18-A locks the Workspace/HR architecture after discovery (Phase 17 closure
+and workspace-hr-discovery reports). The goal is to prevent duplicate tables,
+APIs, and UX paths before expanding toward a larger ERP.
+
+Core stance: EXTEND existing canonical models; do NOT build parallel HR stacks.
+
+================================================================================
+FILES CREATED
+================================================================================
+1. p18-a-workspace-hr-architecture-decisions.md   — ADR (sections A–K)
+2. p18-a-canonical-model-map.md                   — Concept → table map
+3. p18-a-do-not-duplicate-list.md                 — Hard prohibitions
+4. p18-a-future-work-backlog.md                   — Critical / Important / Later
+5. workflow-phase-18a-report.txt                  — This report
+
+Inputs reviewed (read-only):
+  workspace-current-architecture-report.md
+  hr-database-inventory-report.md
+  hr-module-inventory-report.md
+  workspace-hr-api-inventory-report.md
+  workspace-hr-frontend-inventory-report.md
+  workspace-hr-duplication-conflict-risk-report.md
+  workspace-hr-redesign-readiness-report.md
+
+================================================================================
+FINAL ARCHITECTURE DECISIONS (A–K)
+================================================================================
+A. Workspace boundary
+   - workspace_id is client data isolation; no tenant_id on HR tables
+   - tenantId in platform APIs = workspaces.id (alias); no relationship change now
+
+B. Person model
+   - employees = HR source of truth; users = login/RBAC only
+   - employees.user_id optional; no employee-in-users; no silent user-from-employee
+
+C. Organization model
+   - hr_org_units = canonical HR org; departments = legacy (users/RBAC)
+   - no new HR on departments; no delete departments now
+
+D. Leave model
+   - leave_requests = future canonical; hr_employee_leaves = legacy
+   - no new APIs on legacy; no production leave_requests until migration drift fixed
+
+E. Employee status
+   - hr_employee_statuses = catalog; employees.status = text (unenforced)
+   - no new status logic until FK/enforced code phase
+
+F. Contracts / types
+   - hr_contract_types = catalog; contract_type on contracts = text
+   - no new contract-type logic until alignment phase
+
+G. Payroll / attendance
+   - extend existing; no rebuild; no duplicate tables
+
+H. HR services / forms / workflows
+   - hr_services + forms + workflows = integration path; no parallel self-service
+
+I. Permissions
+   - no HR fine-grained permissions now; stabilize models first
+   - self_service.view gap = known issue only (no fix in P18-A)
+
+J. API structure
+   - hr.ts monolith acknowledged; no split until tests + refactor plan
+
+K. Future ERP
+   - HR first domain under workspace_id; Finance/etc. reuse same boundary
+   - no new tenant/workspace model per domain
+
+================================================================================
+CANONICAL MODELS (SHORT LIST)
+================================================================================
+  workspaces.id          — workspace / tenant boundary
+  employees              — HR person
+  users                  — login account (workspace_id)
+  hr_org_units           — HR organization tree
+  hr_job_titles, hr_job_grades, hr_positions, hr_work_locations
+  hr_employee_statuses, hr_employment_types, hr_contract_types, …
+  hr_leave_balances      — leave balances (table)
+  leave_requests         — leave lifecycle (target; blocked until migration)
+  hr_payroll_*, hr_attendance_* — extend in place
+  hr_services            — HR service catalog
+  form_definitions, workflow_definitions — integrations
+
+================================================================================
+LEGACY / OVERLAP (MAINTAIN, DO NOT EXTEND)
+================================================================================
+  departments, user_departments     — user/RBAC org
+  hr_employee_leaves                — simple leave CRUD
+  employees.status (text)           — vs hr_employee_statuses catalog
+  hr_employee_contracts.contract_type (text) — vs hr_contract_types
+  employees.leave_balances (jsonb)  — vs hr_leave_balances
+  employees.position (free text)    — vs hr_positions / job titles
+  hr.ts monolith                    — maintainability debt, split later
+
+================================================================================
+KNOWN RISKS (UNCHANGED; MITIGATION IN BACKLOG)
+================================================================================
+1. Schema–migration drift for leave_requests (and verify other Drizzle-only tables)
+2. Dual org: departments vs hr_org_units
+3. Dual leave APIs and UIs
+4. employees vs users data desync
+5. No HR automated test baseline
+6. Coarse hr.view / hr.manage permissions
+7. self_service.view missing from permission registry API
+8. Entitlement module names without implementation (recruitment, LMS, …)
+
+================================================================================
+DO-NOT-DUPLICATE RULES (SUMMARY)
+================================================================================
+See p18-a-do-not-duplicate-list.md. Highlights:
+  - No new employees, departments-for-HR, org_v2, leave_v2, payroll/attendance tables
+  - No new users/workspace/tenant models for HR
+  - No new leave APIs on hr_employee_leaves
+  - No parallel self-service or permission system
+  - No hr.ts refactor in P18-A
+
+================================================================================
+RECOMMENDED NEXT PHASE
+================================================================================
+P18-B — Workspace HR Migration Drift & Baseline Tests Audit
+
+Scope (not started):
+  - Compare applied DB vs Drizzle schema (especially leave_requests)
+  - Document migration/bridge plan inputs for leave
+  - Define minimal HR test baseline scope
+  - Decision record for self_service.view (implement in later permissions phase)
+
+P18-B is NOT started by this phase.
+
+================================================================================
+CONFIRMATION
+================================================================================
+- No code changed
+- No migrations added
+- No APIs added
+- No permissions added
+- No refactor performed
+- Decisions / documentation only
+
+================================================================================
+PHASE 18-A STATUS: COMPLETE
+================================================================================

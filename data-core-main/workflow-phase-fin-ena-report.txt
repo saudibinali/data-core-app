@@ -1,0 +1,29 @@
+P-FIN-ENA WORKFLOW PHASE REPORT
+================================
+Date: 2026-05-20
+Phase: P-FIN-ENA — Finance Workspace Activation
+Status: COMPLETE
+
+OBJECTIVES
+----------
+Unify finance module toggle + COA seed + fiscal year for tenant go-live (prepare-only).
+
+DELIVERABLES
+------------
+  - finance-workspace-activation-service.ts
+  - GET/POST finance/workspace/activation|activate
+  - modules.ts → moduleGovernanceService
+  - finance-dashboard.tsx activation wizard
+  - p-fin-workspace-activation.md
+
+EXIT CRITERIA
+-------------
+[x] Single activation path for admins
+[x] Dependency hr → finance enforced
+[x] Checklist API + UI
+[x] Smoke tests pass
+
+DEFERRED
+--------
+- GL posting
+- Legacy payroll bulk migration

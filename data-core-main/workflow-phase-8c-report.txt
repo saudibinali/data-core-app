@@ -1,0 +1,282 @@
+WORKFLOW PHASE 8-C REPORT
+Runtime-Weighted Operational Intelligence & Historical Correlation Foundations
+=============================================================================
+
+Date:        2026-05-14
+Phase:       P8-C (follows P8-A topology, P8-B dependency)
+Status:      COMPLETE — all tests green
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-C introduces the operational correlation layer: a pure, deterministic engine
+that blends P8-B static dependency analysis with aggregated historical governance
+snapshot data to produce runtime-weighted operational intelligence for each
+workflow definition.
+
+Core problem being solved: static structural complexity scores (P8-B) describe
+what *could* go wrong — but they have no awareness of what *has* been going wrong
+historically in the workspace.  A workflow that structurally looks simple may be
+running in a workspace with chronic approval backlogs, high error rates, and
+frequent alert storms.  Conversely, a structurally complex workflow may be
+operating in a workspace that is historically very healthy.
+
+P8-C bridges that gap by correlating the two information planes.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/lib/workflows/operational-correlation.ts  (~360 lines)
+  Pure correlation engine.  No DB, no async, no side effects.
+  Single public entry point:
+    computeOperationalCorrelation(
+      depResult:  WorkflowDependencyResult,   // P8-B output
+      analytics:  TopologyAnalytics,           // P8-A analytics
+      historical: HistoricalOperationalData,   // aggregated from governance rollups
+      context?:   CorrelationContext,          // optional for observability
+    ) → WorkflowOperationalCorrelationResult
+
+artifacts/api-server/src/lib/workflows/__tests__/operational-correlation.test.ts
+  T1–T10 test groups, 52 individual assertions.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MODIFIED FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+artifacts/api-server/src/routes/workflows.ts
+  • Added static import: extractWorkflowTopology, computeTopologyAnalytics
+  • Added static import: computeOperationalCorrelation, ZERO_HISTORICAL,
+    HistoricalOperationalData
+  • Added import: governanceSnapshotRollupsTable from @workspace/db
+  • Registered GET /workflows/:id/operational BEFORE the existing
+    GET /workflows/:id/dependency and GET /workflows/:id routes to prevent
+    the :id path segment from shadowing the "operational" segment.
+
+lib/api-spec/openapi.yaml
+  • New endpoint:    GET /workflows/{id}/operational
+  • New schemas (4): WorkflowOperationalCorrelation, OperationalFragilityIndex,
+                     WorkflowOperationalHistoricalSummary,
+                     WorkflowOperationalResponse
+
+Auto-generated (by `pnpm --filter @workspace/api-spec run codegen`):
+  lib/api-client-react/src/generated/  — new hook: useGetWorkflowOperational
+  lib/api-zod/src/generated/api.ts     — new Zod schemas for all 4 types
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. ENGINE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 Input: HistoricalOperationalData
+  Aggregated by the route handler from governance_snapshot_rollups
+  (last 7 days, hourly granularity, workspace-scoped):
+    snapshotCount      — total source records
+    avgErrorRate       — 0.0–1.0 (arithmetic mean of workflowErrorRate)
+    avgApprovalBacklog — raw approval execution count (mean)
+    avgDelayBacklog    — raw delay execution count (mean)
+    avgStuckCount      — raw stuck execution count (mean)
+    stormFrequency     — 0.0–1.0 (fraction of periods with alert storms)
+    chronicAlertCodes  — GOV-* codes appearing in > 50% of source records
+    dominantSeverity   — "healthy" | "warning" | "degraded" | "critical"
+
+  Fallback: ZERO_HISTORICAL sentinel used when no rollup rows exist.
+
+4.2 Pipeline stages (all pure, all deterministic):
+
+  Stage 1 — normalizeHistorical()
+    Raw counts → 0–1 pressure signals using reference maximums:
+      approvalBacklog:  norm = min(raw / 50, 1.0)
+      delayBacklog:     norm = min(raw / 50, 1.0)
+      stuckCount:       norm = min(raw / 20, 1.0)
+      errorRate/stormFrequency: already 0–1
+
+  Stage 2 — computePressures()
+    Five derived pressure metrics (all clamped to [0, 1]):
+
+    historicalErrorPressure   = norm.errorRate
+    historicalBacklogPressure = (norm.approvalBacklog + norm.delayBacklog) / 2
+    approvalLatencyPressure   = norm.approvalBacklog × analytics.approvalDensity × 3.0
+      (zero if workflow has no approval steps, regardless of workspace backlog)
+    delayDurationPressure     = norm.delayBacklog × analytics.delayDensity × 3.0
+      (zero if workflow has no delay steps)
+    executionFailurePressure  = norm.errorRate × 0.7 + norm.stuckCount × 0.3
+
+  Stage 3 — computeRuntimeWeightedComplexity()
+    Blends static structural complexity with historical signals:
+      score = structuralComplexity × 0.40   (max 40 points)
+            + historicalErrorPressure × 25   (max 25 points)
+            + approvalLatencyPressure × 20   (max 20 points)
+            + delayDurationPressure × 10     (max 10 points)
+            + executionFailurePressure × 5   (max  5 points)
+      → capped at 100, rounded to integer
+    Falls back to structuralComplexity when snapshotCount = 0.
+
+  Stage 4 — classifyCorrelation()
+    2×2 matrix based on threshold 50 for both dimensions:
+      high structural + high runtime  → "structurally_and_operationally_complex"
+      high structural + low runtime   → "structurally_complex_operationally_stable"
+      low structural  + high runtime  → "structurally_simple_operationally_fragile"
+      low structural  + low runtime   → "structurally_simple_operationally_stable"
+
+  Stage 5 — detectHotspots()
+    Seven named chronic operational hotspot checks:
+      approval_backlog_concentration  norm.approvalBacklog > 0.30 AND approvalDensity > 0.15
+      delay_duration_concentration    norm.delayBacklog > 0.30 AND delayDensity > 0.15
+      execution_failure_corridor      errorRate > 0.10 AND bottleneckNodes.length > 0
+      chronic_stuck_pressure          norm.stuckCount > 0.20 AND convergenceNodes.length > 0
+      storm_history_risk              stormFrequency > 0.10 AND riskLevel != "low"
+      chronic_alert_escalation        chronicAlertCodes.length >= 2
+      convergence_under_load          convergenceNodes.length > 0 AND backlogPressure > 0.20
+    All checks short-circuit to empty when snapshotCount = 0.
+
+  Stage 6 — computeFragilityIndexInternal()
+    structuralFragility  = structuralComplexity / 100
+    runtimeFragility     = mean(historicalErrorPressure, approvalLatencyPressure,
+                                delayDurationPressure)
+    chronicity           = dominantSeverity × 0.5 + chronicCodeFactor × 0.3
+                           + stormFrequency × 0.2
+      (dominantSeverity mapped: critical=1.0, degraded=0.7, warning=0.4, healthy=0.1)
+    operationalConfidence: low (<10 snapshots), moderate (<100), high (≥100)
+    fragilityLevel (based on runtimeWeightedComplexity):
+      ≥75 → critical, ≥50 → high, ≥25 → moderate, <25 → low
+    indicators: named frailty indicator codes for UI/alerting consumption
+
+4.3 Observability events (4 per call, emitted via req.log):
+    workflow_operational_correlation_computed   (always)
+    workflow_runtime_bottleneck_detected        (when bottleneckNodes.length > 0 AND history)
+    workflow_chronic_hotspot_detected           (when hotspots.length > 0)
+    workflow_fragility_index_computed           (always)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. API ENDPOINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /api/workflows/:id/operational
+  Auth:        requireAuth + requirePermission("workflow.view")
+  Response:    WorkflowOperationalResponse
+
+  {
+    workflowId:   number,
+    workflowName: string,
+    stepCount:    number,
+    correlation: {
+      structuralComplexity:        number,   // 0-100 (P8-B)
+      historicalErrorPressure:     number,   // 0-1
+      historicalBacklogPressure:   number,   // 0-1
+      approvalLatencyPressure:     number,   // 0-1
+      delayDurationPressure:       number,   // 0-1
+      executionFailurePressure:    number,   // 0-1
+      chronicOperationalHotspots:  string[],
+      runtimeWeightedComplexity:   number,   // 0-100 integer
+      correlationClassification:   string,   // enum (4 values)
+    },
+    fragility: {
+      level:                 "low" | "moderate" | "high" | "critical",
+      structuralFragility:   number,   // 0-1
+      runtimeFragility:      number,   // 0-1
+      chronicity:            number,   // 0-1
+      operationalConfidence: "low" | "moderate" | "high",
+      indicators:            string[],
+    },
+    historical: {
+      snapshotCount:    number,
+      dominantSeverity: string,
+      windowDays:       7,
+    }
+  }
+
+  Data strategy:
+    1. Query governance_snapshot_rollups WHERE granularity='hourly'
+       AND bucket_start >= NOW() - 7d, limit 200 rows
+    2. Aggregate: totalSnapshotCount, avgErrorRate, avgApprovalBacklog,
+       avgDelayBacklog, avgStuckCount, avgStormFrequency,
+       union of chronicAlertCodes, worstDominantSeverity
+    3. If rollups.length >= 1 → use aggregated historical data
+    4. If rollups.length = 0  → use ZERO_HISTORICAL sentinel
+       (engine falls back to pure structural analysis, confidence="low")
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. OPENAPI SCHEMAS (4 new)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkflowOperationalCorrelation    — 9 properties (5 pressure metrics + hotspots + rwc + classification)
+OperationalFragilityIndex         — 6 properties (level, structuralFragility, runtimeFragility,
+                                                    chronicity, operationalConfidence, indicators)
+WorkflowOperationalHistoricalSummary — 3 properties (snapshotCount, dominantSeverity, windowDays)
+WorkflowOperationalResponse       — 5 properties (workflowId, workflowName, stepCount,
+                                                    correlation, fragility, historical)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P8-C test groups:
+  T1  runtime-weighted bottleneck scoring deterministic     (5 assertions)
+  T2  historical hotspot detection stable                   (6 assertions)
+  T3  structural vs operational comparison classification   (4 assertions)
+  T4  approval latency pressure calculation                 (4 assertions)
+  T5  delay duration pressure calculation                   (4 assertions)
+  T6  runtimeWeightedComplexity normalization               (6 assertions)
+  T7  fragility index deterministic                         (9 assertions)
+  T8  historical correlation serialization stable           (5 assertions)
+  T9  no live runtime dependency required                   (5 assertions)
+  T10 correlation engine remains read-only                  (4 assertions — via coverage inspection)
+
+Full test suite result (21 test files):
+  Tests:      1238 passed (1238)
+  Test Files: 21 passed (21)
+  Duration:   ~8.3s
+
+Cumulative test counts by phase:
+  P8-A (topology)      +45  →   total after P8-A:  ~1140 (baseline + 45)
+  P8-B (dependency)    +50  →   total after P8-B:   1186
+  P8-C (correlation)   +52  →   TOTAL:              1238
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SAFETY INVARIANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • READ-ONLY: engine never mutates governance history, workflow definitions, or DB
+  • No live runtime coupling: never triggers execution, never invokes scheduler
+  • Pure + deterministic: identical inputs always produce identical outputs
+  • Input mutation guard: historical object is never mutated by the engine (T10)
+  • Graceful degradation: ZERO_HISTORICAL → pure structural analysis (no crash)
+  • Overflow protection: all normalized values clamped to [0, 1]; score capped at 100
+  • JSON-safe: result has no circular references, round-trips through JSON losslessly
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. PHASE PROGRESSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  P8-A  ✅  GET /workflows/:id/topology      — structural topology graph
+  P8-B  ✅  GET /workflows/:id/dependency    — static dependency + execution pressure
+  P8-C  ✅  GET /workflows/:id/operational   — runtime-weighted historical correlation
+
+  Combined P8 intelligence stack per workflow:
+    topology   → structural graph (nodes, edges, cycles, depth)
+    dependency → static risk (bottlenecks, convergence, approval/delay density)
+    operational→ runtime-weighted (historical error rate, backlog, stuck, storm history)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. POTENTIAL NEXT STEPS (P8-D and beyond)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • P8-D: Workflow-level trend projection — forecast future runtimeWeightedComplexity
+    based on historical trajectory (requires time-series rollup queries)
+  • P8-E: Cross-workflow comparative scoring — rank workflows within a workspace
+    by runtimeWeightedComplexity for a heat-map / leaderboard view
+  • P8-F: Proactive alert surfacing — emit a GOV-* code when a workflow's
+    runtimeWeightedComplexity crosses a threshold (integration with P7 governance)
+  • Frontend: WorkflowIntelligencePanel embedding topology + dependency + operational
+    scores in the workflow detail page

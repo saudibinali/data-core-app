@@ -1,0 +1,343 @@
+ARCHITECTURE REPORT — Ticket 07: employee.created Migration to appEventBus
+==========================================================================
+Date:    2026-05-13
+Status:  ✅ COMPLETE — TypeScript clean, server running, zero duplicates
+Scope:   Migrate employee.created flow from legacy eventDispatcher to appEventBus.
+         No schema changes.  No UI behaviour changes.  No other event flows touched.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FLOW BEFORE MIGRATION (pre-Ticket 07)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  POST /admin/users (admin.ts)
+    │
+    └─► eventDispatcher.dispatch(EVENTS.EMPLOYEE_CREATED, {
+              event:       "employee.created",
+              module:      "users",
+              workspaceId: req.workspaceId,
+              triggeredBy: req.userId,
+              data: { employeeId, employeeNumber, departmentId, role }
+          })
+              │
+              ├─► workspace_event_logs (DB write)           ✅
+              ├─► WorkflowEngine (workflow triggers)        ✅
+              └─► notifications.ts EMPLOYEE_CREATED listener
+                      │  (fetches all active workspace users,
+                      │   filters to admin/super_admin, excludes actor)
+                      └─► notifyUsers(adminIds, "employee_created",
+                              "New Employee Added", "تمت إضافة موظف جديد",
+                              "Employee X has been created", "...", "/users")
+                                  │
+                                  └─► db.insert(notificationsTable)   ✅
+                                      (titleAr/messageAr/link silently dropped
+                                       by Drizzle — no such columns in schema)
+                                  ✗   NO SSE push (emitToUser not called)
+
+  appEventBus:        NOT involved — zero bus listeners triggered
+  activity.ts:        NOT triggered — no activity log written for employee creation
+  notifications-bus:  NOT triggered — awaiting emitter
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FLOW AFTER MIGRATION (Ticket 07)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  POST /admin/users (admin.ts)
+    │
+    └─► appEventBus.emit(EVENT_TYPES.EMPLOYEE_CREATED, {
+              type:      "employee.created",
+              module:    "users",
+              workspace: { workspaceId },
+              actor:     { userId, role },
+              metadata:  { idempotencyKey: "employee-created-<userId>" },
+              data: {
+                  employeeUserId:  user.id,
+                  employeeNumber:  user.employeeNumber,
+                  fullName:        user.fullName,
+                  role:            user.role,
+                  departmentId:    user.departmentId ?? null,
+                  email:           user.email ?? null,
+                  position:        user.position ?? null,
+                  isDirectCreate:  true,
+              }
+          })
+              │
+              ├─► activity.ts EMPLOYEE_CREATED listener           ✅ NEW
+              │       → db.insert(activityLogsTable, {
+              │             action:   "employee_created",
+              │             ticketId: null,
+              │             userId:   employeeUserId,
+              │             metadata: "FullName (EMP001)"
+              │         })
+              │
+              ├─► notifications-bus.ts EMPLOYEE_CREATED listener  ✅ ACTIVE
+              │       → SELECT workspace admins (admin + super_admin, ≠ actor)
+              │       → db.insert(notificationsTable) for each admin
+              │             type:    "employee_created"
+              │             title:   "New Employee Added"
+              │             message: "Employee X has been created in the system"
+              │       → emitToUsers(adminIds, "notification")     ✅ NEW: SSE push
+              │
+              └─► bridge (subscribeToAll)                          ✅
+                      │
+                      └─► eventDispatcher.dispatch({
+                              event:       "employee.created",
+                              module:      "users",
+                              workspaceId: ...,
+                              triggeredBy: ...,
+                              data: { ...payload, _busEventId, _busCorrelationId }
+                          })
+                              │
+                              ├─► workspace_event_logs (DB write)  ✅ preserved
+                              ├─► WorkflowEngine                   ✅ preserved
+                              └─► notifications.ts (legacy)         ✅ no-op
+                                  (EMPLOYEE_CREATED listener REMOVED — nothing fires)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  artifacts/api-server/src/routes/admin.ts
+    CHANGE:  Replaced eventDispatcher.dispatch(EVENTS.EMPLOYEE_CREATED) with
+             appEventBus.emit(EVENT_TYPES.EMPLOYEE_CREATED).
+    CHANGE:  Removed imports: eventDispatcher, EVENTS (from "../lib/events").
+    ADDED:   Imports: appEventBus (from "../lib/events/app-bus"), EVENT_TYPES.
+    CHANGE:  Payload expanded from { employeeId, employeeNumber, departmentId, role }
+             to full EmployeeCreatedPayload (adds fullName, email, position, isDirectCreate).
+    NOTE:    No behavioural changes to the HTTP request/response path.
+             Bus emit is fire-and-forget (void) — never blocks the 201 response.
+
+  artifacts/api-server/src/lib/events/listeners/notifications.ts
+    REMOVED: EMPLOYEE_CREATED eventDispatcher listener block (lines 66-100).
+    KEPT:    File shell with registerNotificationListeners() no-op export.
+    KEPT:    import { eventDispatcher } and import { logger } (for future use).
+    REASON:  index.ts imports this file by side-effect; keeping the file avoids
+             a source change to index.ts until a cleanup ticket removes it.
+
+  artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+    CHANGED: employee.created listener status: ⏳ READY → ✅ ACTIVE (T07)
+    CHANGED: Removed CRITICAL warning about legacy listener being active.
+    ADDED:   Behavioural delta documentation (SSE push is new; titleAr/etc. analysis).
+    CODE:    No code changes — listener was already correct from Stabilization.
+
+  artifacts/api-server/src/lib/events/listeners/activity.ts
+    CHANGED: employee.created listener status: ⏳ READY → ✅ ACTIVE (T07)
+    CHANGED: Status table header: "Stabilization" → "Ticket 07".
+    ADDED:   Note that activity logging for employee creation is NEW (did not exist
+             in the legacy path — no activity listener was registered on dispatcher).
+    CODE:    No code changes — listener was already correct from Stabilization.
+
+  artifacts/api-server/src/lib/events/index.ts
+    CHANGED: Comment for notifications.ts import — reflects it is now a no-op scaffold.
+    CHANGED: Legacy direct callers table — admin.ts marked ✅ MIGRATED.
+    CHANGED: Migration progress tables updated for employee.created.
+
+  artifacts/api-server/src/lib/events/bridge.ts
+    CHANGED: Legacy direct callers list — removed admin.ts from active list,
+             added "Migrated in Ticket 07" section.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LISTENERS ACTIVATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Listener                             │ Effect                    │ Was active?
+  ─────────────────────────────────────│───────────────────────────│─────────────
+  activity.ts → EMPLOYEE_CREATED       │ activity_logs row written │ ✗ NEW (additive)
+  notifications-bus.ts → EMPLOYEE_CREATED│ notifications + SSE push│ ✗ NEW (replaced)
+  bridge (wildcard) → all events       │ workspace_event_logs +    │ ✅ existing
+                                       │ WorkflowEngine            │
+
+  Listeners that were already active and are unchanged by this migration:
+    activity.ts:          APPROVAL_CREATED, APPROVAL_COMPLETED, TICKET_CREATED,
+                          TICKET_UPDATED, TICKET_STATUS_CHANGED
+    notifications-bus.ts: APPROVAL_CREATED, APPROVAL_COMPLETED, TICKET_CREATED,
+                          TICKET_UPDATED, TICKET_STATUS_CHANGED
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LEGACY LOGIC REMOVED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. notifications.ts — EMPLOYEE_CREATED eventDispatcher listener (34 lines)
+     Was:  eventDispatcher.on(EVENTS.EMPLOYEE_CREATED, async (payload) => { ... })
+           Fetched active workspace users, filtered to admin/super_admin,
+           called notifyUsers() which inserted to notificationsTable.
+     Now:  Removed.  Replaced by notifications-bus.ts EMPLOYEE_CREATED listener.
+
+  2. admin.ts — eventDispatcher.dispatch(EVENTS.EMPLOYEE_CREATED) call (8 lines)
+     Was:  void eventDispatcher.dispatch({ event: EVENTS.EMPLOYEE_CREATED, ... })
+           with partial payload { employeeId, employeeNumber, departmentId, role }.
+     Now:  Removed.  Replaced by appEventBus.emit(EVENT_TYPES.EMPLOYEE_CREATED, ...)
+           with full typed EmployeeCreatedPayload.
+
+  3. admin.ts — dead imports (2 lines)
+     Was:  import { eventDispatcher, EVENTS } from "../lib/events";
+     Now:  Removed.  Replaced by appEventBus + EVENT_TYPES imports.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DUPLICATE PREVENTION — HOW IT WAS ENSURED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Duplicate notifications:
+    PREVENTED by removing the legacy EMPLOYEE_CREATED listener from notifications.ts
+    in THE SAME COMMIT as adding appEventBus.emit() to admin.ts.  No window exists
+    where both paths are simultaneously active.
+
+  Duplicate workspace_event_logs:
+    PREVENTED by removing eventDispatcher.dispatch() from admin.ts in the same commit
+    as adding appEventBus.emit().  The bridge provides ONE dispatch call.
+    Had both calls coexisted, two workspace_event_logs rows would be written per creation.
+
+  Duplicate activity logs:
+    NOT applicable — no activity listener existed on eventDispatcher for EMPLOYEE_CREATED.
+    The new activity.ts listener is purely additive.
+
+  Circular event loops:
+    NOT possible — bridge is one-way: appEventBus → eventDispatcher.
+    notifications.ts EMPLOYEE_CREATED listener removed — no re-emission possible.
+    notifications-bus.ts listener only inserts to DB and calls emitToUser (SSE).
+    activity.ts listener only inserts to DB.  Neither calls appEventBus.emit().
+
+  IdempotencyGuard (in-memory dedup):
+    Both activity.ts and notifications-bus.ts have independent IdempotencyGuard
+    instances.  Each checks event.id (UUID) before processing.
+    Any retry of the same emit within the server's lifespan is deduplicated.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BEHAVIOURAL DELTA (user-visible changes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  IMPROVED: Workspace admins now receive real-time SSE push when a new employee
+            is created.  Previously, the notification badge only updated on next
+            poll (notifications.ts did not call emitToUsers).  The new
+            notifications-bus.ts listener calls emitToUsers() after the DB insert.
+
+  UNCHANGED: Notification type string "employee_created" — same as before.
+  UNCHANGED: Notification title "New Employee Added" — same as before.
+  UNCHANGED: Notification message format — same as before.
+  UNCHANGED: Recipient selection: workspace admins + super_admins, excluding actor.
+  UNCHANGED: Activity log shape — "employee_created" action, null ticketId.
+  UNCHANGED: HTTP response from POST /admin/users — 201 JSON unchanged.
+  UNCHANGED: Database schema — no schema migrations applied.
+  UNCHANGED: workspace_event_logs — still written via bridge → eventDispatcher.
+  UNCHANGED: WorkflowEngine — still triggered via bridge → eventDispatcher.
+
+  titleAr/messageAr/link: The legacy notifyUsers() call passed these fields but
+    the notificationsTable schema has no such columns — Drizzle silently dropped
+    them.  The new path does not pass them.  Net DB effect: identical.
+    No data migration is needed.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OWNERSHIP BOUNDARIES (canonical, post-Ticket 07)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Canonical event source:   admin.ts POST /admin/users
+                            (SOLE emitter of EMPLOYEE_CREATED to appEventBus)
+
+  Activity logging:         activity.ts
+                            (SOLE writer of "employee_created" activity_logs rows)
+
+  Notification creation:    notifications-bus.ts
+                            (SOLE writer of "employee_created" notification rows + SSE)
+
+  workspace_event_logs:     bridge → eventDispatcher
+                            (SOLE writer — no route writes directly to this table)
+
+  WorkflowEngine triggers:  bridge → eventDispatcher → engine.ts
+                            (unchanged — same trigger point as before)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COUPLING NOTES IN admin.ts (documented per requirement 11)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Documented (not refactored):
+
+  1. Direct usersTable insert in route handler:
+     admin.ts writes directly to usersTable without a service/repository layer.
+     The route owns DB access, validation, and business logic in one function.
+     Risk: business rule changes (e.g. max users per workspace) require editing
+     the route file.  Mitigation: extract to UserService in a future ticket.
+
+  2. workspaceInvitationsTable update (accept invitation on email match):
+     On user creation, if the email matches a pending invitation, it is marked
+     accepted.  This is done inline in the route.  No bus event is emitted for
+     this state change.  Risk: if invitation acceptance needs side effects (e.g.
+     audit log), they would need to be added here.
+
+  3. userDepartmentsTable write via syncUserDepartments():
+     Department assignment is a separate step after user insert.  If this step
+     fails, the user is created without department assignment (partial state).
+     No transaction wrapping the full insert + department sync.
+
+  These coupling points are acknowledged as pre-existing.  No refactor in T07 scope.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMAINING RISKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK-T07-01  notifications.ts still imported in index.ts (no-op scaffold).
+               Safe, but slightly misleading for developers reading index.ts.
+               Fix: remove import from index.ts in a cleanup ticket once it
+               is confirmed no new listeners will be added to this file.
+               Priority: LOW — cosmetic only.
+
+  RISK-T07-02  IdempotencyGuard is in-memory only.
+               Server restart clears the dedup state.  An event processed
+               before restart could be re-processed after.
+               Inherited risk from Stabilization — not introduced in T07.
+               Priority: MEDIUM — fix by persisting event IDs to DB with TTL.
+
+  RISK-T07-03  Admin query in notifications-bus.ts EMPLOYEE_CREATED listener
+               fetches ALL active workspace users (no LIMIT), then filters
+               in-application to admin/super_admin.  For large workspaces this
+               is a full table scan on users.  The legacy path had the same pattern.
+               Priority: LOW — optimize with a WHERE role IN ('admin','super_admin')
+               clause when workspace size becomes a concern.
+
+  RISK-T07-04  Invitation flow (POST /users sync on invitation click) does NOT
+               emit EMPLOYEE_CREATED to appEventBus.  Only direct creation via
+               POST /admin/users triggers the bus listeners.
+               Impact: invitation-based signups do NOT write activity_logs or
+               trigger workspace admin notifications.
+               Priority: MEDIUM — decide if invitation-flow users should trigger
+               the same listeners, then add the emit to the user sync route.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+READINESS FOR NEXT PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Fully migrated events (canonical bus, no legacy path active):
+    approval.created       ✅  (T04)
+    approval.completed     ✅  (T04)
+    ticket.created         ✅  (T06-A)  [via appEventBus in tickets.ts]
+    ticket.updated         ✅  (T06-B)
+    ticket.status_changed  ✅  (Stab.)
+    employee.created       ✅  (T07)   ← completed in this ticket
+
+  Ready (listeners exist, awaiting emitter in route):
+    form.submitted         ⏳  READY — listener in activity.ts + notifications-bus.ts
+                               Next: identify form submission route, add appEventBus.emit()
+
+  Legacy direct callers still on eventDispatcher (NOT bridged):
+    tickets.ts  POST /tickets:          TICKET_CREATED       [HIGH priority — T08 candidate]
+    tickets.ts  PATCH /tickets/:id:     TICKET_CLOSED/UPDATED [HIGH — same ticket]
+    forms.ts    POST /forms/:id/submit: dynamic event name    [LOW — needs registry]
+
+  Recommended next ticket: Migrate tickets.ts POST (TICKET_CREATED) to appEventBus.
+    Impact: activates activity.ts + notifications-bus.ts ticket.created listeners.
+    Effort: medium — payload construction from tickets schema.
+    IMPORTANT: remove the inline notification insert in tickets.ts POST (currently
+    writes "ticket_assigned" directly) at the same time as activating the bus listener.
+
+  Legacy cleanup ticket (low priority):
+    Remove import "./listeners/notifications" from index.ts.
+    (After confirming no new legacy listeners will be needed.)

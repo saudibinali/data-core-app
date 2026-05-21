@@ -1,0 +1,281 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-8c-report.txt
+- workflow-phase-8d-report.txt
+- workflow-phase-8e-report.txt
+خصوصًا:
+- operationalPriority
+- comparativeRiskScore
+- trendDirection
+- hotspot concentration
+- fragility index
+- governance alert infrastructure
+
+ثم نفّذ فقط:
+P8-F — Proactive Governance Signals & Advisory Intelligence Foundations
+
+ولا تنفّذ:
+- autonomous remediation
+- AI-generated advice
+- automatic execution blocking
+- self-healing systems
+- realtime streaming governance
+- predictive ML
+
+عنوان المهمة:
+WORKFLOW PHASE 8-F — Proactive Governance Signals & Advisory Intelligence Foundations
+
+المهمة الحالية:
+تحويل:
+passive operational intelligence
+
+إلى:
+proactive governance advisory system
+
+الهدف:
+تمكين:
+- early governance warnings
+- degradation escalation visibility
+- chronic operational advisories
+- workspace-level governance awareness
+- operator guidance readiness
+
+بطريقة:
+deterministic advisory intelligence engine
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- comparativeRiskScore
+- operationalPriority
+- trendDirection
+- hotspot concentration analytics
+- forecast engine
+- governance alerts
+
+حدّد:
+- أين النظام يكتفي بالتشخيص
+- أين proactive awareness مفقودة
+- أين operators يحتاجون advisory guidance
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE SIGNAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceSignal
+
+ليحتوي:
+- signalCode
+- severity
+- category
+- affectedWorkflowId
+- workspaceId
+- advisoryMessage
+- supportingIndicators
+- generatedAt
+- expiresAt
+
+مع:
+deterministic advisory semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SIGNAL GENERATION ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+generateGovernanceSignals()
+
+يولد signals مثل:
+- GOV-WORKFLOW-URGENT
+- GOV-WORKFLOW-CRITICAL
+- GOV-WORKFLOW-ESCALATING
+- GOV-HOTSPOT-CONCENTRATION
+- GOV-FRAGILITY-GROWTH
+- GOV-STORM-RISK-GROWTH
+
+اعتمد فقط على:
+existing deterministic intelligence layers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ADVISORY CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceAdvisoryLevel
+
+يحتوي:
+- informational
+- advisory
+- elevated
+- urgent
+- critical
+
+اعتمد على:
+- comparativeRiskScore
+- fragility severity
+- trend acceleration
+- hotspot recurrence
+- forecast degradation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SIGNAL DEDUPLICATION & STABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+امنع:
+- signal storms
+- duplicate advisories
+- oscillating alerts
+- noisy advisory churn
+
+أضف:
+- cooldown windows
+- deterministic deduplication
+- advisory stability rules
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ADVISORY MESSAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+human-readable deterministic advisories.
+
+أمثلة:
+- “Workflow ranked #1 in operational risk for 3 consecutive evaluations.”
+- “Critical degradation trend detected with increasing hotspot concentration.”
+- “Operational fragility increased from moderate to high within forecast window.”
+
+لكن:
+بدون AI-generated freeform text.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+governance signals
+
+داخل:
+- governance dashboards
+- operational consoles
+- workflow detail pages
+- comparative ranking panels
+
+لكن:
+بدون autonomous actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_signal_generated
+
+B)
+governance_signal_escalated
+
+C)
+governance_signal_deduplicated
+
+D)
+governance_signal_expired
+
+كلها تحتوي:
+- signalCode
+- workspaceId
+- workflowId
+- severity
+- advisoryLevel
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Governance advisory engine MUST:
+- remain advisory-only
+- never mutate workflows
+- never block executions
+- never trigger autonomous remediation
+- never invoke runtime execution
+
+أي:
+human-guidance governance فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+urgent governance signal generation
+
+T2:
+critical degradation escalation signal
+
+T3:
+signal deduplication stability
+
+T4:
+cooldown windows prevent advisory storms
+
+T5:
+fragility-growth advisory generation
+
+T6:
+hotspot concentration advisory generation
+
+T7:
+signal expiration handled correctly
+
+T8:
+advisory serialization stable
+
+T9:
+no runtime dependency required
+
+T10:
+advisory engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- AI-generated recommendations
+- autonomous remediation
+- automatic execution blocking
+- realtime governance streams
+- distributed advisory infrastructure
+- self-healing orchestration
+
+خلك:
+minimal deterministic proactive governance layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-8f-report.txt
+
+ويحتوي:
+- governance signal architecture
+- advisory generation semantics
+- deduplication strategy
+- advisory stability rules
+- governance integration points
+- observability additions
+- tests results
+- remaining proactive governance gaps
+- readiness assessment قبل autonomous governance research

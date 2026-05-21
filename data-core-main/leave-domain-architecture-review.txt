@@ -1,0 +1,897 @@
+LEAVE DOMAIN ARCHITECTURE REVIEW
+=================================
+Task:    LEAVE DOMAIN ARCHITECTURE REVIEW — Dedicated HR Leave Lifecycle Design
+Date:    2026-05-13
+Type:    ANALYSIS ONLY — No implementation performed
+Scope:   Full review of current leave handling, proposed dedicated Leave Domain
+         model, lifecycle, event taxonomy, integration strategy, and phased plan.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — CURRENT STATE ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── 1A. How leave requests work TODAY ─────────────────────────────────────────
+
+  Employee-facing path (self-service):
+    1. Employee opens the "Leave Request" HR service form (seeded in forms.ts).
+    2. Form submission → POST /forms/:id/submissions → form_submissions table.
+    3. appEventBus.emit(FORM_SUBMITTED) → bridge → eventDispatcher →
+       workspace_event_logs (event = "form.submitted", hint = "hr.form.submitted").
+    4. WorkflowEngine TIER 2 matches on "hr.form.submitted" → runs configured
+       workflow (notify manager → manager approval step → notify employee).
+    5. The approval step creates an approval record (approvalsTable) linked to
+       a ticket — but leave requests have NO ticket, so this step is broken or
+       creates a phantom ticket dependency.
+    6. No leave_requests record is created.
+    7. No balance deduction happens.
+    8. No employee status change happens.
+
+  Manager-facing path (direct admin entry):
+    POST /hr/employees/:id/leaves → hrEmployeeLeavesTable
+    This is a direct admin insert.  No approval flow.  No event emitted.
+    Only logActivity() is called (action: "leave_added").
+    The approvedBy column is populated at insert time (not after approval).
+
+  Result:
+    Two completely separate leave paths exist, disconnected from each other:
+      Path A: form → form_submissions → generic workflow (no domain model)
+      Path B: admin insert → hrEmployeeLeavesTable (no approval, no events)
+
+── 1B. Existing database infrastructure (what IS built) ──────────────────────
+
+  hr_employee_leaves (hrEmployeeLeavesTable)
+    • employeeId, leaveType, startDate, endDate, daysCount
+    • status: pending | approved | rejected | cancelled
+    • approvedBy, approvedAt, createdBy
+    • reason, notes
+    ISSUE: No FK to form_submissions. No FK to approvals. No FK to leave_policies.
+    ISSUE: approvedBy is set at insert time by admin — not after a real approval.
+    ISSUE: Not used by the self-service form path at all.
+    ASSESSMENT: Partially correct schema, but isolated from the rest of the system.
+
+  hr_leave_policies (hrLeavePoliciesTable)
+    • code, name, leaveType, annualDays, accrualType
+    • carryOver, maxCarryOverDays, paid, requiresApproval
+    ISSUE: Not linked from hr_employee_leaves (no leavePolicyId FK there).
+    ISSUE: requiresApproval flag exists but nothing reads or enforces it.
+    ASSESSMENT: Correct conceptual structure; not wired into any flow.
+
+  hr_leave_balances (hrLeaveBalancesTable)
+    • employeeId, leavePolicyId, leaveType, year
+    • entitled, used, pending, carriedForward, manualAdjustment (all text/decimal)
+    • uniqueIndex on (employeeId, leavePolicyId, year)
+    ISSUE: Nothing reads or writes this table in any leave flow.
+    ISSUE: No API endpoint exposes balances to employees or managers.
+    ISSUE: "pending" column exists but is never incremented when a request is made.
+    ASSESSMENT: Correct schema design; completely dormant.
+
+  employees.leaveBalances (jsonb column)
+    A legacy unstructured JSON blob on the employees table.
+    ISSUE: Duplicates hrLeaveBalancesTable intent without the relational structure.
+    ISSUE: No defined schema for this JSON.
+    ASSESSMENT: Should be deprecated in favor of hrLeaveBalancesTable.
+
+  hr_attendance (hrAttendanceTable)
+    • Daily records: status = on_leave | present | absent | late | etc.
+    • leaveId column referenced (integer) — references hrEmployeeLeavesTable.id
+    ISSUE: leaveId is the intended FK from attendance to leave records.
+    ASSESSMENT: The attendance integration point exists in schema; not wired up.
+
+  hr_work_calendars + hr_calendar_holidays
+    Work calendar and public holiday definitions exist.
+    These are needed for accurate business-day counting in leave requests.
+    ASSESSMENT: Infrastructure ready; leave engine must consume it.
+
+  hr_payroll_runs + hr_payslips
+    Payroll infrastructure exists.
+    Leave deductions (unpaid leave) would affect payslip calculations.
+    ASSESSMENT: Integration point exists; no leave→payroll link today.
+
+── 1C. Existing event infrastructure ─────────────────────────────────────────
+
+  EVENT_TYPES.LEAVE_REQUESTED ("leave.requested") — EXISTS, never emitted
+    LeaveRequestedPayload: {
+      leaveRequestId: number,     ← requires a leave_requests record
+      employeeUserId: number,
+      leaveType: string,
+      startDate: string,
+      endDate: string,
+      daysRequested: number,
+      departmentId?: number | null,
+      employeeNote?: string,
+    }
+
+  EVENT_TYPES.LEAVE_APPROVED — DOES NOT EXIST
+  EVENT_TYPES.LEAVE_REJECTED — DOES NOT EXIST
+  EVENT_TYPES.LEAVE_CANCELLED — DOES NOT EXIST
+  EVENT_TYPES.LEAVE_BALANCE_ADJUSTED — DOES NOT EXIST
+
+  BUG-001 (documented): "leave.requested" registered twice in registry.ts —
+    once under module "hr" and once under module "forms" with different schemas.
+
+  ASSESSMENT: The event catalog acknowledges leave as a domain but has only 1
+  of the 5+ needed events, and that event is never published.
+
+── 1D. Approvals module coupling ─────────────────────────────────────────────
+
+  approvalsTable.ticketId: integer NOT NULL FK → tickets
+    The approvals table is EXCLUSIVELY ticket-scoped.
+    It CANNOT hold a leave request approval without a ticket.
+    Creating a phantom ticket for every leave request is architecturally wrong.
+
+  ASSESSMENT: If leave requests need the approvals module, either:
+    (a) generalize approvalsTable to support entityType + entityId polymorphism, or
+    (b) build a dedicated leave approval chain inside the leave domain.
+    Option (b) is recommended — leave approvals have domain-specific logic
+    (multi-level HR chain, coverage checks, balance enforcement).
+
+── 1E. Architecture problems documented ──────────────────────────────────────
+
+  ARCH-01: Two disconnected leave paths (form vs. admin direct) — no shared model.
+  ARCH-02: approvalsTable.ticketId NOT NULL → cannot approve leave requests natively.
+  ARCH-03: hrEmployeeLeavesTable has no FK to leave_policies → policy rules not enforced.
+  ARCH-04: hrLeaveBalancesTable exists but is never read or written by any code.
+  ARCH-05: employees.leaveBalances jsonb duplicates hrLeaveBalancesTable — redundant.
+  ARCH-06: leave.requested event exists in catalog but has zero publishers.
+  ARCH-07: LEAVE_APPROVED, LEAVE_REJECTED, LEAVE_CANCELLED events missing from catalog.
+  ARCH-08: BUG-001 — leave.requested registered twice in registry.ts.
+  ARCH-09: requiresApproval flag in hrLeavePoliciesTable is never enforced.
+  ARCH-10: hr_attendance.leaveId FK exists but is never populated by any leave flow.
+  ARCH-11: No conflict detection — overlapping leave requests not checked.
+  ARCH-12: No business-day calculation — daysCount must be caller-supplied.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — PROPOSED LEAVE DOMAIN MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── 2A. Core entity: leave_requests ───────────────────────────────────────────
+
+  This is the MISSING central table.  hrEmployeeLeavesTable is an admin-managed
+  audit log, not a request-lifecycle table.  A true leave domain needs:
+
+  leave_requests (proposed new table)
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ id                serial PK                                             │
+  │ workspaceId       integer FK → workspaces                               │
+  │ employeeId        integer FK → employees                                │
+  │ requestedByUserId integer FK → users (may differ from employee)         │
+  │ leavePolicyId     integer FK → hr_leave_policies (nullable)             │
+  │ leaveType         text  ("annual" | "sick" | "emergency" | ...)         │
+  │ startDate         date  NOT NULL                                         │
+  │ endDate           date  NOT NULL                                         │
+  │ daysRequested     numeric NOT NULL  (computed, stored for audit)         │
+  │ businessDaysCount numeric           (excl. weekends + public holidays)  │
+  │ status            text  ("draft" | "pending" | "approved" |             │
+  │                          "rejected" | "cancelled" | "withdrawn")        │
+  │ employeeNote      text  (reason submitted by employee)                  │
+  │ managerNote       text  (decision note from approver)                   │
+  │ attachmentUrls    jsonb (medical certs, supporting docs)                │
+  │ currentApproverId integer FK → users (who must act next)                │
+  │ approvedByUserId  integer FK → users (final approver)                   │
+  │ approvedAt        timestamp tz                                           │
+  │ rejectedByUserId  integer FK → users                                     │
+  │ rejectedAt        timestamp tz                                           │
+  │ cancelledAt       timestamp tz                                           │
+  │ requestNumber     text  (auto-generated, e.g. "LR-2026-0042")           │
+  │ sourceFormId      integer FK → form_definitions (nullable — if via form) │
+  │ sourceSubmissionId integer FK → form_submissions (nullable)              │
+  │ createdAt         timestamp tz defaultNow                                │
+  │ updatedAt         timestamp tz defaultNow                                │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  Key design decisions:
+    • leavePolicyId links to policy rules — system can enforce requiresApproval,
+      maxCarryOverDays, annualDays limits without manual checks.
+    • businessDaysCount stored at creation time (computed from work calendar).
+      Work calendar holidays are loaded once; result frozen in the record.
+    • sourceFormId / sourceSubmissionId allow tracing requests that originated
+      from the forms module (backward compatibility bridge).
+    • requestNumber gives employees a trackable reference.
+    • currentApproverId enables multi-level approval routing.
+
+── 2B. Existing tables to REUSE (not replace) ────────────────────────────────
+
+  hr_leave_policies   → link from leave_requests.leavePolicyId (add FK)
+  hr_leave_balances   → update pending/used columns on status transitions
+  hr_attendance       → write records on approved leave dates (via event listener)
+  hr_work_calendars   → read for business-day calculation
+  hr_calendar_holidays → read for holiday exclusion
+  hr_employee_leaves  → KEEP as admin-managed historical record;
+                         may be populated from leave_requests on approval
+                         (or deprecated and replaced by leave_requests)
+
+── 2C. Leave approval chain (dedicated, not approvalsTable) ──────────────────
+
+  Option A: Use existing approvalsTable
+    Requires: add entityType + entityId columns, make ticketId nullable.
+    Problem: the approvals module UI, queries, and API are all ticket-centric.
+    Adding polymorphism is a significant refactor of a stable module.
+    Risk: introducing leave concern into tickets domain.
+
+  Option B: Dedicated leave_approval_steps table (RECOMMENDED)
+    One row per approval step per leave request.
+
+  leave_approval_steps (proposed)
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ id                serial PK                                             │
+  │ leaveRequestId    integer FK → leave_requests NOT NULL                  │
+  │ stepOrder         integer NOT NULL (1, 2, 3...)                         │
+  │ approverUserId    integer FK → users NOT NULL                           │
+  │ approverRole      text ("direct_manager" | "hr_manager" | "department_head") │
+  │ status            text ("pending" | "approved" | "rejected" | "skipped")│
+  │ comment           text                                                  │
+  │ decidedAt         timestamp tz                                          │
+  │ notifiedAt        timestamp tz                                          │
+  │ timeoutAt         timestamp tz (SLA deadline)                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  Why Option B:
+    • Fully leave-domain-owned — no coupling to tickets or approvals module.
+    • Supports multi-level chains (direct manager → HR manager → director).
+    • The approvalChain can be configured per leave policy or per request.
+    • Timeout/SLA per step is independently trackable.
+    • Does NOT require changes to approvalsTable or the approvals module.
+
+── 2D. Relationship to existing leave tables ─────────────────────────────────
+
+  After leave domain is built:
+
+    form_submissions  ──(sourceSubmissionId)──▶ leave_requests
+                                                     │
+                              leavePolicyId ─────────┤
+                                                     │
+                       hr_leave_policies ◀───────────┘
+                                                     │
+                       hr_leave_balances ◀───────────┤ (pending/used update)
+                                                     │
+                       leave_approval_steps ◀────────┤ (approval chain)
+                                                     │
+                       hr_attendance ◀───────────────┘ (on approval, via event)
+                                                     │
+                       hr_employee_leaves ◀──────────┘ (populated on approval)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — LEAVE LIFECYCLE PROPOSAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │                         LEAVE REQUEST LIFECYCLE                           │
+  │                                                                           │
+  │  [draft] ──────────────────────────────────────────────────────────────▶ │
+  │     │                                                                     │
+  │  submit (POST /hr/leave-requests)                                         │
+  │     │                                                                     │
+  │     ▼                                                                     │
+  │  [pending] ◀──── balance check + conflict check (synchronous validation) │
+  │     │       ◀──── policy check (requiresApproval?)                        │
+  │     │                                                                     │
+  │     ├── requiresApproval = false ──────────────────────────────────────▶ │
+  │     │                                                                [auto-approved]
+  │     │                                                                     │
+  │     ├── requiresApproval = true ────────────────────────────────────────▶│
+  │     │   create leave_approval_steps rows                                  │
+  │     │   notify first approver                                             │
+  │     │                                                                     │
+  │     ▼                                                                     │
+  │  [pending_approval]                                                       │
+  │     │                                                                     │
+  │     ├── PATCH /hr/leave-requests/:id/approve ──────────────────────────▶ │
+  │     │   step.status = "approved"                                          │
+  │     │   if last step → leave_request.status = "approved"                 │
+  │     │   else → advance to next step (next approver)                      │
+  │     │                                                                     │
+  │  [approved] ──────────────────────────────────────────────────────────▶  │
+  │     │   update hr_leave_balances.pending → used                          │
+  │     │   update employees.status = "on_leave" (on start date, via job)    │
+  │     │   write hr_employee_leaves record                                   │
+  │     │   write hr_attendance records for each leave day                   │
+  │     │   emit leave.approved event                                         │
+  │     │   notify employee                                                   │
+  │     │                                                                     │
+  │     ├── PATCH /hr/leave-requests/:id/reject ───────────────────────────▶ │
+  │  [rejected]                                                               │
+  │     │   restore hr_leave_balances.pending decrement                       │
+  │     │   emit leave.rejected event                                         │
+  │     │   notify employee                                                   │
+  │     │                                                                     │
+  │     ├── PATCH /hr/leave-requests/:id/cancel ──────────────────────────▶  │
+  │  [cancelled]                                                              │
+  │     │   if was approved AND leave hasn't started: restore balance         │
+  │     │   delete or void hr_attendance records for future dates             │
+  │     │   emit leave.cancelled event                                        │
+  │     │                                                                     │
+  │     └── PATCH /hr/leave-requests/:id/withdraw ─────────────────────────▶ │
+  │  [withdrawn] (employee self-cancels a pending request)                    │
+  │     restore hr_leave_balances.pending decrement                           │
+  │     emit leave.withdrawn event                                            │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+  Status machine:
+    draft → pending → pending_approval → approved / rejected
+    pending_approval → cancelled (by HR/admin)
+    pending → withdrawn (by employee)
+    approved → cancelled (before start date, by employee or HR)
+    approved → revoked (by HR after start date — exceptional)
+
+  Synchronous validations (MUST happen before status changes to pending):
+    1. Balance check:
+       hrLeaveBalancesTable.entitled - used - pending >= daysRequested
+       Rejection: 422 "Insufficient leave balance" (immediate, before any DB write)
+    2. Conflict check:
+       No overlapping approved/pending leave for same employee in date range
+       Rejection: 409 "Overlapping leave request exists"
+    3. Policy eligibility:
+       Employee tenure vs. policy minimum service period (if configured)
+       Policy is active (hrLeavePoliciesTable.isActive = true)
+    4. Date validity:
+       startDate <= endDate, startDate >= today (or today + configurable notice period)
+       businessDaysCount > 0 (not entirely on weekends/holidays)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — EVENT TAXONOMY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  All leave events are published by the dedicated leave route (/hr/leave-requests).
+  They are NEVER emitted by forms.ts, approvals.ts, or workflow steps.
+
+  ── 4A. Events to ADD to EventTypeMap ─────────────────────────────────────
+
+  leave.requested (EXISTS — fix payload, add publisher)
+    Trigger: employee submits a leave request (POST /hr/leave-requests)
+    Payload:
+      leaveRequestId: number       ← FK to leave_requests.id
+      employeeUserId: number
+      leaveType: string
+      startDate: string            ← ISO date
+      endDate: string              ← ISO date
+      daysRequested: number        ← stored businessDaysCount
+      departmentId?: number | null
+      employeeNote?: string
+      requiresApproval: boolean    ← from policy
+      leavePolicyId?: number
+    Consumers:
+      activity.ts → "leave_requested" activity log
+      notifications-bus.ts → notify first approver
+      WorkflowEngine → trigger configured workflow (optional)
+
+  leave.approved (NEW)
+    Trigger: final approver approves (or auto-approved if requiresApproval=false)
+    Payload:
+      leaveRequestId: number
+      employeeUserId: number
+      leaveType: string
+      startDate: string
+      endDate: string
+      daysApproved: number
+      approvedByUserId: number
+    Consumers:
+      activity.ts → "leave_approved" activity log
+      notifications-bus.ts → notify employee
+      leave balance listener → update used, clear pending
+      attendance listener → write hr_attendance records
+
+  leave.rejected (NEW)
+    Trigger: any approver in chain rejects
+    Payload:
+      leaveRequestId: number
+      employeeUserId: number
+      leaveType: string
+      rejectedByUserId: number
+      rejectionReason?: string
+    Consumers:
+      activity.ts → "leave_rejected" log
+      notifications-bus.ts → notify employee
+      leave balance listener → restore pending decrement
+
+  leave.cancelled (NEW)
+    Trigger: HR/admin cancels an approved or pending request
+    Payload:
+      leaveRequestId: number
+      employeeUserId: number
+      leaveType: string
+      cancelledByUserId: number
+      wasApproved: boolean        ← determines if balance restoration needed
+    Consumers:
+      activity.ts → "leave_cancelled" log
+      notifications-bus.ts → notify employee
+      leave balance listener → conditional restore
+
+  leave.withdrawn (NEW)
+    Trigger: employee withdraws their own pending request (before approval)
+    Payload:
+      leaveRequestId: number
+      employeeUserId: number
+    Consumers:
+      activity.ts → "leave_withdrawn" log
+      leave balance listener → restore pending decrement
+
+  leave.balance_adjusted (NEW)
+    Trigger: HR manually adjusts a balance (PUT /hr/leave-balances/:id)
+    Payload:
+      employeeId: number
+      leaveType: string
+      year: number
+      adjustmentDays: number      ← signed (+/-)
+      reason: string
+      adjustedByUserId: number
+    Consumers:
+      activity.ts → "leave_balance_adjusted" log
+      notifications-bus.ts → optional notify employee
+
+  ── 4B. Events to KEEP unchanged ─────────────────────────────────────────
+
+  form.submitted → continues to work for the generic form path (Phase 1 bridge)
+    workflowEventHint = "hr.form.submitted" continues to route to HR workflows
+    until the forms-to-domain migration is complete (Phase 3)
+
+  ── 4C. Event ownership boundary (firm rule) ─────────────────────────────
+
+  Publisher       → Event(s) it owns
+  ────────────────────────────────────────────────────────────────────────────
+  /hr/leave-requests  leave.requested, leave.approved, leave.rejected,
+                      leave.cancelled, leave.withdrawn
+  /hr/leave-balances  leave.balance_adjusted
+  /hr/leave-requests  (does NOT emit: approval.created, form.submitted)
+  forms.ts            form.submitted only (no domain events)
+  approvals.ts        approval.created, approval.completed only (no leave events)
+
+  A leave approval decision does NOT emit approval.created/approval.completed.
+  The leave domain owns its approval lifecycle end-to-end.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — APPROVALS INTEGRATION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Decision: Dedicated leave approval chain (NOT approvalsTable)
+
+  Rationale:
+    1. approvalsTable.ticketId NOT NULL — cannot be reused without migration.
+    2. Leave approvals have domain-specific state: multi-step chain, SLA per step,
+       approver roles (direct manager, HR manager, department head).
+    3. The existing approvals module UI and API are ticket-centric.
+       Adding polymorphism would break existing queries and require significant
+       frontend changes to the approvals page.
+    4. Leave approvals are synchronous decisions that must update balances and
+       attendance — a separate table keeps the side effects clean and auditable.
+
+  Alternative considered: Polymorphic approvalsTable
+    Add entityType text + entityId integer columns; make ticketId nullable.
+    REJECTED because:
+      • Breaks existing queries filtering by ticketId IS NOT NULL.
+      • Approvals page shows approvals for tickets — showing leave approvals
+        there without UI changes is misleading.
+      • The side-effect chain (balance → attendance → status) cannot be
+        driven from the generic approvals lifecycle without leave-specific hooks.
+
+  How leave approvals expose data:
+    GET /hr/leave-requests?status=pending_approval&approverId=me
+    → employee's own pending approval items visible in their HR dashboard
+    GET /hr/leave-requests/:id/approval-steps
+    → approver sees the chain and can act
+    The approvals module dashboard (/approvals) remains ticket-only.
+    A dedicated "Pending Leave Approvals" section lives in the HR module.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — WORKFLOW INTEGRATION STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── 6A. What should stay as generic workflow behavior ─────────────────────
+
+    • Notification routing (who gets notified, what message)
+    • SLA escalation (if manager doesn't respond in 48h → escalate)
+    • Cross-module side effects (create a calendar event on approval)
+    • Optional post-approval tasks (HR review, documentation requests)
+
+  ── 6B. What must be dedicated leave business logic ─────────────────────
+
+    • Balance validation — must happen synchronously BEFORE status changes.
+      Cannot be a workflow step (by the time the workflow runs, the DB write
+      has already happened). WorkflowEngine is asynchronous by design.
+    • Conflict detection — same requirement: synchronous, pre-submit.
+    • Policy enforcement (requiresApproval, max days per request)
+    • Approval chain construction (who are the approvers for this request type)
+    • Balance deduction on approval — must be atomic with status update.
+    • Attendance record creation — domain-specific knowledge of date ranges.
+    • Employee status change (on_leave) — must be scheduled for startDate.
+
+  ── 6C. Recommended integration model ────────────────────────────────────
+
+    POST /hr/leave-requests
+      (synchronous: validate → create leave_request → create approval steps
+       → update balance.pending ← ALL IN ONE TRANSACTION)
+      (async: emit leave.requested → WorkflowEngine → optional extra notifications)
+
+    WorkflowEngine on leave.requested:
+      Optional workflows: e.g. "send Slack DM to manager", "create calendar block"
+      NOT responsible for: approval gating, balance deduction.
+
+    leave.approved event listener (synchronous side-effect chain):
+      1. Update hrLeaveBalancesTable: pending -= days, used += days
+      2. Write hrEmployeeLeavesTable record (or update if already exists)
+      3. Write hr_attendance records for each leave day
+      4. Optionally emit calendar integration event
+
+    Principle: domain invariants (balance, conflict, chain) are enforced in the
+    route handler synchronously. Workflows handle cross-domain side effects async.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — HR INTEGRATION ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── 7A. Attendance integration ────────────────────────────────────────────
+
+  When a leave request is approved:
+    - For each calendar day in [startDate, endDate]:
+        if day is a business day (not weekend, not holiday):
+          write hr_attendance record: status = "on_leave", leaveId = leaveRequest.id
+    - This should run in the leave.approved listener (async, after commit).
+    - Conflict: if an attendance record already exists for a day → skip or update.
+
+  When a leave is cancelled (approved, future dates):
+    - Delete or void hr_attendance records for dates >= today.
+
+  ── 7B. Payroll integration ───────────────────────────────────────────────
+
+  Unpaid leave (hrLeavePoliciesTable.paid = false):
+    - Payroll run must query approved leave_requests for the period.
+    - Days where attendance.status = "on_leave" AND leaveType = "unpaid" →
+      deduct from salary (pro-rated daily rate).
+    - The leave domain does NOT touch payroll tables directly.
+    - Payroll module reads from hr_leave_balances and hr_attendance.
+    - Integration: read-only FK traversal from payroll → attendance → leave_requests.
+
+  ── 7C. Calendar integration ─────────────────────────────────────────────
+
+  On leave.approved:
+    Option A: Leave domain writes directly to calendarEventsTable (simple).
+    Option B: Leave domain emits leave.approved; calendar listener creates event.
+    Recommended: Option B — maintains domain separation.
+    Calendar event: title = "Employee on Leave", participants = [employee, manager].
+    Event type: "leave" (new calendarEventsTable type value).
+
+  ── 7D. Employee status integration ──────────────────────────────────────
+
+  employees.status = "on_leave" should only be set ON startDate.
+  Approach:
+    Option A: Scheduled job — daily cron, set on_leave for approved requests
+              whose startDate = today.  Revert when endDate < today.
+    Option B: Real-time — set on leave.approved if startDate = today or past.
+              Revert when leave.cancelled or endDate passes.
+    Recommended: Option A (scheduled job) — prevents edge cases where approval
+    happens after business hours or across timezones.
+
+  ── 7E. Business-day calculation ─────────────────────────────────────────
+
+  For accurate daysRequested calculation:
+    1. Load hrWorkCalendarsTable for workspace (active calendar).
+    2. Load hrCalendarHolidaysTable for the leave year(s).
+    3. Iterate [startDate, endDate], count days where:
+         workday = not weekend (per calendar's weekendDays config)
+         not in holiday list
+    4. Result stored as businessDaysCount in leave_requests at creation time.
+
+  ── 7F. Balance initialization ───────────────────────────────────────────
+
+  hrLeaveBalancesTable must be populated before employees can request leave.
+  Two initialization paths:
+    A. Bulk initialization: HR admin triggers "initialize balances for year YYYY"
+       → for each employee × policy: insert with entitled = policy.annualDays.
+    B. Lazy initialization: when an employee first requests leave of a type,
+       if no balance row exists → create one with entitled = policy.annualDays.
+    Recommended: Lazy initialization for simplicity; bulk available for HR admin.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — SYNCHRONOUS vs. ASYNCHRONOUS BOUNDARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  SYNCHRONOUS (must happen before HTTP response):
+    ✓ Balance availability check (422 if insufficient)
+    ✓ Date conflict check (409 if overlap)
+    ✓ Policy eligibility check (422 if not eligible)
+    ✓ Business-day calculation (stored in leave_requests.businessDaysCount)
+    ✓ leave_requests INSERT
+    ✓ hrLeaveBalancesTable.pending += daysRequested  ← prevents race conditions
+    ✓ leave_approval_steps INSERT (first step)
+    ✓ leave_requests.status = "approved" (when requiresApproval=false)
+
+  ASYNCHRONOUS (after response, fire-and-forget via appEventBus):
+    ✓ Activity log write (activity.ts listener)
+    ✓ Notification to first approver (notifications-bus.ts listener)
+    ✓ WorkflowEngine trigger (bridge → engine)
+    ✓ Calendar event creation (leave.approved listener)
+    ✓ Attendance record writes (leave.approved listener)
+    ✓ hrEmployeeLeavesTable record write (leave.approved listener or sync)
+    ✓ Balance used/pending adjustment (leave.approved listener or sync)
+      NOTE: balance update on approval could be sync to prevent double-approval;
+      if async, use idempotency key on hrLeaveBalancesTable update.
+
+  CRITICAL RULE: hrLeaveBalancesTable.pending is updated SYNCHRONOUSLY
+  on leave.requested to prevent concurrent over-allocation (race condition).
+  The pending column acts as a reservation. On rejection/cancellation,
+  the reservation is released.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — ROUTE ARCHITECTURE PROPOSAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  All leave routes live in a new file: artifacts/api-server/src/routes/leave.ts
+
+  ── Employee self-service ─────────────────────────────────────────────────
+
+  POST   /hr/leave-requests
+    Body: { leaveType, startDate, endDate, employeeNote?, attachments? }
+    Action: validate → compute businessDays → check balance & conflicts
+            → INSERT leave_requests (status: pending or pending_approval)
+            → UPDATE hrLeaveBalancesTable.pending += days
+            → INSERT leave_approval_steps
+            → emit leave.requested
+    Auth: requireAuth (any authenticated employee for their own requests)
+
+  GET    /hr/leave-requests
+    Query: status?, leaveType?, year?, page
+    Action: return requesting employee's own leave requests
+    Auth: requireAuth
+
+  GET    /hr/leave-requests/:id
+    Action: return single leave request with approval steps
+    Auth: requireAuth (own request only, unless manager/HR)
+
+  PATCH  /hr/leave-requests/:id/withdraw
+    Action: employee withdraws a pending/pending_approval request
+            → status = "withdrawn"
+            → pending -= days
+            → emit leave.withdrawn
+    Auth: requireAuth (own request only, status must be pending or pending_approval)
+
+  ── Manager / HR approval actions ────────────────────────────────────────
+
+  GET    /hr/leave-requests?pendingApproval=me
+    Action: list requests where currentApproverId = req.userId
+    Auth: requireAuth
+
+  PATCH  /hr/leave-requests/:id/approve
+    Body: { comment? }
+    Action: advance approval chain or set status = "approved"
+            → emit leave.approved (on final approval)
+    Auth: requirePermission("hr.manage") OR currentApproverId = req.userId
+
+  PATCH  /hr/leave-requests/:id/reject
+    Body: { comment }
+    Action: status = "rejected", pending -= days, emit leave.rejected
+    Auth: requirePermission("hr.manage") OR currentApproverId = req.userId
+
+  ── HR admin management ───────────────────────────────────────────────────
+
+  GET    /hr/leave-requests?employeeId=:id&year=:year
+    Action: HR views all requests for an employee or workspace
+    Auth: requirePermission("hr.manage")
+
+  PATCH  /hr/leave-requests/:id/cancel
+    Body: { reason }
+    Action: status = "cancelled", conditional balance restore, emit leave.cancelled
+    Auth: requirePermission("hr.manage")
+
+  ── Leave balances ────────────────────────────────────────────────────────
+
+  GET    /hr/leave-balances
+    Query: employeeId?, year?, leaveType?
+    Action: return hrLeaveBalancesTable rows (with policy name joined)
+    Auth: requirePermission("hr.view")
+
+  GET    /hr/leave-balances/me
+    Action: return requesting employee's own balances for current year
+    Auth: requireAuth
+
+  PUT    /hr/leave-balances/:id
+    Body: { manualAdjustment, notes }
+    Action: update manualAdjustment, emit leave.balance_adjusted
+    Auth: requirePermission("hr.manage")
+
+  POST   /hr/leave-balances/initialize
+    Body: { year, employeeId? }
+    Action: bulk initialize balances for year (one row per employee × policy)
+    Auth: requirePermission("hr.manage")
+
+  ── Existing routes to DEPRECATE ─────────────────────────────────────────
+
+  GET    /hr/employees/:id/leaves          → keep for now as alias
+  POST   /hr/employees/:id/leaves          → deprecate; replace with POST /hr/leave-requests
+  PATCH  /hr/employees/:id/leaves/:lid     → deprecate; replace with PATCH /hr/leave-requests/:id
+
+  The admin-direct insert path (POST /hr/employees/:id/leaves) should become
+  a shortcut that creates an auto-approved leave_request (bypassing approval chain).
+  This maintains backward compatibility while moving data into the canonical model.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — SCALABILITY CONSIDERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Balance locking (preventing race conditions):
+    Current plan: pending += days synchronously in request transaction.
+    Under high concurrency: two simultaneous requests for same employee could
+    both read balance as sufficient → both decrement → over-allocation.
+    Solution: use SELECT FOR UPDATE on hrLeaveBalancesTable row in transaction,
+    or use a DB-level check constraint (used + pending <= entitled).
+    The uniqueIndex(employeeId, leavePolicyId, year) ensures one row per period.
+
+  Attendance record volume:
+    Writing one hr_attendance row per leave day per employee is fine at current
+    scale. At >10,000 employees, batch the writes in the async listener.
+
+  Business-day calculation caching:
+    Work calendar lookups are read-heavy, write-rarely.
+    Cache the holiday set in memory per workspace (invalidate on holiday change).
+    No external dependencies needed.
+
+  Multi-year leave requests:
+    A request spanning year boundary (Dec 30 → Jan 5) must deduct from both
+    year's balances. The businessDaysCount split must handle this.
+    Phase 1: reject multi-year requests (startDate.year must === endDate.year).
+    Phase 2: implement split-year balance deduction.
+
+  Workspace isolation:
+    All leave_requests and leave_approval_steps rows include workspaceId.
+    All queries must filter by req.workspaceId (enforced by requireAuth middleware).
+
+  Audit trail:
+    workspace_event_logs already captures all leave.* events via the bridge.
+    leave_requests.requestNumber provides a human-readable audit key.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PHASE 0 — Bug Fixes (prerequisite, small scope)
+    • Fix BUG-001: deduplicate "leave.requested" in registry.ts
+    • Add LEAVE_APPROVED, LEAVE_REJECTED, LEAVE_CANCELLED, LEAVE_WITHDRAWN,
+      LEAVE_BALANCE_ADJUSTED to EVENT_TYPES and EventTypeMap
+    • Fix naming note in LeaveRequestedPayload ("requested" → add "submitted"
+      alias or keep with documented exception)
+    Estimated effort: small (events.ts + constants.ts + registry.ts)
+
+  PHASE 1 — Core Leave Domain (main sprint)
+    • New table: leave_requests (migration + schema)
+    • New table: leave_approval_steps (migration + schema)
+    • New route file: leave.ts
+    • Implement: POST /hr/leave-requests (validate, balance, conflict, insert)
+    • Implement: GET /hr/leave-requests (own + manager views)
+    • Implement: PATCH /hr/leave-requests/:id/approve|reject|withdraw
+    • Publish: leave.requested, leave.approved, leave.rejected, leave.withdrawn
+    • activity.ts listeners for all leave events
+    • notifications-bus.ts listeners (notify approver, notify employee)
+    • Balance: update hrLeaveBalancesTable.pending on request; used on approval
+    • OpenAPI spec updates → codegen
+    Estimated effort: large (new domain, ~300-400 lines backend + spec)
+
+  PHASE 2 — Attendance + Calendar integration
+    • leave.approved listener: write hr_attendance records per leave day
+    • leave.cancelled listener: void future attendance records
+    • leave.approved listener: create calendarEventsTable entry (optional)
+    • Scheduled job (or cron route): set employees.status = "on_leave" on startDate
+    Estimated effort: medium
+
+  PHASE 3 — Forms bridge retirement
+    • The HR "Leave Request" form (self-service) is migrated to POST /hr/leave-requests
+    • The form_definitions entry for "Leave Request" is retired or hidden
+    • Form submissions no longer create leave records (domain route does)
+    • workflowEventHint "hr.form.submitted" → "leave.requested" workflow trigger
+    Estimated effort: small (route redirect + form config change)
+
+  PHASE 4 — Balance management UI + policies
+    • GET /hr/leave-balances/me → employee self-service balance view
+    • PUT /hr/leave-balances/:id → HR manual adjustment
+    • POST /hr/leave-balances/initialize → year initialization
+    • Multi-year request handling (if needed)
+    • Deprecate employees.leaveBalances jsonb column
+    Estimated effort: medium
+
+  PHASE 5 — Payroll integration
+    • Payroll module reads hr_attendance + leave_requests for period
+    • Unpaid leave deduction in payslip calculation
+    Estimated effort: medium (depends on payroll module maturity)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — RISKS IF BUILT INCORRECTLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK-L01 — Balance race condition
+    If balance validation is async or happens after DB write:
+    Two employees could simultaneously get the last available day.
+    Impact: Over-allocation → payroll/HR discrepancy.
+    Prevention: SELECT FOR UPDATE in transaction; pending updated synchronously.
+
+  RISK-L02 — Approval chain not enforced in domain route
+    If WorkflowEngine "approval" step is the only gate:
+    Workflow failures (timeout, error) silently skip approvals.
+    Impact: Leave approved without manager consent.
+    Prevention: Approval chain lives in leave_approval_steps, not workflows.
+    WorkflowEngine is supplementary (notifications, extra steps), not the gate.
+
+  RISK-L03 — Phantom ticket creation for leave approvals
+    If approvalsTable is used with a phantom ticket per leave request:
+    Impact: Pollutes ticket system; approval module query counts wrong.
+    Prevention: Use dedicated leave_approval_steps table.
+
+  RISK-L04 — Skipping balance deduction on approval
+    If balance is only deducted in an async event listener that fails:
+    Impact: Employee can use more leave than allocated.
+    Prevention: Make balance deduction part of the approval transaction,
+    OR make the async listener idempotent with an idempotency key.
+
+  RISK-L05 — Building leave inside the generic form submission path
+    If leave domain is never built and forms path is "good enough":
+    Impact: No balance enforcement, no conflict detection, no proper audit,
+    no attendance integration, no payroll integration. System looks functional
+    but has no data integrity for leave management.
+    Prevention: Build the dedicated domain (Phase 1) before opening to employees.
+
+  RISK-L06 — Missing multi-year leave support from day 1
+    If Phase 1 rejects multi-year requests without documenting the limitation:
+    Impact: Users confused when Dec→Jan leave requests fail.
+    Prevention: Document and surface clear error ("Cross-year leave requests
+    will be supported in a future update; please submit two separate requests").
+
+  RISK-L07 — Not retiring forms path after domain is built
+    If both paths remain active indefinitely:
+    Impact: Leave requests split between form_submissions and leave_requests.
+    HR sees two separate records for the same request.
+    Prevention: Phase 3 (forms bridge retirement) is mandatory after Phase 1.
+
+  RISK-L08 — Notification fatigue from duplicate events
+    If both leave.requested and form.submitted fire for the same submission
+    (if forms path not retired):
+    Impact: Employee receives duplicate notifications.
+    Prevention: In Phase 1, disable the HR leave form submission path or guard
+    the form submission notification when sourceFormId is "Leave Request".
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — FINAL RECOMMENDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  BUILD THE DEDICATED LEAVE DOMAIN BEFORE GOING LIVE WITH LEAVE FEATURES.
+
+  The current generic form path creates the illusion of a working leave system
+  but has ZERO of the required domain invariants: no balance check, no conflict
+  detection, no policy enforcement, no attendance integration, no payroll link,
+  no structured approval chain.  Any data stored via the form path cannot be
+  trusted for HR decision-making.
+
+  The good news: most of the infrastructure is already built.
+    ✓ hrLeavePoliciesTable exists (with the right structure)
+    ✓ hrLeaveBalancesTable exists (with the right columns)
+    ✓ hr_attendance has a leaveId FK column waiting to be used
+    ✓ hrWorkCalendars and hrCalendarHolidaysTable exist
+    ✓ LeaveRequestedPayload exists in the event catalog
+    ✓ EventBus architecture is migration-ready (forms.ts already on bus)
+    ✓ WorkflowEngine can trigger on leave.requested after Phase 0
+
+  Missing pieces (Phase 0 + Phase 1):
+    ✗ leave_requests table (new, ~15 columns)
+    ✗ leave_approval_steps table (new, ~10 columns)
+    ✗ leave.ts route file (new, ~300 lines)
+    ✗ leave.approved/rejected/cancelled/withdrawn events (new)
+    ✗ activity.ts + notifications-bus.ts listeners for new events
+
+  Sequence to start implementation:
+    1. Phase 0: Fix BUG-001, add missing event types → run codegen
+    2. Phase 1: Schema migration → route file → listeners → OpenAPI → codegen
+    3. Phase 2: Attendance integration
+    4. Phase 3: Retire forms bridge for leave
+    (Phases 4 and 5 can be deferred)
+
+  Do NOT extend the generic form path further for leave functionality.
+  Every new feature built on top of form_submissions-as-leave increases the
+  technical debt and migration cost of Phase 3.

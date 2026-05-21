@@ -1,0 +1,302 @@
+راجع leave-domain-architecture-review.txt و leave-domain-phase-0-report.txt ثم نفّذ فقط Phase 1 الخاصة ببناء الـ Leave Domain الحقيقي بدون الدخول في attendance/payroll/calendar integrations المتقدمة حتى الآن.
+
+عنوان المهمة:
+LEAVE DOMAIN PHASE 1 — Core Leave Lifecycle Implementation
+
+المهمة الحالية:
+بناء أول Enterprise HR Domain حقيقي داخل النظام:
+Dedicated Leave Management Domain
+
+الهدف:
+الانتقال من:
+generic HR leave forms
+
+إلى:
+canonical leave lifecycle
+مبني فوق:
+- appEventBus
+- typed domain events
+- dedicated leave routes
+- synchronous business validations
+- dedicated approval chain
+
+المطلوب بالتفصيل:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — DATABASE SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ migration + schema definitions للجداول التالية:
+
+A) leave_requests
+يشمل الحقول التالية على الأقل:
+- id
+- workspaceId
+- employeeId
+- requestedByUserId
+- leavePolicyId nullable
+- leaveType
+- startDate
+- endDate
+- daysRequested
+- businessDaysCount
+- status
+- employeeNote nullable
+- managerNote nullable
+- attachmentUrls jsonb nullable
+- currentApproverId nullable
+- approvedByUserId nullable
+- approvedAt nullable
+- rejectedByUserId nullable
+- rejectedAt nullable
+- cancelledAt nullable
+- requestNumber
+- sourceFormId nullable
+- sourceSubmissionId nullable
+- createdAt
+- updatedAt
+
+المطلوب:
+- proper FK relations
+- indexes منطقية
+- workspace isolation support
+- enum/text strategy consistent مع المشروع الحالي
+
+B) leave_approval_steps
+يشمل:
+- id
+- leaveRequestId
+- stepOrder
+- approverUserId
+- approverRole
+- status
+- comment nullable
+- decidedAt nullable
+- notifiedAt nullable
+- timeoutAt nullable
+- createdAt
+
+المطلوب:
+- proper FK
+- indexes
+- step uniqueness protection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — ROUTE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ:
+artifacts/api-server/src/routes/leave.ts
+
+واربطه بالسيرفر بنفس conventions الحالية.
+
+المطلوب بالمرحلة الحالية فقط:
+
+POST /hr/leave-requests
+GET /hr/leave-requests
+GET /hr/leave-requests/:id
+PATCH /hr/leave-requests/:id/approve
+PATCH /hr/leave-requests/:id/reject
+PATCH /hr/leave-requests/:id/withdraw
+
+لا تنفذ:
+cancel
+balance admin routes
+bulk initialization
+payroll hooks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SYNCHRONOUS DOMAIN VALIDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل POST /hr/leave-requests:
+
+نفّذ validations حقيقية قبل INSERT:
+
+A) Balance validation
+- اقرأ hr_leave_balances
+- تأكد:
+entitled - used - pending >= daysRequested
+- استخدم locking أو transaction strategy تمنع race conditions
+
+B) Conflict validation
+- منع overlapping leave requests لنفس الموظف
+- يشمل pending + approved
+
+C) Date validation
+- startDate <= endDate
+- businessDaysCount > 0
+- policy eligibility الأساسية
+
+D) Business-day calculation
+- استخدم:
+hr_work_calendars
+hr_calendar_holidays
+- احسب businessDaysCount فعليًا
+- لا تعتمد على client input
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — LEAVE LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+نفّذ status lifecycle التالية:
+
+draft (optional internally)
+pending
+pending_approval
+approved
+rejected
+withdrawn
+
+المطلوب:
+- transitions واضحة
+- validation لكل transition
+- no invalid state transitions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — APPROVAL CHAIN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تستخدم:
+approvalsTable
+
+المطلوب:
+- leave_approval_steps فقط
+
+المرحلة الحالية:
+- single-step approval يكفي
+- approver = manager أو HR حسب أبسط logic موجود حاليًا
+- architecture لازم تدعم multi-step مستقبلاً
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — EVENT EMISSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+استخدم:
+appEventBus.emit()
+
+للأحداث التالية:
+
+- leave.requested
+- leave.approved
+- leave.rejected
+- leave.withdrawn
+
+باستخدام:
+EVENT_TYPES
++
+Typed payloads من @workspace/core-events
+
+المطلوب:
+- idempotency metadata
+- proper actor/workspace context
+- no raw string literals
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — LISTENERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+فعّل listeners داخل:
+activity.ts
+notifications-bus.ts
+
+للأحداث:
+- leave.requested
+- leave.approved
+- leave.rejected
+- leave.withdrawn
+
+المطلوب:
+- activity logs مناسبة
+- notifications مناسبة
+- no duplicate notifications
+- no duplicate activity rows
+
+لا تنفذ:
+attendance listeners
+calendar listeners
+payroll listeners
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — BALANCE RESERVATION LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+عند:
+leave.requested
+
+المطلوب:
+- pending += daysRequested
+
+وعند:
+leave.approved
+- pending -= daysRequested
+- used += daysRequested
+
+وعند:
+leave.rejected أو leave.withdrawn
+- pending -= daysRequested
+
+المطلوب:
+- transactional safety
+- idempotency awareness
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — BACKWARD COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تكسر:
+- forms.ts
+- generic form submissions
+- HR existing routes
+
+لكن:
+أضف comments واضحة أن:
+POST /hr/employees/:id/leaves
+legacy path
+وسيتم deprecated لاحقًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تنفذ:
+- payroll deductions
+- attendance integration
+- calendar integration
+- SLA escalations
+- Redis/queues
+- multi-year requests
+- advanced accrual engine
+- policy builder UI
+- multi-step approval UI
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- synchronous invariants
+- why balances are reserved immediately
+- why approvals module is excluded
+- leave domain ownership boundaries
+- why workflows are supplementary only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+leave-domain-phase-1-report.txt
+
+ويحتوي:
+- جميع الملفات المضافة والمعدلة
+- DB schema summary
+- lifecycle implementation summary
+- validation rules المنفذة
+- approval flow الحالي
+- event flow النهائي
+- listeners المفعلة
+- أي technical debt متبقي
+- أي intentionally deferred features
+- readiness assessment لمرحلة attendance/calendar integration

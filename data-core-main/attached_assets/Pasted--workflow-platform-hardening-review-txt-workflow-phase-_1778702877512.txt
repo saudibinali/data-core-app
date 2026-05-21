@@ -1,0 +1,291 @@
+راجع:
+- workflow-platform-hardening-review.txt
+- workflow-phase-4-review.txt
+- workflow-phase-5a-report.txt
+خصوصًا:
+- H-02
+- condition routing gaps
+- linear executor limitations
+- future DAG notes
+- validation safety notes
+
+ثم نفّذ فقط:
+P5-C — Condition Routing & Safe Branching Foundations
+
+ولا تنفّذ:
+- full DAG runtime
+- parallel execution
+- retries
+- scheduler
+- simulation engine
+- distributed orchestration
+
+عنوان المهمة:
+WORKFLOW PHASE 5-C — Deterministic Condition Routing & Safe Branch Traversal
+
+المهمة الحالية:
+تحويل:
+condition steps
+
+من:
+visual pseudo-logic
+
+إلى:
+real deterministic routing behavior
+
+بدون إدخال:
+- DAG complexity الكاملة
+- parallelism
+- graph execution engine
+
+الهدف:
+إضافة:
+safe branching execution
+
+فوق:
+الـ linear runtime الحالي
+
+بطريقة:
+minimal pragmatic branching model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT CONDITION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- condition.ts
+- executor.ts
+- current nextSteps behavior
+- step.index assumptions
+- workflow step structure
+- diagnostics APIs
+
+حدّد:
+- لماذا condition steps حاليًا لا تغيّر execution path فعليًا
+- أين يتم تجاهل nextSteps
+- كيف linear traversal يفرض behavior خاطئ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN MINIMAL BRANCHING MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+minimal deterministic routing model
+
+بدون DAG كامل.
+
+المطلوب:
+
+Condition result:
+{
+  matched: boolean
+}
+
+ثم:
+- matched=true → onTrueStepIndex
+- matched=false → onFalseStepIndex
+
+المطلوب:
+- explicit routing فقط
+- no implicit traversal
+- no graph engine بعد
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ADD SAFE ROUTING METADATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث step schema لدعم:
+
+condition:
+- onTrueStepIndex
+- onFalseStepIndex
+
+مع:
+validation واضحة:
+- indices must exist
+- cannot self-loop
+- cannot point backward (حالياً)
+- deterministic single target only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EXECUTOR ROUTING LOGIC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+executor.ts
+
+بدل:
+currentStepIndex++
+
+أضف:
+routing resolution layer
+
+المطلوب:
+A)
+non-condition step
+→ continue linear
+
+B)
+condition matched=true
+→ jump to onTrueStepIndex
+
+C)
+condition matched=false
+→ jump to onFalseStepIndex
+
+D)
+missing route
+→ safe execution failure
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FORWARD-ONLY SAFETY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+حالياً:
+لا تسمح:
+- backward jumps
+- loops
+- graph cycles
+- re-entry
+- multiple targets
+- merge semantics
+
+المطلوب:
+forward-only branching.
+
+الهدف:
+منع:
+runtime recursion complexity.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ROUTING VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف validation تغطي:
+
+- invalid indices
+- self-target
+- backward jumps
+- unreachable routes
+- duplicate target ambiguity
+- orphaned branches
+
+لكن:
+لا تبنِ validation engine كامل بعد.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured logs جديدة:
+
+A)
+condition_route_selected
+
+B)
+condition_route_invalid
+
+C)
+condition_route_missing
+
+كل log يحتوي:
+- executionId
+- workflowId
+- stepIndex
+- matched
+- selectedNextStep
+- availableRoutes
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — DIAGNOSTICS INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+- execution timelines تظهر routing decisions
+- condition outcomes مرئية
+- next selected step observable
+- failed routing واضح
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — EXACT-ONCE SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+routing الجديد:
+لا يكسر:
+- approval resume
+- cancellation
+- timeout checks
+- guarded transitions
+- snapshot semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+matched=true routes correctly
+
+T2:
+matched=false routes correctly
+
+T3:
+linear steps continue normally
+
+T4:
+invalid route rejected safely
+
+T5:
+backward route rejected
+
+T6:
+self-loop rejected
+
+T7:
+condition routing visible in diagnostics
+
+T8:
+approval resume still resumes correctly after routing introduction
+
+T9:
+timeout/cancellation still enforced between routed steps
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- DAG merge logic
+- parallel execution
+- retry engine
+- scheduler
+- graph compiler
+- branch synchronization
+- cycle runtime recovery
+
+خلك:
+deterministic forward-only branching.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5c-report.txt
+
+ويحتوي:
+- routing architecture
+- executor traversal changes
+- validation rules
+- observability additions
+- diagnostics behavior
+- exact-once compatibility assessment
+- remaining DAG limitations
+- tests results
+- readiness assessment قبل validation engine

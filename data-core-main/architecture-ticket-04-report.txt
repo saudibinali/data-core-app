@@ -1,0 +1,435 @@
+================================================================================
+  ARCHITECTURE TICKET 04 — Activity Logging Bridge to the Typed EventBus
+  lib/core-events  +  artifacts/api-server
+  Internal Operations Platform — Monorepo
+  تاريخ التنفيذ: مايو 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. CREATED & MODIFIED FILES — الملفات الجديدة والمُعدَّلة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATED:
+  artifacts/api-server/src/lib/events/app-bus.ts
+    └── pino-adapter EventBus singleton (appEventBus) للاستخدام في api-server
+
+  artifacts/api-server/src/lib/events/listeners/activity.ts
+    └── 6 listeners مرتبطة بـ appEventBus تُنشئ activity records
+
+MODIFIED:
+  artifacts/api-server/package.json
+    └── أُضيف: "@workspace/core-events": "workspace:*" في dependencies
+
+  artifacts/api-server/tsconfig.json
+    └── أُضيف: reference لـ lib/core-events
+
+  artifacts/api-server/src/lib/events/index.ts
+    └── يُصدِّر appEventBus + EVENT_TYPES + LEGACY_EVENT_NAMES
+        يُسجِّل activity listener عند الاستيراد (side-effect)
+
+  artifacts/api-server/src/routes/approvals.ts
+    └── MIGRATED: حُذف inline db.insert(activityLogsTable)
+        أُضيف void appEventBus.emit() لكل من approval.created + approval.completed
+
+NOT CHANGED:
+  artifacts/api-server/src/routes/tickets.ts     ← inline inserts محفوظة (Ticket 05)
+  artifacts/api-server/src/routes/comments.ts    ← inline inserts محفوظة (Ticket 05)
+  artifacts/api-server/src/routes/hr.ts          ← logActivity() محفوظة (Ticket 05)
+  artifacts/api-server/src/lib/events/dispatcher.ts    ← لم يُلمَس
+  artifacts/api-server/src/lib/events/listeners/notifications.ts  ← لم يُلمَس
+  lib/db/src/schema/activity.ts                  ← لم يُلمَس (لا تغيير للـ schema)
+  أي كود UI / frontend                           ← لم يُلمَس
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. CURRENT ARCHITECTURE — البنية الحالية بعد Ticket 04
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1 النظامان المتوازيان (يعملان في نفس الوقت)
+───────────────────────────────────────────────
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  LEGACY SYSTEM — eventDispatcher                                        │
+  │                                                                         │
+  │  Route Handler                                                          │
+  │    │                                                                    │
+  │    ├─→ db.insert(activityLogsTable)  [inline — tickets, comments]      │
+  │    │                                                                    │
+  │    └─→ eventDispatcher.dispatch()                                       │
+  │              │                                                          │
+  │              ├─→ db.insert(workspace_event_logs)  [دائماً]             │
+  │              └─→ listeners/notifications.ts                             │
+  │                    └─→ db.insert(notificationsTable)                    │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  NEW SYSTEM — appEventBus (Ticket 04)                                   │
+  │                                                                         │
+  │  Route Handler (approvals.ts)                                           │
+  │    │                                                                    │
+  │    └─→ void appEventBus.emit()  [fire-and-forget]                      │
+  │              │                                                          │
+  │              └─→ listeners/activity.ts                                  │
+  │                    ├─→ IdempotencyGuard.isNew(event.id)                │
+  │                    ├─→ entityType guard ("ticket" only)                 │
+  │                    └─→ db.insert(activityLogsTable)                     │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+2.2 Event → Activity Mapping التفصيلي
+──────────────────────────────────────
+
+  Event Type              │ action              │ ticketId          │ userId               │ metadata
+  ────────────────────────│─────────────────────│───────────────────│──────────────────────│──────────────────────
+  approval.created  ✅    │ approval_requested  │ entityId (ticket) │ requestedByUserId    │ requestNote (opt.)
+  approval.completed ✅   │ approval_completed  │ entityId (ticket) │ decidedByUserId      │ outcome (approved/rejected)
+  employee.created  ⏳    │ employee_created    │ null              │ employeeUserId       │ "fullName (empNumber)"
+  ticket.created    ⏳    │ ticket_created      │ ticketId          │ createdByUserId      │ title
+  ticket.updated    ⏳    │ status_changed      │ ticketId          │ updatedByUserId      │ "prev -> new"
+                          │   OR assigned       │                   │                      │ null
+                          │   OR ticket_updated │                   │                      │ null
+  form.submitted    ⏳    │ form_submitted      │ null              │ submittedByUserId    │ formName
+
+  ✅ = ACTIVE (route emits + listener creates activity)
+  ⏳ = READY (listener registered, awaiting route emitter in Ticket 05)
+
+2.3 Idempotency Guard — حماية التكرار
+────────────────────────────────────────
+
+  كلاس: IdempotencyGuard (مُعرَّف في listeners/activity.ts)
+  مبدأ: Set<string> في الذاكرة يخزّن event.id (UUID)
+  منطق: isNew(key) → إذا رأى نفس الـ key → تجاهل (log warning + return)
+  انتهاء: مفتاح يُحذف تلقائياً بعد 5 دقائق (setTimeout)
+  محدودية: لا يُحفظ عند إعادة تشغيل الـ server
+  TODO(Ticket 06): أضف عمود event_bus_id في activity_logs للحماية الدائمة
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. NEW LISTENERS — الـ Listeners الجديدة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الملف: artifacts/api-server/src/lib/events/listeners/activity.ts
+
+3.1 approval.created → "approval_requested" ── ✅ ACTIVE
+─────────────────────────────────────────────────────────
+  المُشغِّل: approvals.ts POST /approvals
+  الإجراء:   db.insert(activityLogsTable, { action: "approval_requested", ticketId: entityId })
+  الحراسة:   entityType === "ticket" (يتجاهل HR leave و form approvals حالياً)
+  التحقق:    dedup.isNew(event.id) + logger.info بعد الإدراج
+  السلوك:    مطابق تماماً للـ inline insert السابق — نفس الحقول والقيم
+
+3.2 approval.completed → "approval_completed" ── ✅ ACTIVE
+──────────────────────────────────────────────────────────
+  المُشغِّل: approvals.ts PATCH /approvals/:id
+  الإجراء:   db.insert(activityLogsTable, { action: "approval_completed", metadata: outcome })
+  الحراسة:   entityType === "ticket" + approval.ticketId !== null
+  التحقق:    dedup.isNew(event.id) + logger.info بعد الإدراج
+  السلوك:    metadata = "approved" | "rejected" — مطابق للسلوك السابق (UI لا يتغير)
+
+3.3 employee.created → "employee_created" ── ⏳ READY
+───────────────────────────────────────────────────────
+  السلوك الجديد: يُضيف entry في activity_logs (بـ ticketId=null)
+  النظام القديم: hr.ts يُضيف في hr_employee_activity عبر logActivity() — لا يزال يعمل
+  كلا المساريين متوازيان — هذا الـ listener يُضيف للـ activity feed الرئيسية
+  المُشغِّل: لم يُضَف بعد (يحتاج emit في admin.ts أو users.ts — Ticket 05)
+
+3.4 ticket.created → "ticket_created" ── ⏳ READY
+───────────────────────────────────────────────────
+  السلوك المستهدف: مطابق للـ inline insert الحالي في tickets.ts POST
+  المُشغِّل: لم يُضَف بعد (tickets.ts لا يزال يستخدم inline insert)
+  انتظار: حذف inline insert + إضافة emit في Ticket 05
+
+3.5 ticket.updated → "status_changed" / "assigned" / "ticket_updated" ── ⏳ READY
+────────────────────────────────────────────────────────────────────────────────────
+  منطق ذكي: يستنتج action من حقل changes:
+    changes.status → action = "status_changed", metadata = "prev -> new"
+    changes.assigneeId → action = "assigned"
+    غير ذلك → action = "ticket_updated"
+  يُحافظ على نفس strings الـ action الحالية التي يعرضها الـ UI
+
+3.6 form.submitted → "form_submitted" ── ⏳ READY
+──────────────────────────────────────────────────
+  بنية تحتية جاهزة لاستقبال أحداث النماذج
+  لا route حالي يُطلق هذا الحدث — للتفعيل في Ticket 05
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. MIGRATED FLOWS — الـ Flows المُحوَّلة في هذه التذكرة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FLOW 1: POST /approvals — إنشاء طلب موافقة
+────────────────────────────────────────────
+
+  قبل Ticket 04:
+    [Route] → db.insert(activityLogsTable, { action: "approval_requested" })
+            → db.insert(notificationsTable, {...})
+            → res.json()
+
+  بعد Ticket 04:
+    [Route] → void appEventBus.emit({ type: "approval.created", ... })  ← جديد
+            → db.insert(notificationsTable, {...})                       ← لا يزال inline
+            → res.json()
+              ↕ (غير متزامن — لا يحجب الـ response)
+    [Listener] → IdempotencyGuard.isNew(event.id) → true
+              → entityType === "ticket" → true
+              → db.insert(activityLogsTable, { action: "approval_requested" })
+
+FLOW 2: PATCH /approvals/:id — اتخاذ قرار الموافقة
+─────────────────────────────────────────────────────
+
+  قبل Ticket 04:
+    [Route] → db.insert(activityLogsTable, { action: "approval_completed",
+                                              metadata: status })
+            → db.insert(notificationsTable, {...})
+            → res.json()
+
+  بعد Ticket 04:
+    [Route] → void appEventBus.emit({ type: "approval.completed", ... })  ← جديد
+            → db.insert(notificationsTable, {...})                         ← لا يزال inline
+            → res.json()
+              ↕ (غير متزامن)
+    [Listener] → IdempotencyGuard.isNew(event.id) → true
+              → entityType === "ticket" + ticketId not null → true
+              → db.insert(activityLogsTable, { action: "approval_completed",
+                                               metadata: "approved" | "rejected" })
+
+تغيير سلوكي دقيق: في النظام القديم، كانت db.insert للـ activity تحدث قبل الـ response.
+الآن تحدث بعده بشكل غير متزامن. النتيجة النهائية في DB متطابقة — التوقيت يختلف بمللي ثانية.
+هذا التغيير مقبول ومُوثَّق كـ design decision.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. REMAINING COUPLING — الـ Coupling المتبقي
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1 Inline Activity Inserts المتبقية (لم تُهاجَر)
+─────────────────────────────────────────────────────
+
+  artifacts/api-server/src/routes/tickets.ts:
+    السطر ~102: ticket_created           ← inline insert
+    السطر ~211: status_changed           ← inline insert
+    السطر ~215: assigned                 ← inline insert
+    السطر ~292: cc_added                 ← inline insert
+    السطر ~313: cc_removed               ← inline insert
+    السطر ~239/247: eventDispatcher.dispatch() للـ notifications
+
+  artifacts/api-server/src/routes/comments.ts:
+    السطر ~62: comment_added             ← inline insert
+
+  سبب التأجيل: tickets.ts هو أكثر الملفات تعقيداً وتعدياً للـ activity.
+    الخطر في التغيير خلال نفس التذكرة كان مرتفعاً.
+    يُعالَج بالكامل في Ticket 05.
+
+5.2 Notification Inserts المتبقية (لم تُهاجَر)
+─────────────────────────────────────────────────
+
+  approvals.ts: db.insert(notificationsTable) — inline في POST و PATCH
+  comments.ts: db.insert(notificationsTable) — inline في POST /comments
+  tickets.ts: غير مباشر (عبر eventDispatcher → notifications.ts listener)
+  ملاحظة: notifications listener في notifications.ts لا يزال على eventDispatcher
+
+5.3 Legacy eventDispatcher — لا يزال نشطاً
+─────────────────────────────────────────────
+
+  dispatcher.ts: يكتب لـ workspace_event_logs + يُشغِّل notifications listener
+  يُستدعى من: tickets.ts (TICKET_CREATED, TICKET_CLOSED, TICKET_UPDATED)
+  لا يُستدعى من: approvals.ts, comments.ts (لم يكن مستخدماً هناك أصلاً)
+
+5.4 hr_employee_activity — نظام منفصل
+─────────────────────────────────────────
+
+  hr.ts: دالة logActivity() تكتب لجدول hr_employee_activity
+  لا تعلاقة مباشرة مع activity_logs أو appEventBus
+  سيبقى منفصلاً — يخدم HR-specific reporting
+  الـ listener الجديد (employee.created) سيُضيف للـ activity_logs بالتوازي
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. LEGACY SYSTEMS — الأنظمة القديمة لا تزال مستخدمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  النظام                      │ الوضع        │ ما يفعله                         │ خطة الإزالة
+  ─────────────────────────── │ ──────────── │ ──────────────────────────────── │ ──────────
+  eventDispatcher             │ نشط ✓        │ workspace_event_logs + notif.     │ Ticket 05+
+  notifications.ts listener   │ نشط ✓        │ يُنشئ إشعارات للـ tickets         │ Ticket 05
+  inline activityLogs tickets │ نشط ✓        │ 5 أنواع activity في tickets.ts   │ Ticket 05
+  inline activityLogs comments│ نشط ✓        │ comment_added                     │ Ticket 05
+  inline notif. approvals     │ نشط ✓        │ approval notifications            │ Ticket 05
+  inline notif. comments      │ نشط ✓        │ comment notifications             │ Ticket 05
+  hr_employee_activity        │ نشط ✓        │ HR-specific employee tracking     │ لا يُزال
+  platform_event_registry     │ نشط ✓        │ seed data للـ workflow builder     │ يبقى مستقلاً
+
+  الفرق الجوهري بين النظامين:
+
+  | المعيار              │ eventDispatcher (قديم)          │ appEventBus (جديد)              │
+  │─────────────────────│─────────────────────────────────│─────────────────────────────────│
+  │ Type safety          │ ❌ Record<string,unknown>        │ ✅ TypedEvent<K, Payload>        │
+  │ DB persistence       │ ✅ workspace_event_logs          │ ❌ (لا persistence مدمجة)        │
+  │ Listener signature   │ (payload, logId) => Promise<void│ (event: TypedEvent) => Promise  │
+  │ Error isolation      │ ✅ Promise.allSettled            │ ✅ Promise.allSettled            │
+  │ Idempotency          │ ❌ لا حماية                     │ ✅ IdempotencyGuard              │
+  │ Structured logging   │ ✅ pino (req.log)               │ ✅ pino (pinoAdapter)            │
+  │ Wildcard listeners   │ ✅ "*"                           │ ✅ subscribeToAll()              │
+  │ subscribeOnce        │ ❌ غير مدعوم                    │ ✅ مدعوم                        │
+  │ Distributed ready    │ ❌ in-memory فقط                │ ✅ Redis adapter مخطط           │
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. MIGRATION PROGRESS — حالة الهجرة الإجمالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flow                   │ Ticket 01-03 │ Ticket 04          │ Ticket 05 (مخطط)
+  ──────────────────────────────────────────────────────────────────────────────
+  Event contracts (types)│ ✅ مكتمل    │ —                  │ —
+  EventBus infrastructure│ ✅ مكتمل    │ —                  │ —
+  pino adapter (app-bus) │ —            │ ✅ مكتمل           │ —
+  Activity listener file │ —            │ ✅ مكتمل (6 events)│ —
+  approval.created       │ —            │ ✅ مُهاجَر          │ —
+  approval.completed     │ —            │ ✅ مُهاجَر          │ —
+  employee.created       │ —            │ ⏳ Listener جاهز   │ إضافة emit
+  ticket.created         │ —            │ ⏳ Listener جاهز   │ هجرة كاملة
+  ticket.updated         │ —            │ ⏳ Listener جاهز   │ هجرة كاملة
+  cc_added / cc_removed  │ —            │ —                  │ هجرة كاملة
+  comment_added          │ —            │ —                  │ هجرة كاملة
+  notification creation  │ —            │ —                  │ تقييم + تقرير
+  eventDispatcher bridge │ —            │ —                  │ تقييم
+  workspace_event_logs   │ —            │ —                  │ يبقى (مستقل)
+
+  نسبة الإنجاز: 2 من 9 activity flows → 22% مُهاجَر
+  المتبقي للـ Ticket 05: 7 flows + تقييم notifications + تقييم bridge
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. TECHNICAL DEBT — الديون التقنية الجديدة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEBT-T04-01: activity_logs يفتقر لـ entityType و entityId
+───────────────────────────────────────────────────────────
+  الجدول الحالي: activity_logs لديه ticketId فقط (nullable)
+  المشكلة: لا يمكن تتبع employee events أو form events بشكل صريح
+  بدون entityType، جميع النشاطات غير المرتبطة بـ ticket تحتاج تفسير metadata
+  الحل: إضافة عمودين في Ticket 05:
+    entityType text (مثلاً "ticket", "employee", "approval", "form")
+    entityId integer
+  هذا يُلغي الحاجة لحقل ticketId كـ exclusive scope
+
+DEBT-T04-02: الـ IdempotencyGuard في الذاكرة فقط
+──────────────────────────────────────────────────
+  الحماية من التكرار تُفقَد عند إعادة تشغيل الـ server أو عند scaling
+  الخطر: إذا restart حدث بين emit وإنشاء الـ activity، يمكن إعادة معالجة الحدث
+  الحل: إضافة عمود event_bus_id (text, nullable, unique) في activity_logs
+  الفحص: SELECT 1 FROM activity_logs WHERE event_bus_id = $eventId قبل كل insert
+
+DEBT-T04-03: approval activities غير متزامنة مع الـ HTTP response
+────────────────────────────────────────────────────────────────────
+  في النظام القديم: activity insert كان await (متزامن مع الـ response)
+  الآن: void appEventBus.emit() — fire-and-forget
+  الخطر: إذا طلب client قائمة activities فوراً بعد POST /approvals،
+    قد لا تكون الـ activity موجودة بعد (race condition)
+  مدى الخطر: منخفض جداً (عملياً أسرع من roundtrip HTTP)
+  الحل المستقبلي: await emit() إذا ثبت أن race condition يحدث في الإنتاج
+
+DEBT-T04-04: notificationsTable inserts لا تزال inline في approvals.ts
+────────────────────────────────────────────────────────────────────────
+  تم تحويل activity فقط — notifications بقيت inline
+  يُنشئ عدم تناسق في النمط داخل نفس الملف
+  الحل: Ticket 05 يُحول notifications أيضاً لـ listener على appEventBus
+
+DEBT-T04-05: UpdateApprovalBody.status cast يدوي
+──────────────────────────────────────────────────
+  في approvals.ts PATCH:
+    outcome: parsed.data.status as "approved" | "rejected"
+  TypeScript لا يتحقق من هذا statically — إذا Zod schema تغيرت،
+    هذا الـ cast لن يُنبِّه بخطأ
+  الحل: أضف type: z.enum(["approved", "rejected"]) صراحةً في UpdateApprovalBody
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. VERIFICATION — التحقق
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm install                                → ✅ @workspace/core-events مُثبَّت
+  pnpm --filter @workspace/api-server typecheck → ✅ 0 أخطاء
+  pnpm run typecheck:libs                    → ✅ 0 أخطاء (من Ticket 03)
+  API Server workflow restart                 → ✅ يعمل
+  الـ UI الحالية                              → ✅ لم تتغير (activity_logs shape ثابت)
+  الـ activity logs الحالية (tickets)         → ✅ لا تزال تُنشأ inline في tickets.ts
+  الـ notifications                           → ✅ لا تزال تعمل (legacy dispatcher)
+  workspace_event_logs                        → ✅ لا تزال تُكتَب (legacy dispatcher)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. SUGGESTIONS FOR TICKET 05 — اقتراحات التذكرة القادمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── الأولوية الأولى: هجرة tickets.ts (الأثر الأكبر) ────────────────────────────
+
+T05-A: إضافة emit لـ ticket.created في tickets.ts POST /tickets
+  - احذف: await db.insert(activityLogsTable).values({ action: "ticket_created", ... })
+  - أضف:  void appEventBus.emit({ type: EVENT_TYPES.TICKET_CREATED, ... })
+  - الـ listener (activity.ts) جاهز وينتظر هذا الـ emit
+  - أضف metadata.idempotencyKey: `ticket-created-${ticket.id}`
+
+T05-B: إضافة emit لـ ticket.updated في tickets.ts PATCH /tickets/:id
+  - احذف: inline inserts لـ status_changed و assigned
+  - أضف:  void appEventBus.emit({ type: EVENT_TYPES.TICKET_UPDATED, ... })
+  - الـ listener يستنتج action من changes map تلقائياً
+  - أضف أيضاً: TICKET_STATUS_CHANGED emit إذا كان status قد تغيّر
+
+T05-C: هجرة cc_added و cc_removed
+  - هذان غير مُعرَّفَين في EventTypeMap حالياً
+  - الخيار أ: أضف ticket.cc_updated event في core-events/src/events.ts
+  - الخيار ب: أُرسَل كـ ticket.updated مع changes: { cc: "added" } | { cc: "removed" }
+  - توصية: أضف event جديد في Ticket 05 (cc_added / cc_removed أوضح دلالياً)
+
+T05-D: هجرة comment_added في comments.ts POST /tickets/:ticketId/comments
+  - احذف: await db.insert(activityLogsTable).values({ action: "comment_added", ... })
+  - أضف:  TICKET_COMMENTED event type في core-events (إن لم يكن موجوداً)
+  - الـ listener يُنشئ activity + اختياراً يُطلق notification
+
+── الأولوية الثانية: إضافة emitters للـ listeners الجاهزة ──────────────────────
+
+T05-E: employee.created — إضافة emit
+  - ابحث عن: eventDispatcher.dispatch({ event: EVENTS.EMPLOYEE_CREATED, ... })
+    في admin.ts أو users.ts أو workspaces.ts
+  - أضف بجانبه: void appEventBus.emit({ type: EVENT_TYPES.EMPLOYEE_CREATED, ... })
+  - الـ listener في activity.ts جاهز ويُضيف لـ activity_logs بـ ticketId=null
+
+T05-F: form.submitted — تحديد أو إنشاء route
+  - ابحث عن route يُدار من forms.ts
+  - إذا لم يكن موجوداً: أنشئه وأضف emit
+  - إذا كان موجوداً مع "forms.form.submitted" القديم: أضف emit للـ canonical name
+
+── الأولوية الثالثة: تحسينات البنية ─────────────────────────────────────────────
+
+T05-G: DB Schema — إضافة عمودي entityType و entityId
+  - يُزيل الاعتماد على ticketId كـ implicit entity reference
+  - يُمكِّن activity_logs من تتبع أي entity (HR, forms, etc.)
+  - مثال: entityType="ticket", entityId=5, ticketId=5 (backward compat)
+
+T05-H: DB Schema — إضافة عمود event_bus_id
+  - يُمكِّن dedup عبر restarts (لا ليس فقط في الذاكرة)
+  - UNIQUE constraint على event_bus_id للحماية الكاملة
+  - nullable للـ entries القديمة (backward compat)
+
+T05-I: eventDispatcher Bridge Adapter
+  - تقييم: هل يُطلَق appEventBus.emit() تلقائياً عند كل eventDispatcher.dispatch()؟
+  - الفائدة: يُحوِّل كل dispatch قديم لحدث جديد دون تعديل كل route
+  - الخطر: قد يُطلق أحداثاً لا listeners لها (overhead بسيط)
+  - التوصية: قيِّم كمية dispatch calls الحالية قبل القرار
+
+T05-J: Notification Listener على appEventBus
+  - انقل notifications من inline inserts لـ listener على appEventBus
+  - الفائدة: توحيد نمط "emit بدلاً من inline insert"
+  - يُمكِّن SSE push عبر notification.created event (Ticket 06)
+
+── الأولوية الرابعة: أمان الأنواع ──────────────────────────────────────────────
+
+T05-K: UpdateApprovalBody — إزالة الـ type cast اليدوي
+  - في api-spec/openapi.yaml: تأكد من أن status enum = ["approved", "rejected"]
+  - في orval-generated types: سيصبح النوع literal union تلقائياً
+  - احذف: `as "approved" | "rejected"` في approvals.ts
+
+================================================================================
+  نهاية التقرير — Architecture Ticket 04
+================================================================================

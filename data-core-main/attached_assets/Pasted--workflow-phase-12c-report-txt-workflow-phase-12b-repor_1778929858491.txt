@@ -1,0 +1,356 @@
+راجع:
+- workflow-phase-12c-report.txt
+- workflow-phase-12b-report.txt
+- workflow-phase-12a-report.txt
+- workflow-phase-11c-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceWorkflows page
+- useGovernanceWorkflows()
+- GovernanceWorkflowAction
+- workflowStatus
+- escalationLevel
+- resolutionClassification
+- evidenceReferences
+- GovernanceEvidenceReferenceList
+- VIOLATION_SEVERITY_MAP
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-D — Governance Workflows UI & Human Review Lifecycle Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- workflow mutation controls
+- acknowledge/escalate/resolve buttons
+- automatic workflow transitions
+- violation dismissal controls
+- policy edit screens
+- export rendering
+- AI summaries
+- regulator submission
+- legal conclusions
+
+عنوان المهمة:
+WORKFLOW PHASE 12-D — Governance Workflows UI & Human Review Lifecycle Foundations
+
+المهمة الحالية:
+تحويل:
+Governance Workflows placeholder page
+
+إلى:
+frontend human-governed workflow review and lifecycle visibility experience
+
+الهدف:
+تمكين:
+- compliance workflow review
+- workflow status visibility
+- escalation level visibility
+- resolution classification visibility
+- workflow lifecycle timeline
+- assigned operator visibility
+- linked violation/policy/evidence inspection
+
+بطريقة:
+frontend-only read-only workflow lifecycle review layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT WORKFLOWS PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-workflows.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- governance-evidence-reference-list.tsx
+- shared governance components
+
+حدّد:
+- كيف تُعرض workflows حاليًا
+- كيف تُعرض workflow statuses
+- كيف تُعرض escalation levels
+- كيف تربط violationId/policyId/evidenceReferences
+- كيف تحافظ على read-only notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — WORKFLOW STATUS VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+WORKFLOW_STATUS_MAP
+
+يدعم القيم الموجودة في النظام مثل:
+- initiated
+- investigating
+- escalated
+- resolved
+- closed
+
+وإذا كانت التقارير السابقة تستخدم:
+- open
+- acknowledged
+- under_review
+- dismissed
+
+اعمل compatibility mapping بدون كسر.
+
+لكل status:
+- tier
+- label
+- description
+- icon semantic key
+- deterministic order
+
+ممنوع:
+- status controls
+- transition buttons
+- legal verdict wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ESCALATION LEVEL VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+ESCALATION_LEVEL_MAP
+
+يدعم:
+- L1_automated
+- L2_operator
+- L3_management
+- L4_executive
+
+ومع compatibility للقيم:
+- informational
+- standard
+- elevated
+- critical
+
+لكل level:
+- tier
+- label
+- description
+- order
+- badge semantic
+
+مهم:
+L1_automated هنا اسم مستوى legacy فقط، لا يعني تنفيذ تلقائي داخل الواجهة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RESOLUTION CLASSIFICATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+RESOLUTION_CLASSIFICATION_MAP
+
+يدعم:
+- confirmed_violation
+- false_positive
+- operational_exception
+- policy_gap
+- unresolved_pending_review
+
+مع:
+- label
+- description
+- tier
+- no legal conclusion wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — WORKFLOW REVIEW PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceWorkflows
+
+لتحتوي:
+- lifecycle overview banner
+- status summary cards
+- escalation summary cards
+- workflow list/table
+- filters:
+  - status
+  - escalationLevel
+  - resolutionClassification
+  - assignedOperatorId
+  - workspaceId
+- read-only notice واضح
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — WORKFLOW DETAIL EXPANSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لكل workflow row/card:
+أضف expandable detail view يعرض:
+- workflowActionId
+- violationId
+- policyId
+- workspaceId
+- assignedOperatorId
+- initiatedBy
+- workflowStatus
+- escalationLevel
+- resolutionClassification
+- createdAt
+- updatedAt
+- evidenceReferences
+- transition/history إن كانت موجودة
+- linked violation context إن كان موجود
+
+مع:
+- copy-safe display
+- no acknowledge/escalate/resolve buttons
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — WORKFLOW LIFECYCLE TIMELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceWorkflowLifecycleTimeline
+
+يعرض:
+- createdAt
+- acknowledgedAt إن وجد
+- escalatedAt إن وجد
+- resolvedAt إن وجد
+- updatedAt
+- status changes إن وجدت
+- actor/operator إن وجد
+- event label
+- evidence reference مختصر إن وجد
+
+مع:
+- stable chronological ordering
+- empty state
+- compact mode
+- no mutation controls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — EVIDENCE + VIOLATION CONTEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل detail:
+- استخدم GovernanceEvidenceReferenceList
+- اعرض violationId/policyId كـ read-only identifiers
+- إذا entityId موجود من linked context:
+  اعرض guidance للرجوع إلى Audit Integrity page
+- لا تعمل auto-fetch لكل violation إلا إذا موجود hook جاهز وخفيف
+- لا تضف backend calls جديدة كثيرة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Governance Workflows page لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no filters result
+- lifecycle empty state
+- evidence empty state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Governance Workflows UI MUST:
+- remain frontend-only
+- remain read-only
+- never acknowledge/escalate/resolve workflows
+- never create workflows
+- never dismiss violations
+- never edit policies
+- never trigger enforcement
+- never expose legal conclusions
+- never expose data outside super-admin
+
+أي:
+human review lifecycle visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+workflow status map stable
+
+T2:
+escalation level map stable
+
+T3:
+resolution classification map stable
+
+T4:
+workflow page remains super-admin scoped
+
+T5:
+lifecycle timeline ordering deterministic
+
+T6:
+filters config stable
+
+T7:
+no mutation/transition/legal action labels exist
+
+T8:
+workflow safety contract true
+
+T9:
+evidence list reused read-only
+
+T10:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- workflow create/acknowledge/escalate/resolve controls
+- violation dismissal controls
+- policy edit screens
+- transition execution UI
+- PDF/XLSX export
+- AI explanation cards
+- regulator submission
+- legal verdicts
+
+خلك:
+minimal frontend workflow lifecycle review UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12d-report.txt
+
+ويحتوي:
+- governance workflows UI architecture
+- workflow status visual model
+- escalation level visual model
+- resolution classification model
+- workflow detail expansion design
+- lifecycle timeline component
+- evidence/violation context behavior
+- read-only safety guarantees
+- tests results
+- remaining workflows UI gaps
+- readiness assessment قبل Governance Analytics UI

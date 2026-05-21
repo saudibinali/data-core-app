@@ -1,0 +1,602 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 12-A
+Governance Dashboard Shell & Navigation Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date         : 2026-05-16
+Phase        : P12-A (frontend-only governance console shell)
+Prior phase  : P11-G (Phase 11 complete — 2399/2399 backend tests, typecheck clean)
+Final Status : P12-A COMPLETE
+Backend tests: 2399 / 2399 (42 files — unchanged from P11)
+Frontend tests: 182 / 182 (3 files — 54 new assertions across 10 groups)
+Typecheck    : Pre-existing isActive errors in workflows.tsx — unchanged; no new errors
+New files    : 13 (7 pages, 3 shared components, 1 hooks file, 1 config file, 1 test file)
+Modified files: 3 (super-admin-layout.tsx, App.tsx, test file written fresh)
+Backend changes: NONE
+DB migrations  : NONE
+Enforcement    : NONE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — GOVERNANCE CONSOLE SHELL ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-A converts the Phase 11 governance backend into a usable operations console
+by adding a frontend shell layer. The shell is frontend-only, read-only, and
+super-admin-restricted. It connects to the 17 existing governance API routes
+without adding any backend changes.
+
+Architecture principle:
+  Every governance route that existed in Phase 11 now has a corresponding
+  frontend page that displays its data in the super-admin console.
+  No new backend routes were created. No existing routes were modified.
+
+Layer separation maintained:
+  P11 backend (API routes, engine files, DB tables) — UNTOUCHED
+  P12-A frontend (pages, hooks, layout) — ADDITIVE ONLY
+
+Dependency graph:
+  governance-console-config.ts  (pure TS constants — no dependencies)
+         ↓
+  governance-console-hooks.ts   (TanStack Query hooks — depends on api-client)
+         ↓
+  7 × super-admin-governance-*.tsx  (React pages — depends on hooks + ui)
+         ↓
+  super-admin-layout.tsx  (nav section added — depends on lucide-react + wouter)
+         ↓
+  App.tsx  (7 new routes registered — depends on page components)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — NAVIGATION STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The super-admin sidebar now has a "GOVERNANCE" section below the existing 5
+platform nav items. It renders as 7 compact navigation links (icon + label)
+separated from the platform nav by a horizontal divider with "GOVERNANCE" label.
+
+2.1  Navigation items
+
+  Section separator: ─── GOVERNANCE ───
+
+  1.  ShieldCheck    Overview              /super-admin/governance
+  2.  LinkIcon       Audit Integrity       /super-admin/governance/audit-integrity
+  3.  AlertTriangle  Policy Violations     /super-admin/governance/violations
+  4.  GitBranch      Workflows             /super-admin/governance/workflows
+  5.  BarChart3      Analytics             /super-admin/governance/analytics
+  6.  Network        Topology & Readiness  /super-admin/governance/topology
+  7.  Package        Evidence Packages     /super-admin/governance/evidence-packages
+
+2.2  Active route highlighting
+
+  Governance nav items use the same active-state styling as platform nav items:
+  `bg-sidebar-accent text-sidebar-accent-foreground` when the current location
+  matches the item's href. Exact-match logic is used for the overview (to avoid
+  highlighting it when viewing a sub-section). Prefix-match logic is used for
+  all sub-section links.
+
+2.3  data-testid attributes
+
+  Each governance nav link carries a `data-testid` attribute derived from the
+  label:  `governance-nav-overview`, `governance-nav-audit-integrity`, etc.
+  These enable future automated E2E test targeting.
+
+2.4  Governance nav is super-admin-only
+
+  The governance nav items live inside `super-admin-layout.tsx`, which is only
+  rendered by `SuperAdminRoute`. Non-super-admin users never receive this layout
+  and therefore never see the governance nav — not even as a disabled state.
+  The governance nav items are not conditionally hidden; they are structurally
+  absent from non-super-admin views.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — ROUTE FOUNDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7 new routes registered in App.tsx, all using SuperAdminRoute:
+
+  Route path                                        Component
+  ──────────────────────────────────────────────────────────────────────────────
+  /super-admin/governance/audit-integrity           SuperAdminGovernanceAudit
+  /super-admin/governance/violations                SuperAdminGovernanceViolations
+  /super-admin/governance/workflows                 SuperAdminGovernanceWorkflows
+  /super-admin/governance/analytics                 SuperAdminGovernanceAnalytics
+  /super-admin/governance/topology                  SuperAdminGovernanceTopology
+  /super-admin/governance/evidence-packages         SuperAdminGovernanceEvidence
+  /super-admin/governance                           SuperAdminGovernance (overview)
+
+Route ordering note:
+  Sub-section routes are registered BEFORE the overview route
+  (/super-admin/governance). This prevents wouter's prefix-matching from
+  capturing all sub-paths as the overview. The overview route acts as the
+  catch-all for the /governance prefix.
+
+Route guard:
+  All 7 routes use SuperAdminRoute which enforces:
+  - auth.isLoaded: true
+  - auth.isSignedIn: true
+  - auth.user?.role === "super_admin"
+  Any failure condition redirects to /sign-in. The governance console is
+  never rendered for non-super-admin users at any point.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — ACCESS CONTROL BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  Unauthenticated access
+
+  Direct navigation to /super-admin/governance/* by an unauthenticated user
+  triggers SuperAdminRoute's guard. The user is immediately redirected to
+  /sign-in before any page component is mounted. No governance data is fetched,
+  no governance UI is rendered.
+
+4.2  Authenticated non-super-admin access
+
+  A user with role admin/manager/member who navigates directly to
+  /super-admin/governance/* is blocked by:
+  - SuperAdminRoute checks `auth.user?.role !== "super_admin"` → /sign-in
+  Their role does not entitle them to reach the SuperAdminLayout, so the
+  governance nav is never visible even transiently.
+
+4.3  Authenticated super_admin access
+
+  A super_admin user gets the full SuperAdminLayout with governance nav.
+  All 7 governance pages are accessible. API calls from the hooks carry the
+  JWT Bearer token (via setAuthTokenGetter). The backend's requireSuperAdmin
+  middleware then validates the token server-side before returning any data.
+
+4.4  Governance data protection in client
+
+  The governance console hooks only execute when the component is mounted
+  inside SuperAdminLayout (which is only rendered for super_admin users).
+  No governance API call is ever triggered for non-super-admin sessions.
+
+4.5  No governance data in workspace routes
+
+  Governance data (audit chains, violations, workflows, analytics, topology,
+  evidence packages) is never fetched or displayed in any workspace-scoped route
+  (ProtectedRoute). No cross-contamination between the super-admin governance
+  console and workspace user routes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — READ-ONLY UX GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  GovernanceReadOnlyNotice
+
+  A persistent blue-bordered notice appears at the top of every governance page
+  (below the header). It reads:
+    "Read-only governance review area. This console displays audit intelligence,
+     policy evaluation, and compliance analytics for review purposes only.
+     No enforcement, mutation, or export actions are available here."
+  data-testid: governance-read-only-notice
+
+5.2  No mutation controls
+
+  The following controls do not exist on any governance page in P12-A:
+  - Buttons or forms for acknowledging, escalating, or resolving workflows
+  - Buttons for creating, dismissing, or modifying policy violations
+  - Forms for adding or modifying audit chain entries
+  - Export triggers (PDF, XLSX, CSV downloads)
+  - Delete or archive actions of any kind
+  - Regulator submission controls
+
+5.3  Export placeholder (Evidence Packages page)
+
+  The Evidence Packages page shows a disabled export notice card:
+    "Export Rendering — Not Available"
+  It is visually distinct (reduced opacity, dashed border) and explains that
+  PDF/XLSX export requires a future phase with separate access controls.
+
+5.4  Workflow transition placeholder (Workflows page)
+
+  The Workflows page shows an informational notice card:
+    "Workflow Transitions — Coming in P12-C"
+  It explains that acknowledge/escalate/resolve controls will be available in
+  a subsequent phase, and that transitions require explicit operator attribution.
+
+5.5  "Coming in P12-B" placeholder (Audit Integrity page)
+
+  The forensic timeline visualization section is shown as a dashed placeholder
+  card with a "Coming in P12-B" badge — making clear what is next while not
+  blocking the current phase.
+
+5.6  Read-Only badge in page headers
+
+  Every governance section header carries a blue "Read-Only" badge in the
+  top-right corner, derived from GovernanceSectionHeader.
+  The overview page carries a "Read-Only Review" badge in the main header.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — UI STATE HANDLING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every governance page handles all 5 required states:
+
+  LOADING
+    - Skeleton components replace data placeholders during query loading.
+    - Stat cards show Skeleton (h-7 w-12) for individual values.
+    - List sections show rows of Skeleton elements matching expected row height.
+    - The overview readiness banner shows a Skeleton for the status text.
+
+  EMPTY
+    - List sections (audit entries, violations, workflows, policies, etc.) show
+      a centered empty state with an icon, title, and explanatory sub-text.
+    - Example (violations): checkmark icon, "No policy violations detected",
+      "All 8 governance policies are currently satisfied."
+    - Example (workflows): checkmark icon, "No open investigations".
+
+  ERROR
+    - GovernanceErrorState component renders a red-bordered error notice with
+      the message: "Unable to load governance data" + contextual explanation.
+    - Error state is shown per-section (a query failing in one card does not
+      collapse the entire page).
+    - data-testid: governance-error-state
+
+  UNAUTHORIZED
+    - Handled by SuperAdminRoute before any page mounts.
+    - Redirects to /sign-in — no partial rendering of governance UI occurs.
+
+  READ-ONLY NOTICE
+    - GovernanceReadOnlyNotice renders on every page below the header.
+    - Always visible regardless of loading/empty/error state.
+    - data-testid: governance-read-only-notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — API CLIENT STUBS / HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/lib/governance-console-hooks.ts
+
+All 15 exported hooks use useQuery (TanStack Query v5). Zero useMutation.
+
+  Hook                                  Calls
+  ──────────────────────────────────────────────────────────────────────────────
+  useGovernanceAuditChains(params?)     GET /api/platform/compliance/audit-chains
+  useGovernanceAuditIntegrity(params?)  GET /api/platform/compliance/audit-integrity
+  useGovernancePolicies()               GET /api/platform/governance/policies
+  useGovernanceViolations(wsId?)        GET /api/platform/governance/violations[/:wsId]
+  useGovernanceWorkflows(params?)       GET /api/platform/governance/workflows
+  useGovernanceAnalytics(wsId?)         GET /api/platform/governance/analytics
+  useGovernanceAnalyticsEffectiveness() GET /api/platform/governance/analytics/effectiveness
+  useGovernancePolicyEffectiveness(pid?)GET /api/platform/governance/analytics/policy-effectiveness
+  useGovernanceTopology()               GET /api/platform/governance/topology
+  useGovernanceTopologyBoundaries()     GET /api/platform/governance/topology/boundaries
+  useGovernanceReadiness()              GET /api/platform/governance/readiness
+  useGovernanceEvidencePackages(scope?) GET /api/platform/governance/evidence-packages
+  useGovernanceEvidenceReadiness()      GET /api/platform/governance/evidence-packages/readiness
+  useGovernanceTopologySnapshot()       GET /api/platform/governance/topology/snapshot
+  useGovernanceOverview()               composite: readiness + violations + workflows + analytics
+
+Shared config for all hooks:
+  staleTime: 60_000ms (1 minute)
+  retry: 1
+  queryFn: apiClient.get() from @workspace/api-client-react (token-aware)
+
+GOVERNANCE_QUERY_KEYS: 14 named const tuples, all starting with ["governance", ...]
+  Used as queryKey arrays in every hook. Stable, deduplicatable.
+
+Graceful failure guarantee:
+  Every hook returns { data: undefined, isLoading: false, isError: true, error }
+  when the backend returns an error. Pages check isError and render
+  GovernanceErrorState — no uncaught exceptions propagate to the UI.
+
+Read-only guarantee:
+  The hooks file exports no useMutation hooks.
+  The hooks file calls no HTTP POST, PATCH, PUT, or DELETE endpoints.
+  The hooks file has no side effects except dispatching GET queries.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — FULL FILE MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New files created (13):
+
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Pure TS constants file: GOVERNANCE_ROUTES, GOVERNANCE_NAV_LABELS,
+    GOVERNANCE_QUERY_KEY_NAMES, GOVERNANCE_READ_HOOK_NAMES, GOVERNANCE_API_PATHS,
+    GOVERNANCE_CONSOLE_SAFETY_CONTRACT, PLATFORM_NAV_PATHS.
+    No dependencies. Safe for node test environment import.
+
+  artifacts/ops-platform/src/lib/governance-console-hooks.ts
+    15 TanStack Query read-only hooks + GOVERNANCE_QUERY_KEYS constant.
+    Imports: @tanstack/react-query (useQuery), @workspace/api-client-react (apiClient).
+    Zero useMutation exports.
+
+  artifacts/ops-platform/src/pages/super-admin-governance.tsx
+    Governance Console overview dashboard shell.
+    Shows readiness banner, 4 stat cards, 6 section quick-link cards.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-audit.tsx
+    Audit Integrity section.
+    Shows integrity status, 4 summary stat cards, recent entries list,
+    forensic timeline placeholder.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-violations.tsx
+    Policy Violations section.
+    Shows overall risk banner, active violations list, policy registry table.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-workflows.tsx
+    Governance Workflows section.
+    Shows 4 stat cards, open investigations list, transition notice placeholder.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-analytics.tsx
+    Compliance Analytics section.
+    Shows effectiveness score, escalation trend, all 13 metrics table,
+    per-policy stability ratings.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-topology.tsx
+    Topology & Readiness section.
+    Shows readiness verdict, boundary summary grid, governance layer list.
+
+  artifacts/ops-platform/src/pages/super-admin-governance-evidence.tsx
+    Evidence Packages section.
+    Shows scope selector (3 scopes), package metadata, integrity hash,
+    warnings, readiness-scope package, export placeholder.
+
+  artifacts/ops-platform/src/components/governance/governance-read-only-notice.tsx
+    Shared read-only notice component. Used on all 7 governance pages.
+
+  artifacts/ops-platform/src/components/governance/governance-section-header.tsx
+    Shared page header component. Used on 6 section pages (not overview).
+
+  artifacts/ops-platform/src/components/governance/governance-error-state.tsx
+    Shared error state component. Used on all section pages.
+
+  artifacts/ops-platform/src/lib/__tests__/governance-console-shell.test.ts
+    54 assertions across 10 test groups (T1–T10).
+
+Modified files (3):
+
+  artifacts/ops-platform/src/components/layout/super-admin-layout.tsx
+    Added: 7 governance nav items in a "GOVERNANCE" section with separator.
+    Added: 7 new lucide-react icon imports.
+    Added: governanceNavItems const array.
+
+  artifacts/ops-platform/src/App.tsx
+    Added: 7 import statements for governance page components.
+    Added: 7 route registrations using SuperAdminRoute.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1  Backend tests — unchanged
+
+  Command: pnpm --filter @workspace/api-server run test --run
+  Result:  2399 / 2399 (42 files) — EXIT:0
+  No regressions. P11 governance stack intact.
+
+9.2  Frontend tests — P12-A new
+
+  Command: pnpm --filter @workspace/ops-platform run test --run
+  Result:  182 / 182 (3 files) — EXIT:0
+
+  File breakdown:
+    governance-utils.test.ts      128 assertions (pre-existing)
+    governance-trend-utils.test.ts  0 assertions (pre-existing)
+    governance-console-shell.test.ts  54 assertions (P12-A new)
+
+9.3  New test groups (T1–T10) and counts
+
+  T1  Governance nav routes are present and super-admin scoped    5 assertions
+  T2  Governance paths are absent from platform nav paths         3 assertions
+  T3  Route path structure: all under /super-admin                4 assertions
+  T4  Route count matches nav label count (7 sections)            4 assertions
+  T5  Query key name registry covers all 14 expected keys         6 assertions
+  T6  Read-only hook names registry has no mutation indicators     6 assertions
+  T7  All governance API paths start with /api/platform           6 assertions
+  T8  Safety contract declares correct invariants                  9 assertions
+  T9  No overlap between governance routes and platform nav        3 assertions
+  T10 Config constants are stable and well-formed                  8 assertions
+  ────────────────────────────────────────────────────────────────────────────
+  Total new assertions:                                           54
+
+9.4  What the tests verify
+
+  T1–T3: Route structure, path format, super-admin prefix.
+  T4: 7 sections in both nav labels and route paths (1:1 correspondence).
+  T5: All 14 query key names present, unique, named correctly.
+  T6: All 15 hook names are read-only (no mutation verbs in any name).
+  T7: All 16 API paths start with /api/platform, are unique.
+  T8: All 8 safety contract booleans are true (no enforcement, no mutation, etc.)
+  T9: Zero overlap between governance and platform nav sets.
+  T10: All constant arrays are well-formed, unique, no trailing slashes.
+
+9.5  Why no React component imports in tests
+
+  The frontend vitest environment is node-only (no jsdom). Importing React
+  components that use JSX, wouter, lucide-react, or shadcn/ui would fail at
+  module resolution. The existing test files (governance-utils.test.ts,
+  governance-trend-utils.test.ts) import only pure TypeScript utility functions.
+  P12-A follows the same pattern by testing the pure constants file
+  (governance-console-config.ts) exclusively — which has zero dependencies.
+
+9.6  Typecheck status
+
+  Command: pnpm --filter @workspace/ops-platform run typecheck
+  Result: EXIT:2 — same 2 pre-existing errors in workflow-detail.tsx and
+          workflows.tsx (isActive field on UpdateWorkflowBody — unrelated to
+          Phase 12-A). Zero new errors introduced by P12-A.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — REMAINING FRONTEND GOVERNANCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What P12-A provides: shell, navigation, route guards, loading/empty/error states,
+  read-only notices, API stubs, and placeholder cards for all 7 sections.
+
+What P12-A does NOT provide (deferred to subsequent phases):
+
+─────────────────────────────────────────────────────────────────────────────
+A)  AUDIT INTEGRITY (deferred to P12-B)
+─────────────────────────────────────────────────────────────────────────────
+
+A1  Forensic Timeline Visualization
+    The ForensicTimeline returned by GET /forensics/:entityId is not yet
+    visualized. The page shows a "Coming in P12-B" placeholder card.
+    Future: a timeline component with chronological event replay, per-event
+    integrity status badges, retention classification color-coding.
+
+A2  Entity-specific Forensic Drill-down
+    No route or UI for /super-admin/governance/audit-integrity/:entityId.
+    The entity ID must be entered via a search/filter form on the audit page.
+    Future: entity picker with autocomplete + timeline viewer.
+
+A3  Audit Chain Write (POST /audit-chains)
+    Not exposed on any page. P12-A is read-only.
+    Audit entries are written exclusively by backend route handlers.
+
+─────────────────────────────────────────────────────────────────────────────
+B)  POLICY VIOLATIONS (deferred to P12-B)
+─────────────────────────────────────────────────────────────────────────────
+
+B1  Violation Detail Drawer/Modal
+    Clicking a violation in the list opens no detail view.
+    Future: a drawer showing full violation evidence references,
+    linked audit entries, linked execution records.
+
+B2  Violation → Workflow Guided Flow
+    No "Open Investigation" button on the violations page.
+    Opening a workflow for a violation requires using the raw API.
+    Future: a single-step "Open Investigation" button that pre-fills the
+    workflow initiation form with violationId and policyId from the clicked row.
+    This will be implemented in P12-C (workflow transition controls).
+
+B3  Workspace-scoped Violation Filter
+    The workspace filter parameter is supported by the hook but no UI control
+    exists for entering a workspaceId filter on the violations page.
+
+─────────────────────────────────────────────────────────────────────────────
+C)  WORKFLOW TRANSITIONS (deferred to P12-C)
+─────────────────────────────────────────────────────────────────────────────
+
+C1  Acknowledge / Escalate / Resolve Controls
+    The PATCH /workflows/:id/acknowledge, /escalate, /resolve endpoints are
+    not exposed on any P12-A page. A notice card explains they will appear
+    in P12-C. When added, each transition must require an explicit operator ID
+    field (text input, not auto-populated from the session user).
+
+C2  Workflow Initiation Form (POST /workflows)
+    No form exists for creating a new governance workflow.
+    Future: a modal form (violationId, policyId, initiatedBy, escalationLevel?)
+    linked from the violation detail drawer.
+
+C3  Workflow Detail View
+    No per-workflow detail page exists. The current page shows a list of
+    open workflows but clicking a row performs no navigation.
+    Future: /super-admin/governance/workflows/:workflowActionId — full
+    workflow history, attribution chain, current state, transition history.
+
+─────────────────────────────────────────────────────────────────────────────
+D)  ANALYTICS CHARTS (deferred to P12-D)
+─────────────────────────────────────────────────────────────────────────────
+
+D1  Historical Trend Charts
+    Analytics data is displayed as a flat metric table. No time-series charts
+    exist because historical data is not stored (computed on-demand from current
+    workflow state). When a governance_analytics_snapshots table is added, this
+    section can show escalation rate trends over time.
+
+D2  Policy Effectiveness Visualization
+    The per-policy effectiveness list is a text table. A radar chart or
+    grouped bar chart showing confirmed violation rate vs. false positive rate
+    vs. escalation frequency across all 8 policies would be more actionable.
+
+─────────────────────────────────────────────────────────────────────────────
+E)  EVIDENCE PACKAGES (deferred to P12-E)
+─────────────────────────────────────────────────────────────────────────────
+
+E1  Workspace-scoped Evidence Packages
+    The scope selector offers "platform", "readiness", and "workspace" scopes,
+    but the "workspace" option does not yet pass a workspaceId to the API.
+    A workspaceId dropdown must be added to support workspace-scoped packaging.
+
+E2  Evidence Package Export
+    No PDF, XLSX, or structured export exists. The placeholder card explains
+    this. A future export layer requires a separate rendering service.
+
+E3  Topology Diff UI
+    The POST /topology/diff endpoint is not exposed in P12-A.
+    Future: two snapshot input areas (prev + next JSON) and a diff result view
+    showing the 7 change dimensions.
+
+─────────────────────────────────────────────────────────────────────────────
+F)  CROSS-CUTTING GAPS
+─────────────────────────────────────────────────────────────────────────────
+
+F1  Governance Activity Feed (Overview page)
+    The overview page's "recent governance activity" section is not yet backed
+    by a real activity endpoint. The overview currently shows live stats from
+    useGovernanceOverview() but no activity timeline.
+
+F2  Pagination Controls
+    All list views (audit chains, violations, workflows, policy profiles) use
+    a fixed limit (10–50 entries) with no pagination UI.
+    Future: offset-based pagination or infinite scroll for large data sets.
+
+F3  Search and Filter UI
+    No search input or filter controls exist on any governance page.
+    The hooks support optional filter parameters (workspaceId, policyId,
+    workflowStatus, entityType, escalationLevel) but no UI exposes them yet.
+
+F4  Refresh Controls
+    TanStack Query's staleTime is set to 60 seconds. No manual refresh button
+    exists on any governance page. Users must navigate away and back to trigger
+    a re-fetch after the stale window.
+
+F5  Governance Notifications
+    The WARN observability events emitted by the backend (P11-A through P11-F)
+    are not surfaced as in-app notifications. A future phase may connect the
+    notification center to governance WARN events.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — READINESS ASSESSMENT BEFORE AUDIT INTEGRITY UI (P12-B)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE PLATFORM IS READY FOR P12-B (Audit Integrity UI) BECAUSE:
+
+  ✓ The governance console route exists at /super-admin/governance/audit-integrity
+  ✓ The SuperAdminGovernanceAudit page is mounted and rendering correctly
+  ✓ useGovernanceAuditIntegrity() and useGovernanceAuditChains() hooks are wired
+  ✓ Loading, empty, error, and read-only states are all implemented
+  ✓ The forensic timeline section has a visible "Coming in P12-B" placeholder
+  ✓ GovernanceReadOnlyNotice and GovernanceSectionHeader shared components exist
+  ✓ GovernanceErrorState shared component exists
+  ✓ Navigation link is active (LinkIcon, "Audit Integrity")
+  ✓ Backend GET /platform/compliance/audit-integrity route is implemented (P11-A)
+  ✓ Backend GET /platform/compliance/forensics/:entityId route is implemented (P11-A)
+  ✓ Backend GET /platform/compliance/audit-chains route is implemented (P11-A)
+  ✓ All backend tests pass (2399/2399)
+
+P12-B can add directly on top of this foundation:
+  - A forensic timeline component using the ForensicTimeline type from P11-A
+  - Entity ID search/filter input to trigger useGovernanceAuditChains(params)
+  - Per-entry integrity status drill-down
+  - Retention classification filter
+  - Tamper detection alert display
+
+No backend changes will be required for P12-B.
+No new DB migrations will be required for P12-B.
+The entire P12-B scope is frontend-only (matching P12-A's frontend-only principle).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOSURE STATEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12-A is COMPLETE.
+
+  - 13 new files (7 pages, 3 shared components, 1 hooks, 1 config, 1 test)
+  - 3 modified files (layout, router, test)
+  - 0 backend changes
+  - 0 DB migrations
+  - 182/182 frontend tests passing
+  - 2399/2399 backend tests passing
+  - No mutation controls on any governance page
+  - No enforcement, no AI summaries, no export rendering, no external submission
+  - Full route guard: super_admin only, redirect to /sign-in otherwise
+  - All 7 governance routes registered and protected
+  - All 5 UI states implemented on every page (loading, empty, error, unauthorized, read-only notice)
+  - 15 read-only API hooks ready for connection to live backend data
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 12-A REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

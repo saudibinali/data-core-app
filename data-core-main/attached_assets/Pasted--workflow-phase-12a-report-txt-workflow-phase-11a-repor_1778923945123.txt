@@ -1,0 +1,303 @@
+راجع:
+- workflow-phase-12a-report.txt
+- workflow-phase-11a-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceAudit page
+- useGovernanceAuditIntegrity()
+- useGovernanceAuditChains()
+- GET /api/platform/compliance/audit-integrity
+- GET /api/platform/compliance/audit-chains
+- GET /api/platform/compliance/forensics/:entityId
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-B — Audit Integrity UI & Forensic Timeline Review Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- audit record creation UI
+- mutation controls
+- export rendering
+- AI summaries
+- regulator submission
+- automatic repair of audit chains
+- legal conclusions
+
+عنوان المهمة:
+WORKFLOW PHASE 12-B — Audit Integrity UI & Forensic Timeline Review Foundations
+
+المهمة الحالية:
+تحويل:
+Audit Integrity placeholder page
+
+إلى:
+frontend forensic audit review experience
+
+الهدف:
+تمكين:
+- audit integrity overview review
+- audit chain browsing
+- forensic timeline visualization
+- tamper/orphan/incomplete status visibility
+- entity-scoped audit investigation UX
+- retention classification visibility
+
+بطريقة:
+frontend-only read-only forensic review layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT P12-A AUDIT PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-audit.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- shared governance components
+
+حدّد:
+- أين placeholder الخاص بـ "Coming in P12-B"
+- كيف تُعرض audit integrity summary حاليًا
+- كيف تُعرض recent audit entries
+- كيف يمكن إضافة entity search بدون كسر layout
+- كيف تحافظ على read-only notice
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — FORENSIC TIMELINE COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceForensicTimeline
+
+يعرض:
+- chronological event list
+- occurredAt
+- recordedAt إذا موجود
+- eventType
+- entityType
+- entityId
+- operatorId
+- integrityStatus
+- retentionClassification
+- evidence/hash summary مختصر
+
+مع:
+- status badges
+- retention badges
+- empty state
+- loading state
+- error state
+- deterministic ordering by occurredAt ثم recordedAt
+
+بدون:
+- mutation actions
+- repair buttons
+- legal conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ENTITY-SCOPED FORENSIC REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف في Audit Integrity page:
+- entityId input
+- entityType optional select إذا متاح
+- "Review Timeline" button
+
+لكن الزر فقط:
+- يغير query state
+- يجلب GET /forensics/:entityId
+- لا يكتب أي شيء
+
+إذا entityId فاضي:
+- لا تنفذ query
+- اعرض guidance empty state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — HOOK FOR FORENSIC TIMELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف hook قراءة فقط:
+
+useGovernanceForensicTimeline(entityId?: string)
+
+يربط:
+GET /api/platform/compliance/forensics/:entityId
+
+مع:
+- enabled فقط إذا entityId موجود
+- staleTime 60_000
+- retry 1
+- query key stable
+- لا useMutation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — AUDIT CHAIN BROWSER IMPROVEMENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن recent audit entries إلى:
+- table أو card list واضحة
+- filters خفيفة:
+  - integrityStatus
+  - retentionClassification
+  - entityType
+- display:
+  - chainId
+  - entityType/entityId
+  - eventType
+  - integrityStatus
+  - retentionClassification
+  - occurredAt
+  - hash preview
+
+لكن:
+- filters client-side أو query params إذا موجودة
+- بدون pagination معقد الآن
+- بدون export
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — INTEGRITY STATUS VISUAL LANGUAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم mapping واضح:
+
+verified      → healthy
+warning       → attention
+compromised   → critical
+orphaned      → critical
+incomplete    → warning
+
+مع:
+- badges
+- icon
+- short explanation text
+- لا تستخدم ألوان مضللة
+- لا تقول "compliant legally"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — RETENTION CLASSIFICATION VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض retentionClassification كـ badge:
+
+operational
+governance
+compliance_sensitive
+forensic_critical
+
+مع tooltip أو helper text مختصر:
+- operational: تشغيل يومي
+- governance: حوكمة
+- compliance_sensitive: حساس امتثاليًا
+- forensic_critical: مهم للتحقيق
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Audit Integrity page لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no-entity-selected state
+- timeline empty state
+- timeline error state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Audit Integrity UI MUST:
+- remain frontend-only
+- remain read-only
+- never create audit records
+- never repair audit chains
+- never hide compromised/orphaned states
+- never make legal compliance conclusions
+- never expose data outside super-admin
+
+أي:
+forensic review UX فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+forensic timeline hook is read-only
+
+T2:
+forensic timeline query disabled without entityId
+
+T3:
+audit integrity status mapping stable
+
+T4:
+retention classification labels stable
+
+T5:
+timeline ordering deterministic
+
+T6:
+audit page config remains super-admin scoped
+
+T7:
+no mutation/export/legal action labels exist
+
+T8:
+empty/error states config present
+
+T9:
+query keys stable
+
+T10:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- audit record creation forms
+- repair controls
+- delete/archive controls
+- PDF/XLSX export
+- AI explanation cards
+- regulator submission
+- legal compliance verdicts
+
+خلك:
+minimal frontend forensic audit review UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12b-report.txt
+
+ويحتوي:
+- audit integrity UI architecture
+- forensic timeline component design
+- entity-scoped review behavior
+- audit chain browser improvements
+- status/retention visual semantics
+- read-only safety guarantees
+- tests results
+- remaining audit UI gaps
+- readiness assessment قبل Policy Violations UI

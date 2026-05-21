@@ -1,0 +1,186 @@
+================================================================================
+WORKFLOW PHASE 15-G — Commercial Console Integration
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: UI/integration only — unified Commercial tab inside Tenant Registry.
+No new permissions, no payment gateway, no email, no automated workflows.
+
+Next phase: P15-H — Final Commercial Administration Closure
+
+================================================================================
+1) UNIFIED COMMERCIAL CONSOLE LAYOUT
+================================================================================
+
+Location:
+  Super Admin > Tenant Registry > expand tenant > Commercial tab
+
+Component: artifacts/ops-platform/src/components/commercial/CommercialConsole.tsx
+
+Structure (accordion sections):
+  A) Overview — CommercialOverviewSummary (summary cards at top, always visible)
+  B) Commercial Account — CommercialAccountSection (account + billing contacts)
+  C) Contracts & Renewals — ContractTermsSection (existing)
+  D) Invoices & Documents — InvoicesSection (existing, collection panel externalized)
+  E) Collection Tracking — CommercialCollectionSection + CollectionTrackingPanel
+  F) Risk & Readiness — CommercialRiskSection (P15-F integration)
+  G) Commercial Activity — placeholder (see section 6)
+
+Replaced inline CommercialPanel in super-admin-tenants.tsx (~500 lines removed).
+Existing section components/hooks reused — no full rebuild.
+
+================================================================================
+2) CROSS-SECTION SUMMARY CARDS
+================================================================================
+
+Component: CommercialOverviewSummary.tsx
+
+Cards (permission-gated):
+  - Account Status (commercial.accounts.read)
+  - Active Contract (commercial.contracts.read)
+  - Renewal Date (commercial.contracts.read)
+  - Latest Invoice (commercial.invoices.read)
+  - Outstanding (commercial.risk.read or invoices fallback)
+  - Collection State (risk signals or latest invoice status)
+  - Risk Level (commercial.risk.read)
+  - Renewal Readiness (commercial.risk.read)
+
+Data sources (existing hooks only — no DB storage):
+  - useCommercialAccount
+  - useTenantCommercialContracts
+  - useTenantCommercialInvoices
+  - useTenantCommercialRisk
+
+No new GET /commercial-overview backend endpoint (hooks sufficient).
+
+================================================================================
+3) RISK INTEGRATION (P15-F)
+================================================================================
+
+CommercialRiskSection.tsx inside Commercial tab:
+  - riskLevel badge
+  - renewalReadinessStatus badge
+  - signals, reasons, recommended actions (read-only keys)
+  - "Open Full Risk View" → /super-admin/commercial-risk
+
+Gated by commercial.risk.read (section hidden without permission).
+
+No executable recommended actions — display only.
+
+================================================================================
+4) NAVIGATION / DEEP LINKS
+================================================================================
+
+From Commercial Risk page:
+  - Detail panel: /super-admin/tenants?tenantId={id}&tab=commercial
+  - List rows: per-tenant "Open Commercial Console" link (same query)
+
+Tenant Registry:
+  - parseRegistryDeepLink() reads ?tenantId= or ?expand= and ?tab=commercial
+  - Auto-expands matching tenant row
+  - TenantAdminConsole opens Commercial tab via initialTab prop
+
+Risk dashboard page retained at /super-admin/commercial-risk (platform-wide view).
+
+================================================================================
+5) PERMISSION GATING
+================================================================================
+
+No new permissions. Existing matrix unchanged (32 total).
+
+Section visibility:
+  - Account: commercial.accounts.read / contacts.read
+  - Contracts: commercial.contracts.read
+  - Invoices: commercial.invoices.read
+  - Collection: commercial.payments.read
+  - Risk: commercial.risk.read
+  - Activity: platform.activity.read OR audit.read (message only)
+
+Action buttons remain in section components:
+  - commercial.accounts.update, contacts.update, contracts.update
+  - invoices.update, invoiceDocuments.upload
+  - payments.record, payments.verify
+
+================================================================================
+6) COMMERCIAL ACTIVITY — DECISION
+================================================================================
+
+NOT implemented as live feed in P15-G.
+
+Reason:
+  GET /platform/activity filters workspaceId IS NULL (platform-user events only).
+  Commercial audit events are written with workspaceId set on tenant actions.
+  A tenant-scoped commercial activity API would require new backend scope (deferred).
+
+UI shows read-only notice (data-testid=commercial-activity-unavailable) when user has
+activity permission, explaining the limitation.
+
+================================================================================
+7) FRONTEND UX
+================================================================================
+
+- Accordion sections with sensible default open panels
+- Loading/empty states in existing section components
+- Status badges from commercial-config
+- Collection: open from invoice row → dedicated Collection accordion panel
+- hideInlineCollectionPanel on InvoicesSection when used in console
+
+Forbidden UI not added: Pay Now, Stripe, Checkout, Generate Invoice, Tax/ZATCA,
+Send Email, Auto Renew, Auto Collect, Delete.
+
+================================================================================
+8) BACKEND
+================================================================================
+
+No new backend routes in P15-G.
+All data via existing commercial + risk APIs.
+
+================================================================================
+9) SAFETY CONTRACT
+================================================================================
+
+artifacts/ops-platform/src/lib/commercial-config.ts — added flags (all true):
+  commercialConsoleReadOnlyIntegration
+  noDestructiveCommercialActions
+  sectionPermissionGated
+  riskReadOnlyIntegrated
+
+Plus existing P15-A–F flags (noPaymentGateway, noEmailSending, etc.).
+
+================================================================================
+10) TESTS
+================================================================================
+
+New:
+  commercial-console-integration.test.ts (11 tests)
+
+Updated:
+  commercial-tab-contracts.test.ts — gates read from CommercialConsole.tsx
+  commercial-tab-invoices.test.ts — gates read from CommercialConsole.tsx
+  commercial-config.test.ts — P15-G safety flags
+
+Results:
+  ops-platform: 31 files, 1282 tests passed
+  api-server: unchanged from P15-F (3623 tests — no backend changes)
+
+================================================================================
+11) LIMITATIONS LEFT FOR P15-H
+================================================================================
+
+P15-H — Final Commercial Administration Closure (next):
+  - Tenant-scoped commercial activity/audit feed API
+  - Optional GET /commercial-overview aggregation endpoint if perf needs it
+  - Cross-link polish (risk dashboard ↔ console scroll-to-section)
+  - Final QA pass on role matrix documentation
+  - Any remaining commercial admin closure items (export, bulk read views) if scoped
+
+Intentionally not in P15-G:
+  - Electronic payment / gateway
+  - Email / dunning / auto-renewal
+  - Accounting / tax / ZATCA
+  - Permission matrix redesign
+  - Destructive delete on commercial records
+
+================================================================================
+END OF REPORT — Phase 15-G Complete
+================================================================================

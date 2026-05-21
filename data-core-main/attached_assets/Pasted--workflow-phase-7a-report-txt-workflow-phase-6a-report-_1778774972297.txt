@@ -1,0 +1,262 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-6a-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- manual snapshot capture limitation
+- retention recommendations
+- append-only guarantees
+- governance snapshot growth
+- scheduler safety model
+
+ثم نفّذ فقط:
+P7-B — Automated Snapshot Scheduling & Retention Foundations
+
+ولا تنفّذ:
+- distributed cron systems
+- Kafka/event-bus scheduling
+- warehouse archival
+- cold-storage migration
+- ML retention policies
+- cross-region replication
+
+عنوان المهمة:
+WORKFLOW PHASE 7-B — Automated Snapshot Scheduling & Retention Lifecycle
+
+المهمة الحالية:
+تحويل:
+manual governance snapshot capture
+
+إلى:
+self-sustaining operational history lifecycle
+
+الهدف:
+تمكين:
+- automatic governance snapshot capture
+- deterministic historical continuity
+- retention lifecycle governance
+- storage growth control
+
+بطريقة:
+single-process append-only governance scheduler
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT SNAPSHOT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- captureGovernanceSnapshot()
+- governance_snapshots table
+- trend queries
+- retention recommendations
+- P6-A scheduler model
+
+حدّد:
+- أين manual capture يعتمد على البشر
+- أين snapshot growth غير محدود
+- أين retention lifecycle غير منفذ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN SNAPSHOT SCHEDULER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceSnapshotScheduler
+
+داخل:
+single-process scheduler model.
+
+المطلوب:
+- periodic capture loop
+- deterministic interval
+- restart-safe behavior
+- no overlapping capture cycles
+
+الـ default:
+5-minute capture cadence.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — WORKSPACE SNAPSHOT ITERATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+كيف scheduler يمر على workspaces.
+
+المطلوب:
+- deterministic ordering
+- pagination-ready iteration
+- skip deleted/inactive workspaces
+- bounded batch size
+
+لكن:
+لا تبنِ distributed sharding.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — APPEND-ONLY CAPTURE GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+automated capture
+يحافظ على:
+- immutable snapshots
+- append-only inserts
+- no history rewriting
+- no UPDATE/DELETE لمسارات snapshots
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — RETENTION ENFORCEMENT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+نفّذ:
+minimal pruning lifecycle.
+
+الحد الأدنى المطلوب:
+- delete raw snapshots older than retention window
+- retention constants centralized
+- dry-run capable pruning logic
+
+لكن:
+بدون rollup tables حالياً.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — RETENTION SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف safeguards تمنع:
+- deleting recent snapshots
+- deleting all history accidentally
+- pruning future timestamps
+- unbounded delete queries
+
+المطلوب:
+bounded deterministic pruning.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_snapshot_scheduler_started
+
+B)
+governance_snapshot_cycle_completed
+
+C)
+governance_snapshot_pruning_completed
+
+D)
+governance_snapshot_pruning_dry_run
+
+E)
+governance_snapshot_scheduler_failed
+
+كلها تحتوي:
+- workspaceCount
+- snapshotCount
+- prunedCount
+- retentionWindow
+- cycleDurationMs
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — STORAGE GOVERNANCE METRICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+retention stats model
+يحتوي:
+- totalSnapshots
+- oldestSnapshotAt
+- newestSnapshotAt
+- estimatedStoragePressure
+- snapshotsPrunedLastCycle
+
+مع:
+future dashboard readiness.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+scheduler captures snapshots automatically
+
+T2:
+capture cycles never overlap
+
+T3:
+workspace iteration deterministic
+
+T4:
+append-only guarantees preserved
+
+T5:
+old snapshots pruned correctly
+
+T6:
+recent snapshots never pruned
+
+T7:
+future snapshots excluded from pruning
+
+T8:
+dry-run pruning performs no deletion
+
+T9:
+retention constants applied consistently
+
+T10:
+scheduler restart-safe behavior preserved
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Retention lifecycle MUST:
+- never mutate surviving snapshots
+- never rewrite metrics history
+- never affect runtime executions
+- never block workflow scheduler
+
+أي:
+governance-history isolation كاملة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- rollup aggregation tables
+- distributed scheduling mesh
+- archival storage tiers
+- S3 offloading
+- analytics warehouse sync
+- realtime streaming
+
+خلك:
+minimal automated governance lifecycle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-7b-report.txt
+
+ويحتوي:
+- scheduler architecture
+- workspace iteration strategy
+- retention enforcement behavior
+- append-only guarantees
+- pruning safety model
+- observability additions
+- tests results
+- remaining storage governance gaps
+- readiness assessment قبل advanced analytics phase

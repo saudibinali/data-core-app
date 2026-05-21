@@ -1,0 +1,100 @@
+راجع نظام الأحداث الحالي بالكامل ثم نفّذ فقط هذه المهمة المعمارية بدون أي refactor خارج نطاقها.
+
+المهمة الحالية فقط:
+توحيد نقطة دخول الأحداث (Event Entry Point) وجعل appEventBus هو الـ official event interface للنظام بالكامل مع الحفاظ على التوافق الكامل مع النظام القديم مؤقتًا.
+
+المشكلة الحالية:
+يوجد نظامان متوازيان:
+- eventDispatcher (legacy)
+- appEventBus (new typed system)
+
+هذا يسبب خطر مستقبلي:
+- duplication
+- inconsistent behavior
+- بعض الأحداث تذهب للنظام القديم فقط
+- بعض listeners تعمل على نظام دون الآخر
+- صعوبة debugging و tracing
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- dispatcher.ts
+- app-bus.ts
+- أي exports مرتبطة بالأحداث
+- أي routes أو services تستدعي eventDispatcher مباشرة
+
+2- اجعل appEventBus هو:
+Official Event Entry Point
+
+يعني:
+أي كود جديد يجب أن يمر عبر:
+appEventBus.emit()
+
+وليس eventDispatcher.dispatch()
+
+3- أنشئ Bridge Layer واضح بين النظامين.
+
+المطلوب:
+عند استخدام:
+appEventBus.emit()
+
+يجب أن يكون بالإمكان:
+- تشغيل listeners الجديدة
+- وتشغيل eventDispatcher القديم عند الحاجة للتوافق المرحلي
+
+لكن:
+لا تجعل النظام القديم يستدعي appEventBus عكسيًا.
+
+الاتجاه يجب أن يكون:
+appEventBus → legacy bridge
+وليس العكس.
+
+4- لا تحذف eventDispatcher الحالي.
+
+5- لا تكسر أي behavior حالي.
+
+6- لا تغيّر routes أو business logic بشكل كبير.
+
+7- أضف architecture boundaries واضحة:
+- eventDispatcher = legacy compatibility layer
+- appEventBus = canonical runtime layer
+
+8- أضف comments واضحة تشرح:
+- migration direction
+- source of truth
+- deprecation strategy
+- ownership boundaries
+
+9- إذا وجدت direct imports كثيرة للـ eventDispatcher:
+لا تعمل refactor شامل الآن.
+لكن:
+- وثّقها
+- وحدد أولويات migration
+
+10- أضف warnings أو TODOs معمارية بالمواقع الحساسة التي لا تزال تستخدم legacy dispatcher مباشرة.
+
+11- لا تدخل Redis أو queues أو persistence جديدة حالياً.
+
+12- لا تغيّر database schema.
+
+13- لا تحذف workspace_event_logs أو legacy listeners حالياً.
+
+14- أضف lightweight tracing/logging إن كان مناسبًا لتوضيح:
+- هل الحدث مر على bus الجديد؟
+- هل تم bridge للقديم؟
+- أي listeners استقبلته؟
+
+15- في النهاية:
+أنشئ ملف TXT باسم:
+
+architecture-ticket-bridge-report.txt
+
+ويحتوي:
+- كيف أصبح flow الأحداث بعد التعديل
+- bridge architecture بالتفصيل
+- الملفات المعدلة
+- جميع الأماكن التي لا تزال تستخدم eventDispatcher مباشرة
+- migration priorities
+- أي risks متبقية
+- أي duplicate event flows لاحظتها
+- أي recommendations قبل Ticket التالي

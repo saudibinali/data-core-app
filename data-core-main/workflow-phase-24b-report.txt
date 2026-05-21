@@ -1,0 +1,124 @@
+================================================================================
+WORKFLOW PHASE 24B REPORT
+Procurement Canonical DB & Vendor Lifecycle Foundation
+Generated: 2026-05-20
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P24-B delivers the first executable procurement foundation: canonical procurement
+tables (workspace-scoped, decimal-safe), vendor lifecycle service, procurement
+policy snapshotting service, workflow-approval linkage table/service, PR/RFQ/PO
+persistence services, procurement finance readiness assessment (READY/WARNING/
+BLOCKED), procurement document linkage helpers, procurement permissions exposure,
+module governance registration, and five procurement JSON report definitions
+integrated with generated_reports/export_jobs.
+
+No inventory/receiving, no AP invoices, no payments, no posting, no supplier
+portal, and no destructive migrations were performed.
+
+TABLES ADDED (migration 0017)
+-----------------------------
+procurement_vendors
+procurement_vendor_contacts
+procurement_vendor_documents
+procurement_purchase_requests
+procurement_request_items
+procurement_rfq
+procurement_rfq_responses
+procurement_purchase_orders
+procurement_po_items
+procurement_procurement_policies
+procurement_approval_links
+
+SERVICES ADDED (api-server)
+---------------------------
+artifacts/api-server/src/lib/procurement/
+  procurement-audit.ts
+  vendor-lifecycle-service.ts
+  procurement-policy-service.ts
+  procurement-approval-service.ts
+  purchase-request-service.ts
+  rfq-service.ts
+  purchase-order-service.ts
+  procurement-finance-readiness-service.ts
+  procurement-document-service.ts
+  procurement-reports.ts
+  procurement-guards.ts
+
+VENDOR LIFECYCLE STATUS
+-----------------------
+GO (foundation)
+- create/activate/suspend/block/archive
+- preferred vendor handling + risk flags
+- reason tracking + audit hooks
+- document validation hook (non-expired docs) supported
+
+PROCUREMENT WORKFLOW STATUS
+---------------------------
+PARTIAL
+- PR: create/submit/cancel/close + draft revisions + policy snapshotting
+- RFQ: create/send/close/award + response persistence + attachments via doc registry linkage
+- PO: create/submit/send/ack/close + commitment semantics + readiness capture
+- Full PR→RFQ/PO conversion automation not included (by instruction).
+
+FINANCE READINESS STATUS
+------------------------
+GO (foundation; no posting)
+- READY/WARNING/BLOCKED assessment for PO:
+  cost center validity, required dimensions, vendor status, totals consistency,
+  duplicate PO policy signal, GL readiness signals recorded on PO.
+
+SECURITY STATUS
+---------------
+PARTIAL
+- Procurement permission keys registered in workspace permissions registry.
+- Confidential document boundary improved: procurement confidential permission
+  can unlock document access for confidential procurement docs.
+- Full procurement role templates/UI not included.
+
+REPORTING STATUS
+----------------
+GO (definitions + generator)
+- Registered definitions:
+  procurement.vendor.register
+  procurement.purchase.requests
+  procurement.purchase.orders
+  procurement.rfq.summary
+  procurement.policy.overrides
+- Wired to generated_reports via report generator dispatch.
+- Export job route gates procurement exports with procurement.export.
+
+SMOKE TEST RESULTS
+------------------
+- Vitest: artifacts/api-server/src/lib/procurement/__tests__/p24b-procurement.smoke.test.ts
+  (Pure governance + confidential doc enforcement) — added.
+
+READINESS MATRIX (GO / PARTIAL / BLOCKED)
+-----------------------------------------
+procurement DB           : GO
+vendor lifecycle         : GO
+procurement workflows    : PARTIAL
+procurement governance   : PARTIAL
+ERP procurement readiness: PARTIAL
+
+REMAINING BLOCKERS
+------------------
+- Procurement workspace UI & operations center (P24-C).
+- Workflow templates + event emitters for procurement lifecycle automation.
+- Deeper segregation-of-duties enforcement for approvals/overrides in runtime routes.
+
+RECOMMENDED NEXT PHASE
+----------------------
+P24-C — Procurement Workspace UI & Operations Center
+Do NOT start P24-C in this delivery.
+
+CONFIRMATIONS
+-------------
+- No inventory rollout.
+- No AP invoice engine.
+- No payment execution.
+- No supplier portal.
+- No accounting posting.
+- No destructive migration.
+

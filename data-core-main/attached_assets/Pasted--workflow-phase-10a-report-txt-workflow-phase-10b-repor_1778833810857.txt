@@ -1,0 +1,282 @@
+راجع:
+- workflow-phase-10a-report.txt
+- workflow-phase-10b-report.txt
+خصوصًا:
+- IncidentTimeline
+- ReliabilityDomainSnapshot
+- OperationalReliabilitySLO
+- escalationMoments
+- recoveryMoments
+- durationMinutes
+- propagationRisk
+- containment boundaries
+
+ثم نفّذ فقط:
+P10-C — Recovery Recommendations & Reliability Advisory Intelligence Foundations
+
+ولا تنفّذ:
+- automated remediation
+- self-healing systems
+- automatic scheduler mutation
+- autonomous recovery
+- AI-driven orchestration
+- incident auto-resolution
+
+عنوان المهمة:
+WORKFLOW PHASE 10-C — Recovery Recommendations & Reliability Advisory Intelligence Foundations
+
+المهمة الحالية:
+تحويل:
+historical reliability governance
+
+إلى:
+operator-guided recovery advisory infrastructure
+
+الهدف:
+تمكين:
+- recovery recommendation generation
+- incident triage guidance
+- degradation mitigation suggestions
+- operational recovery intelligence
+- advisory-driven resilience operations
+
+بطريقة:
+deterministic read-only recovery advisory layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT RECOVERY GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Blocking Gaps"
+
+خصوصًا:
+- no recovery recommendations
+- no historical trend analysis
+- no operator guidance
+- no remediation advisory layer
+
+حدّد:
+- أين operators بدون guidance
+- أين degradation patterns غير مستغلة
+- أين incident history يمكن تحويله لتوصيات
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN RECOVERY ADVISORY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecoveryRecommendation
+
+ليحتوي:
+- recommendationId
+- workspaceId
+- incidentId
+- recommendationType
+- severity
+- rationale
+- suggestedActions
+- confidenceLevel
+- relatedSignals
+- generatedAt
+
+مع:
+deterministic advisory semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — RECOVERY ANALYSIS ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+generateRecoveryRecommendations()
+
+بحيث:
+- يحلل IncidentTimeline
+- يقرأ degradation history
+- يربط propagationRisk مع containment failures
+- يكتشف recurring escalation patterns
+- يولّد operator guidance
+
+لكن:
+بدون أي execution.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RECOVERY RECOMMENDATION TYPES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecoveryRecommendationType
+
+يحتوي:
+- monitor_closely
+- investigate_scheduler_pressure
+- isolate_noisy_tenant
+- review_fairness_policies
+- investigate_advisory_storm
+- containment_boundary_review
+- escalation_watch
+- recovery_stability_watch
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — HISTORICAL TREND ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+trend-analysis primitives:
+
+- repeated escalation frequency
+- recovery duration trend
+- cascading-risk recurrence
+- advisory storm recurrence
+- chronic degradation detection
+
+لكن:
+بدون predictive AI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — CONFIDENCE & ADVISORY SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+RecommendationConfidence
+
+يحتوي:
+- low
+- moderate
+- high
+- strong
+
+اعتمد على:
+- historical consistency
+- incident repetition
+- signal agreement
+- degradation stability
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /platform/reliability/recommendations
+GET /platform/reliability/recommendations/:incidentId
+GET /platform/reliability/trends
+
+بحيث:
+- super-admin only
+- deterministic ordering
+- audit-safe serialization
+- append-only recommendation history
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+recovery_recommendation_generated
+
+B)
+reliability_trend_detected
+
+C)
+incident_recurrence_detected
+
+D)
+recovery_pattern_classified
+
+كلها تحتوي:
+- workspaceId
+- incidentId
+- recommendationType
+- confidenceLevel
+- propagationRisk
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Recovery advisory layer MUST:
+- remain READ-ONLY
+- never auto-remediate
+- never mutate scheduler state
+- never apply policies automatically
+- fail closed on ambiguity
+
+أي:
+operator-guidance فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+recommendations deterministic
+
+T2:
+recurring incidents detected correctly
+
+T3:
+confidence classification stable
+
+T4:
+chronic degradation detection valid
+
+T5:
+advisory storms produce recommendations
+
+T6:
+cascading recurrence tracked correctly
+
+T7:
+trend serialization stable
+
+T8:
+append-only recommendation history preserved
+
+T9:
+super-admin enforcement valid
+
+T10:
+recommendation engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- AI remediation
+- self-healing execution
+- automatic recovery workflows
+- autonomous scheduler adjustments
+- predictive orchestration
+- automated containment actions
+
+خلك:
+minimal deterministic recovery advisory infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-10c-report.txt
+
+ويحتوي:
+- recovery advisory architecture
+- recommendation semantics
+- trend-analysis model
+- confidence-classification model
+- governance integration points
+- observability additions
+- tests results
+- remaining resilience gaps
+- readiness assessment قبل recovery orchestration research

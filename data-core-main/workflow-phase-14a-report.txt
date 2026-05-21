@@ -1,0 +1,528 @@
+================================================================================
+WORKFLOW PHASE 14-A
+PLATFORM USER ACCOUNT CREATION FOUNDATION + ROOT PROTECTION POLICY
+================================================================================
+
+Date:    2026-05-16
+Phase:   P14-A
+Status:  COMPLETE
+Scope:   Platform user creation, listing, status management, root protection
+
+================================================================================
+1. CURRENT AUTH / SUPER ADMIN MODEL REVIEW
+================================================================================
+
+Auth source:
+  Self-hosted JWT. No external auth provider.
+  POST /auth/login accepts employeeNumber + bcrypt password → signs JWT.
+  Token stored in localStorage as "ops_access_token".
+  Token payload: { userId, workspaceId, role }.
+
+Users table (before P14-A):
+  Table: users
+  Role field: role TEXT — values: member, admin, manager, super_admin
+  Status field: status TEXT — values: active, inactive
+  Platform user detection: role = "super_admin" AND workspaceId IS NULL
+  No separate platform_users table.
+
+Super admin detection:
+  requireSuperAdmin middleware: req.userRole !== "super_admin" → 403.
+  No flag, no separate table — purely role-based.
+  workspaceId IS NULL for all super_admin users (no workspace assignment).
+
+SuperAdminRoute (frontend):
+  Component guard: if role !== "super_admin" → redirect to /sign-in.
+  All /super-admin/* routes protected by this guard.
+
+Activity logs:
+  activityLogsTable — userId (actor), action (string), metadata (JSON text),
+  workspaceId (null for platform-level actions), createdAt.
+  Pattern: insert BEFORE returning response (write-then-respond).
+
+Password management:
+  bcrypt (cost 12) hash stored in users.passwordHash.
+  No external identity provider. No SSO. No MFA.
+
+Migration impact:
+  3 new columns added to usersTable: platformRoleCode, isRootOwner, isProtected.
+  1 new column: lastLoginAt (timestamp, nullable).
+  All additive — zero impact on existing records.
+  Existing super_admin account: platformRoleCode = NULL, isRootOwner = false.
+  Backward-compat root detection: role = "super_admin" AND workspaceId IS NULL
+  AND platformRoleCode IS NULL → treated as Root Platform Owner.
+
+Limitations:
+  - requireSuperAdmin used for all platform user routes (full permission matrix
+    deferred to P14-B).
+  - No granular per-role platform access control yet.
+  - lastLoginAt populated at login time — currently NULL for all existing users
+    (login route update deferred to a separate micro-phase).
+
+================================================================================
+2. PLATFORM USER MODEL
+================================================================================
+
+Decision: NO new table created.
+  Existing usersTable extended with 4 new columns.
+  Platform users = usersTable WHERE workspaceId IS NULL.
+  Preserves backward compatibility. No duplicate records. No FK inconsistency.
+
+New columns added to usersTable:
+
+  platformRoleCode  TEXT NULLABLE
+    Sub-role within platform administration.
+    NULL for the legacy Root Platform Owner (backward compat).
+    Set to one of 7 assignable codes for newly created platform users.
+
+  isRootOwner       BOOLEAN NOT NULL DEFAULT FALSE
+    Explicit root flag. For future use (post P14-B migration).
+    Currently unused at insert — root is derived from platformRoleCode IS NULL.
+
+  isProtected       BOOLEAN NOT NULL DEFAULT FALSE
+    Explicit protection flag. For future use (post P14-B migration).
+    Currently derived at query time from isRootPlatformOwner().
+
+  lastLoginAt       TIMESTAMP WITH TIMEZONE NULLABLE
+    Last successful authentication. NULL = never signed in.
+    Login route update (setting this on POST /auth/login) deferred.
+
+PlatformUserStatus (4 values):
+  invited   — created, pending first sign-in
+  active    — active and can sign in
+  disabled  — blocked, sign-in rejected by requireAuth middleware
+  locked    — locked, sign-in rejected by requireAuth middleware
+
+InitialPlatformRoleCode (8 values):
+  root_platform_owner  — legacy root, NOT assignable from UI/API
+  platform_admin       — full platform admin (assignable)
+  support_admin        — support operations (assignable)
+  workspace_support    — workspace read access (assignable)
+  sales_admin          — subscription/plan read (assignable)
+  finance_admin        — billing metadata read (assignable)
+  auditor              — read-only audit access (assignable)
+  read_only_operator   — minimal read-only access (assignable)
+
+Root detection function (isRootPlatformOwner):
+  Returns true when:
+  (a) user.isRootOwner === true (explicit flag, future), OR
+  (b) user.role === "super_admin" AND workspaceId IS NULL
+      AND platformRoleCode IS NULL (backward compat for seeded admin).
+
+requireAuth middleware update:
+  Now also rejects users with status "disabled" or "locked" (not just "inactive").
+  Zero impact on existing workspace users (their status is "active" or "inactive").
+
+================================================================================
+3. ROOT PLATFORM OWNER PROTECTION POLICY
+================================================================================
+
+File: artifacts/api-server/src/lib/root-platform-owner-policy.ts
+      (pure lib — no DB, no HTTP, fully deterministic)
+
+ROOT_PLATFORM_OWNER_PROTECTION_POLICY (14 properties, all true):
+  root_platform_owner              — identity marker
+  protected_account                — account is protected
+  immutable_role                   — role cannot be changed
+  non_deletable                    — cannot be deleted
+  non_disableable                  — cannot be disabled
+  non_lockable                     — cannot be locked
+  password_reset_blocked_from_admin_ui — admin UI cannot reset root password
+  email_change_blocked             — admin UI cannot change root email
+  self_promotion_blocked           — actor cannot promote themselves
+  root_role_assignment_blocked     — root role cannot be assigned via UI/API
+  cannot_manage_equal_or_higher_privilege — actor cannot manage equal/higher privilege
+  cannot_disable_last_root_owner   — last root owner cannot be disabled
+  requires_break_glass_recovery    — recovery requires break-glass procedure (P14-B+)
+  audit_required                   — all blocked attempts are audit-logged
+
+Exported guard functions:
+  isRootPlatformOwner(user)                 — predicate
+  isProtectedPlatformAccount(user)          — predicate (includes root)
+  canAssignPlatformRole(actor, targetRole)  — role assignment guard
+  canManagePlatformUser(actor, targetUser)  — general management guard
+  canChangePlatformUserStatus(actor, targetUser, nextStatus) — status change guard
+  canResetPlatformUserPasswordFromAdmin(actor, targetUser)   — password guard
+  canChangePlatformUserEmail(actor, targetUser)              — email guard
+  validatePlatformUserCreate(actor, payload)                 — create validation
+  validatePlatformUserStatusChange(actor, target, payload)   — status validation
+  buildBlockedPlatformUserActionAuditEvent(actor, target, action, reason) — audit builder
+
+Role privilege hierarchy (lower = more privileged):
+  0  root_platform_owner
+  1  platform_admin
+  2  support_admin
+  3  workspace_support / sales_admin / finance_admin (same tier)
+  4  auditor
+  5  read_only_operator
+  99 unknown role code
+
+Policy enforcement rules (enforced by guard functions):
+  ✅ root_platform_owner cannot be created from POST /platform/users
+  ✅ root_platform_owner cannot be assigned as roleCode from UI
+  ✅ protected account cannot be disabled or locked
+  ✅ protected account cannot have email changed from admin UI
+  ✅ protected account cannot have password reset from admin UI
+  ✅ actor cannot manage users with equal or higher privilege
+  ✅ actor cannot manage themselves
+  ✅ all blocked attempts write audit log + return structured blockedReason code
+
+================================================================================
+4. BACKEND API SURFACE
+================================================================================
+
+All routes: /api (prefix) — requireAuth + requireSuperAdmin
+
+Method  Path                                   Description
+──────  ─────────────────────────────────────  ─────────────────────────────────
+GET     /platform/users                        List all platform users
+GET     /platform/users/:userId                Get single platform user by ID
+POST    /platform/users                        Create non-root platform user
+PATCH   /platform/users/:userId/status         Change platform user status
+
+Route file: artifacts/api-server/src/routes/platform-users.ts
+Registered in: artifacts/api-server/src/routes/index.ts
+
+GET /platform/users:
+  - Filters: usersTable WHERE workspaceId IS NULL
+  - Returns: { users: PlatformUserProfile[], total: number }
+  - Read-only. No pagination in P14-A.
+  - Audit: req.log.info (no DB write for reads)
+
+GET /platform/users/:userId:
+  - Returns: { user: PlatformUserProfile }
+  - 404 if user not found or has a workspaceId (workspace user)
+  - Audit: req.log.info
+
+POST /platform/users:
+  - Payload: { email, displayName, roleCode }
+  - Validations:
+    - email must be valid (regex)
+    - displayName must be ≥ 2 chars
+    - roleCode must be one of 7 assignable codes (not root_platform_owner)
+    - actor must have higher privilege than the target role
+    - email must be unique across all users
+  - Defaults: status = "invited", isRootOwner = false, isProtected = false,
+    workspaceId = null, role = "super_admin"
+  - Audit: writes to activity_logs with action "platform_user_created"
+  - Blocked root creation: writes "platform_user_create_blocked" + returns 403
+
+PATCH /platform/users/:userId/status:
+  - Payload: { nextStatus, reason, confirmation }
+  - Validations:
+    - nextStatus must be one of: active, disabled, locked
+    - reason.trim().length ≥ 10
+    - confirmation must be true
+    - target must NOT be root/protected
+    - actor must have higher privilege than target
+    - actor cannot change their own status
+  - Audit: writes "platform_user_status_changed" on success
+           writes "protected_root_action_blocked" if root protection triggered
+           writes "platform_user_status_change_blocked" otherwise
+
+Safety — NOT implemented (no endpoint, no code):
+  ❌ DELETE /platform/users/:userId — not implemented
+  ❌ PATCH /platform/users/:userId/password — not implemented
+  ❌ PATCH /platform/users/:userId/email — not implemented
+  ❌ PATCH /platform/users/:userId/role — not implemented (P14-B)
+  ❌ POST /platform/users/:userId/invite — not implemented
+
+================================================================================
+5. FRONTEND CONFIG
+================================================================================
+
+File: artifacts/ops-platform/src/lib/platform-users-config.ts
+
+PLATFORM_USER_SAFETY_CONTRACT (18 properties, all true):
+  superAdminOnly, controlledPlatformUserCreation,
+  noTenantUserManagement, noCustomerUserManagement, noHrEmployeeUserManagement,
+  noPasswordReset, noEmailInviteSending, noSso, noMfa, noDeleteUser,
+  noRootCreationFromUi, noRootRoleAssignmentFromUi,
+  noRootPasswordResetFromAdminUi, noRootEmailChangeFromAdminUi,
+  noRootDisableOrLock, noSelfPromotion, noManageEqualOrHigherPrivilege,
+  auditBlockedAttempts
+
+Import-time guard: throws Error at module load if any property is false.
+Also validated in super-admin-platform-users.tsx at component import time.
+
+PLATFORM_USER_STATUS_CONFIG (4 statuses):
+  invited  — neutral tier — "مُضاف — لم يُفعّل بعد"
+  active   — good tier    — "نشط"
+  disabled — attention    — "معطّل"
+  locked   — critical     — "مقفل"
+
+INITIAL_PLATFORM_ROLE_CONFIG (8 roles):
+  root_platform_owner  — privilegeOrder 0 — assignableFromUi: false
+  platform_admin       — privilegeOrder 1 — assignableFromUi: true
+  support_admin        — privilegeOrder 2 — assignableFromUi: true
+  workspace_support    — privilegeOrder 3 — assignableFromUi: true
+  sales_admin          — privilegeOrder 3 — assignableFromUi: true
+  finance_admin        — privilegeOrder 3 — assignableFromUi: true
+  auditor              — privilegeOrder 4 — assignableFromUi: true
+  read_only_operator   — privilegeOrder 5 — assignableFromUi: true
+
+  Each role has: label (EN), labelAr (AR), description, badgeClass, privilegeOrder
+  Arabic labels included inline for all statuses and roles.
+
+PLATFORM_USER_ACTION_CONFIG (3 controlled actions):
+  activate — target: active  — requires reason + confirmation
+  disable  — target: disabled — requires reason + confirmation
+  lock     — target: locked  — requires reason + confirmation
+
+PLATFORM_USER_API_PATHS: /api/platform/users[/id][/status]
+
+ROOT_PLATFORM_OWNER_PROTECTION_POLICY_CONFIG: mirrors backend policy (14 props, all true)
+
+PLATFORM_USER_FORBIDDEN_WORDING: array of strings for test assertions
+  includes: "password reset", "delete user", "SSO", "MFA", "tenant user",
+  "customer user", "HR employee", "payroll", "invoice", "payment", "billing"
+
+================================================================================
+6. FRONTEND HOOKS
+================================================================================
+
+File: artifacts/ops-platform/src/lib/platform-users-hooks.ts
+
+Read hooks:
+  usePlatformUsers()          — GET /api/platform/users, staleTime 30s
+  usePlatformUser(userId)     — GET /api/platform/users/:id, enabled when userId set
+
+Mutation hooks:
+  useCreatePlatformUser()          — POST /api/platform/users
+    Input: { email, displayName, roleCode }
+    On success: invalidates ["platform", "users"]
+
+  useUpdatePlatformUserStatus()    — PATCH /api/platform/users/:id/status
+    Input: { userId, nextStatus, reason, confirmation }
+    On success: invalidates ["platform", "users"] and ["platform", "users", userId]
+
+NOT implemented in hooks (by design):
+  - password reset mutation
+  - delete mutation
+  - email change mutation
+  - role update mutation (P14-B)
+  - invite send mutation
+
+================================================================================
+7. FRONTEND UI
+================================================================================
+
+Page: /super-admin/platform-users
+File: artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+Route guard: SuperAdminRoute (same as all /super-admin/* routes)
+
+Page sections:
+  Header:
+    Title: "Platform Users & Access"
+    Subtitle: "Internal platform administration accounts — مستخدمو إدارة المنصة الداخليون"
+    "Super Admin Only" badge
+    "Create Platform User" button
+
+  Safety banner:
+    Blue info banner: platform accounts are for internal platform administration only
+
+  Status summary cards (4):
+    Active | Invited | Disabled | Locked — live count chips with Arabic labels
+
+  Platform Users table (6 columns):
+    Name / Email | Role badge | Status badge | Protected / Root badges | Last Sign-in | Created
+    Click row → expand inline UserDetailPanel (no new page)
+
+  CreatePlatformUserDialog:
+    Fields: email, displayName, roleCode (select)
+    Role select: ALL 7 assignable roles shown; root_platform_owner EXCLUDED from options
+    Arabic labels shown in the option text
+    Validation errors displayed inline
+    No reset password, no delete, no invite email send in dialog
+
+  UserDetailPanel (inline expand):
+    Avatar initial | displayName | email
+    Status badge | Role badge | Protected badge | Root Owner badge
+    Root protection notice (if isRootOwner or isProtected):
+      English: "Root Platform Owner is protected. It cannot be disabled, locked,
+                demoted, email-changed, or password-reset from Platform Administration."
+      Arabic:  "مالك المنصة الجذري حساب محمي ولا يمكن تعديله من لوحة الإدارة."
+    Detail grid: User ID, Role Code, Last Sign-in, Created, Protected, Root Owner
+    StatusChangePanel (visible only if NOT protected/root):
+      Action buttons: Activate | Disable | Lock (filtered by current status)
+      Selected action: reason textarea + confirmation checkbox + apply/cancel
+      Apply disabled until reason ≥ 10 chars AND confirmed
+
+  NOT present in UI (by design):
+    ❌ Reset Password button
+    ❌ Delete button
+    ❌ Change Email button
+    ❌ Assign Root button
+    ❌ Role update button
+    ❌ Send Invite Email button
+
+Navigation sidebar (super-admin-layout.tsx):
+  "Platform Users" entry added between "Tenant Registry" and "Platform Activity"
+  Icon: Users (lucide-react)
+  Href: /super-admin/platform-users
+
+================================================================================
+8. AUDIT / OBSERVABILITY
+================================================================================
+
+Audit events written to activity_logs:
+
+  platform_user_created:
+    actorId, targetUserId, targetEmail, roleCode, action: "create", result: "success"
+
+  platform_user_create_blocked:
+    actorId, targetEmail, action: "create", result: "blocked",
+    blockedReason: "ROOT_ROLE_ASSIGNMENT_BLOCKED"
+
+  platform_user_status_changed:
+    actorId, targetUserId, targetEmail, previousStatus, nextStatus, reason,
+    action: "status_change", result: "success"
+
+  platform_user_status_change_blocked:
+    actorId, targetUserId, targetEmail, blockedReason, nextStatus,
+    action: "status_change", result: "blocked"
+
+  protected_root_action_blocked:
+    actorId, targetUserId, targetEmail, blockedReason, nextStatus
+    (specifically for root protection violations)
+
+All audit events:
+  - workspaceId: null (platform-level, no workspace scope)
+  - Stored via activityLogsTable INSERT before response
+  - No password, no secrets, no hash values stored in metadata
+
+Read operations (GET):
+  - req.log.info only (no DB audit write — reads are not audited to DB)
+
+================================================================================
+9. SAFETY GUARANTEES
+================================================================================
+
+P14-A ENFORCED:
+  ✅ Platform user creation allowed (POST /platform/users)
+  ✅ Platform user listing allowed (GET /platform/users)
+  ✅ Platform user detail allowed (GET /platform/users/:id)
+  ✅ Platform user status change allowed (PATCH /platform/users/:id/status)
+  ✅ Root account protected — cannot be created, disabled, locked, or demoted
+  ✅ Root role cannot be assigned from API (403 + audit log)
+  ✅ Root password reset blocked at policy layer (canResetPlatformUserPasswordFromAdmin)
+  ✅ Root email change blocked at policy layer (canChangePlatformUserEmail)
+  ✅ Self-promotion blocked (actor.id === target.id check)
+  ✅ Equal/higher privilege management blocked (privilege hierarchy check)
+  ✅ All blocked attempts audit-logged
+  ✅ Safety contract enforced at module import time (throws if any property false)
+  ✅ No tenant user management
+  ✅ No customer user management
+  ✅ No HR employee user management
+  ✅ No password reset endpoint
+  ✅ No email invite sending
+  ✅ No SSO/MFA
+  ✅ No delete user endpoint
+  ✅ No role update endpoint (P14-B)
+  ✅ No break-glass implementation (P14-B+)
+  ✅ Disabled/locked platform users blocked at requireAuth middleware
+
+================================================================================
+10. TESTS
+================================================================================
+
+Backend tests:
+  File: artifacts/api-server/src/lib/__tests__/root-platform-owner-policy.test.ts
+  Tests (15 describe blocks, 55+ assertions):
+    T1  ROOT_PLATFORM_OWNER_PROTECTION_POLICY all true (2 tests)
+    T2  isRootPlatformOwner — all cases (5 tests)
+    T3  isProtectedPlatformAccount — all cases (4 tests)
+    T4  canAssignPlatformRole — all cases (5 tests)
+    T5  canManagePlatformUser — all cases (5 tests)
+    T6  canChangePlatformUserStatus — cannot disable/lock root (4 tests)
+    T7  canResetPlatformUserPasswordFromAdmin — root blocked (3 tests)
+    T8  canChangePlatformUserEmail — root blocked (3 tests)
+    T9  validatePlatformUserCreate — root/invalid/duplicate checks (6 tests)
+    T10 validatePlatformUserStatusChange — reason/confirm/status (5 tests)
+    T11 buildBlockedPlatformUserActionAuditEvent — structure check (1 test)
+    T12 Constants — BLOCKED_ROLE_CODES, STATUSES, etc. (5 tests)
+    T13 isAssignableRoleCode — all cases (3 tests)
+    T14 Self-promotion blocked (1 test)
+    T15 No forbidden scope in policy lib exports (1 test)
+
+Frontend tests:
+  File: artifacts/ops-platform/src/lib/__tests__/platform-users-config.test.ts
+  Tests (10 describe blocks, 34+ assertions):
+    T1  PLATFORM_USER_STATUS_CONFIG stable (6 tests)
+    T2  INITIAL_PLATFORM_ROLE_CONFIG stable (5 tests)
+    T3  PLATFORM_USER_SAFETY_CONTRACT all true (3 tests)
+    T4  ROOT_PLATFORM_OWNER_PROTECTION_POLICY_CONFIG all true (2 tests)
+    T5  ASSIGNABLE_PLATFORM_ROLE_KEYS excludes root (3 tests)
+    T6  PLATFORM_USER_ACTION_CONFIG stable (5 tests)
+    T7  PLATFORM_USER_EMPTY_STATE has protected notice (3 tests)
+    T8  PLATFORM_USER_FORBIDDEN_WORDING covers all forbidden terms (2 tests)
+    T9  PLATFORM_USER_API_PATHS correct (4 tests)
+    T10 Config has no forbidden scope (1 test)
+
+Final test counts:
+  Backend:  3015 tests — 51 files — ALL PASS
+  Frontend:  989 tests — 19 files — ALL PASS
+
+TypeScript:
+  api-server: 0 new errors introduced (typecheck PASS after lib rebuild)
+  ops-platform: 7 pre-existing errors (all from governance-audit.tsx TS2322 x4,
+    governance-violations.tsx TS2503 x1, workflow-detail.tsx TS2353 x1,
+    workflows.tsx TS2353 x1) — 0 new errors introduced by P14-A
+
+DB Migration:
+  pnpm --filter @workspace/db run push — APPLIED
+  New columns: platformRoleCode, isRootOwner, isProtected, lastLoginAt
+  No data loss. All nullable / default false. Zero impact on existing records.
+
+================================================================================
+11. INTENTIONALLY DEFERRED — P14-B+ SCOPE
+================================================================================
+
+❌ Full permission matrix per platformRoleCode
+❌ requirePlatformPermission middleware
+❌ Role update endpoint (PATCH /platform/users/:userId/role)
+❌ Email invite sending (SMTP integration for invited user flow)
+❌ Password reset from admin UI (even for non-root users)
+❌ Delete user endpoint
+❌ SSO / SAML / OIDC integration
+❌ MFA enforcement
+❌ Break-glass root recovery procedure
+❌ Login route update to set lastLoginAt
+❌ isRootOwner / isProtected explicit migration (run once, set flags on existing root)
+❌ Tenant user management (deliberately excluded, not deferred)
+❌ Customer user management (deliberately excluded, not deferred)
+❌ HR employee user management (deliberately excluded, not deferred)
+❌ Billing / invoice / payment (deliberately excluded, not deferred)
+
+================================================================================
+12. READINESS ASSESSMENT — BEFORE P14-B (Platform Roles & Permission Matrix)
+================================================================================
+
+Foundation readiness for P14-B:
+
+  ✅ InitialPlatformRoleCode defined (8 codes) — permanent contract
+  ✅ Role privilege hierarchy implemented in root-platform-owner-policy.ts
+  ✅ platformRoleCode stored on each new platform user
+  ✅ Policy guard functions composable — canAssignPlatformRole, canManagePlatformUser
+     can be extended without breaking changes
+  ✅ PLATFORM_USER_SAFETY_CONTRACT extensible — new keys can be added
+  ✅ API endpoints follow the pattern expected by P14-B:
+     GET /platform/users → list
+     POST /platform/users → create
+     PATCH /platform/users/:id/status → controlled write
+     PATCH /platform/users/:id/role → (slot reserved, P14-B)
+  ✅ requireSuperAdmin used as placeholder — ready to swap for requirePlatformPermission
+  ✅ Audit log pattern established — all P14-B writes can follow the same pattern
+  ✅ UI patterns established — status badges, role badges, protected notice,
+     create dialog — P14-B can extend the same page without redesign
+
+Recommended P14-B entry point:
+  1. Implement permission codes per platformRoleCode in a platform-permissions.ts lib
+  2. Add requirePlatformPermission(code) middleware
+  3. Swap requireSuperAdmin for requirePlatformPermission on GET routes
+  4. Add PATCH /platform/users/:userId/role endpoint
+  5. Add platform permission matrix UI to the Platform Users page
+  6. Set isRootOwner = true for the existing root user via one-time migration
+
+================================================================================
+END OF REPORT — PHASE 14-A COMPLETE
+================================================================================

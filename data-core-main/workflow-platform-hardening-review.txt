@@ -1,0 +1,1845 @@
+══════════════════════════════════════════════════════════════════════════════════
+  WORKFLOW PLATFORM HARDENING — Governance Expansion & Production Readiness Review
+  Internal Operations Platform · May 2026
+══════════════════════════════════════════════════════════════════════════════════
+
+Sources reviewed:
+  event-observability-architecture-review.txt
+  event-diagnostics-phase-2-report.txt
+  workflow-governance-architecture-review.txt
+  workflow-governance-phase-3-report.txt
+  workflow-governance-phase-4-review.txt
+  workflow-phase-4a-report.txt  (Context Isolation)
+  workflow-phase-4b-report.txt  (Lazy TTL)
+  workflow-phase-4c-report.txt  (Cooperative Cancellation)
+  workflow-phase-4d-report.txt  (Exact-Once Transition Safety)
+  workflow-phase-4e-report.txt  (Approval Resume)
+  Live codebase: executor.ts, engine.ts, validator.ts, ttl.ts, context.ts,
+                 all 6 step handlers, routes/workflows.ts, lib/db/src/schema/workflows.ts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The workflow platform has matured significantly through Phase 3 and Phase 4.
+The runtime engine foundations are solid: cooperative governance, TTL enforcement,
+cancellation, approval lifecycle, and exact-once status transitions are all in place
+and thoroughly tested (287 pure logic tests, zero failures).
+
+However, the platform is NOT ready for:
+  ── Production-scale rollout (>100 active tenants)
+  ── Enterprise onboarding (customers building their own workflows)
+  ── Customer workflow builder exposure (public no-code configuration)
+  ── Large tenant adoption (tenants with >500 users, >10,000 events/day)
+
+The critical gaps are not in the runtime engine (that is now solid) but in:
+
+  CATASTROPHIC (blocks enterprise rollout):
+    H-01  No immutable workflow snapshots — live edits can corrupt resumes
+    H-02  No condition branching (still blocked by validator) — DAG not usable
+    H-03  No delay scheduling — time-based workflows impossible
+    H-04  No background TTL sweeper — waiting_approval executions accumulate forever
+    H-05  No per-tenant execution quotas — single noisy tenant starves all others
+
+  HIGH (blocks customer-facing builder exposure):
+    H-06  No versioning history — rollback is impossible
+    H-07  No simulation / dry-run — customers cannot safely test workflows
+    H-08  No pre-publish validation gate in the UI flow
+    H-09  No audit immutability — approval records can be deleted/mutated
+    H-10  No JSONB size limits — runaway contexts can exhaust storage
+
+  MEDIUM (blocks large tenant adoption):
+    H-11  No execution archival strategy — history table grows forever
+    H-12  triggerEventLogId never populated — trace link broken
+    H-13  Approval timeout still decorative — onTimeout config ignored
+    H-14  Round-robin assignment unimplemented — blocked at validator
+    H-15  No operational dashboards — no visibility into tenant health
+
+This document provides a complete analysis of each risk and a phased roadmap.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — CURRENT ENGINE REVIEW: PRODUCTION-GRADE vs IMMATURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  RUNTIME GOVERNANCE — PRODUCTION-GRADE ✓
+──────────────────────────────────────────────
+
+  P4-A  Context Isolation (namespaced stepOutputs)
+    ✓ Each step stores output under its own index key — zero cross-step pollution.
+    ✓ triggerData deep-cloned per execution — concurrent executions fully isolated.
+    ✓ buildResolvedData() provides backward-compatible flat merge for all handlers.
+    ✓ 18 pure unit tests, all passing.
+    STATUS: PRODUCTION-GRADE — safe for multi-tenant concurrent use.
+
+  P4-B  Lazy TTL (24-hour execution deadline)
+    ✓ Every new execution gets timeout_at = now() + 24h (configurable constant).
+    ✓ Checked cooperatively at every inter-step boundary — no preemptive interrupt.
+    ✓ status='timed_out' is a distinct terminal state (not 'failed').
+    ✓ GET /executions/stuck — real-time overdue execution list.
+    ✓ POST /executions/:id/timeout — super_admin force-timeout for stuck executions.
+    ✓ 40 pure unit tests, all passing.
+    LIMITATION: TTL only fires at inter-step boundaries. Executions stuck at
+    waiting_approval (approval never provided) are not auto-timed-out — they
+    require a manual admin force-timeout or a background sweeper (H-04).
+    STATUS: PRODUCTION-GRADE for running executions; IMMATURE for waiting_approval.
+
+  P4-C  Cooperative Cancellation
+    ✓ cancel_requested boolean flag — decoupled from status (executor owns status).
+    ✓ Checked at inter-step boundary — current step always completes first.
+    ✓ Distinct from force-timeout: cancel = user intent, timed_out = hard deadline.
+    ✓ Workspace-scoped cancel endpoint (workflow.manage permission).
+    ✓ 35 pure unit tests, all passing.
+    LIMITATION: Same as TTL — cancel flag is not checked for executions stuck at
+    waiting_approval. A cancelled-waiting execution requires admin force-timeout.
+    STATUS: PRODUCTION-GRADE.
+
+  P4-D  Exact-Once Status Transition Safety
+    ✓ All 8 status-changing UPDATEs are guarded (WHERE + .returning() race detection).
+    ✓ Terminal states are immutable — no overwrite possible from any code path.
+    ✓ Optimistic concurrency — no locks, no blocking, microsecond collision window.
+    ✓ 109 pure logic tests covering all 8 transitions and race scenarios.
+    STATUS: PRODUCTION-GRADE — safe for concurrent admin actions + running executors.
+
+  P4-E  Approval Resume
+    ✓ resumeExecution() — guarded waiting_approval → running transition.
+    ✓ rejectExecution() — guarded waiting_approval → failed transition.
+    ✓ Context fully reconstructed from DB (no in-memory dependency across pause).
+    ✓ Resume starts from the step AFTER the approval step (no duplicate execution).
+    ✓ workflow_approvals table records every approval decision for audit.
+    ✓ GET /executions/:id/approvals — full approval audit trail.
+    ✓ cancelRequested guard in resume prevents approving a cancelled execution.
+    ✓ 85 pure logic tests, all passing.
+    LIMITATION: Resume reads steps from the live workflow definition (not a
+    snapshot). If the definition was edited between pause and resume, the resumed
+    execution runs from a potentially different step configuration. (H-01 below.)
+    STATUS: FUNCTIONALLY COMPLETE but VULNERABLE to definition drift.
+
+1.2  GOVERNANCE SURFACE — PRODUCTION-GRADE ✓
+──────────────────────────────────────────────
+
+  P3-A  Governance Validator
+    ✓ Blocks WG-02 (approval without resume), WG-03 (condition branching),
+      WG-04 (delay), WG-12 (round_robin) at activation time.
+    ✓ Warns on unknown step types, missing content, unresolved recipients.
+    LIMITATION: Validator is a static gate — it cannot catch runtime-only issues
+    (e.g., a status_update step referencing a field that doesn't exist in the event
+    payload, which would only fail at runtime).
+
+  P3-B  Workspace Execution Rate Limit
+    ✓ MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100.
+    ✓ Checked before the execution trigger loop — no DB work on limit breach.
+    LIMITATION: The limit is a global cap per workspace-minute. It does not prevent:
+    a burst of 99 executions per minute (just under the cap) sustained for hours;
+    or a single extremely expensive execution consuming all DB connections.
+
+  P3-C  Recursion Chain Guard
+    ✓ MAX_CHAIN_DEPTH = 5 — direct loop detection + maximum depth.
+    ✓ _executionChain stored in execution context for causation tracing.
+    LIMITATION: Only protects against propagated chain metadata. If a workflow
+    step modifies a record via raw DB update (status_update step) and that
+    triggers a new event through a route handler (not through the workflow chain),
+    the chain metadata is absent — P3-B's rate limit is the only backstop.
+
+  P3-D  Fanout Cap
+    ✓ MAX_NOTIFICATION_RECIPIENTS_PER_STEP = 50 (both notification and approval steps).
+    ✓ Truncation logged with structured warning — not a silent failure.
+    LIMITATION: 50 is an absolute cap, not a proportional budget. A workflow with
+    10 notification steps would produce 500 notification rows per execution. No
+    execution-level budget exists yet.
+
+  P3-E  Soft Delete + Execution History Preservation
+    ✓ Hard delete removed — definitions set to archived/deleted_at.
+    ✓ Execution history preserved even when the definition is "deleted".
+    ✓ Engine query: WHERE status='active' AND deleted_at IS NULL.
+
+  P3-F  Draft/Activate Lifecycle Gates
+    ✓ New workflows created with status='draft', is_active=false.
+    ✓ POST /activate runs full validation before setting status='active'.
+    ✓ Active workflows are immutable (PATCH → 422 WORKFLOW_IMMUTABLE_ACTIVE).
+    LIMITATION: There is no publish gate between "validated" and "active". A
+    workflow goes from draft → activated in one step by anyone with workflow.manage.
+    A separate "publish approval" role (workflow.publish) does not yet exist.
+
+1.3  OBSERVABILITY — PARTIALLY MATURE
+──────────────────────────────────────
+
+  ✓ Structured pino logging across all critical paths.
+  ✓ workspace_event_logs table captures every dispatched event.
+  ✓ workflow_execution_steps per-step trace (status, input, output, error, timing).
+  ✓ GET /executions/:id — full step timeline for diagnostics.
+  ✓ GET /executions/stuck — overdue execution list.
+  ✓ GET /executions/failed — failed execution list.
+  ✓ GET /executions/:id/approvals — approval audit trail.
+  ✓ Race detection logs (P4-D) — all 8 transition races emit structured WARN.
+
+  ✗ triggerEventLogId on workflow_executions is NEVER POPULATED.
+    The schema has the column; engine.ts passes the event log row but does not
+    write it to the execution record. Trace link: event → execution is broken.
+    (Documented in event-observability-architecture-review.txt as a blind spot.)
+  ✗ No per-step duration column (completedAt - startedAt computable but not stored).
+  ✗ No workflow-level error rate metrics.
+  ✗ No approval bottleneck visibility (what % of executions are waiting >N hours).
+  ✗ SSE is in-memory only — SSE connections lost on server restart.
+  ✗ No notification delivery confirmation or failed-delivery retry.
+
+1.4  STEP HANDLERS — PARTIALLY MATURE
+──────────────────────────────────────
+
+  notification:   ✓ Production-grade with fanout cap.
+                  ✗ Bypasses the event bus — SSE not triggered for workflow
+                    notifications (identified in architecture review).
+  approval:       ✓ Sends notifications to approvers with fanout cap.
+                  ✓ Resume/reject lifecycle complete (P4-E).
+                  ✗ Approval timeout (timeoutHours, onTimeout) still decorative.
+                  ✗ No multi-approver tracking (all approvers vs. any approver).
+  task:           ✓ Creates workflow_tasks records.
+                  ✗ Task completion does NOT resume execution (tasks are orphaned).
+  condition:      ✓ Evaluates conditions correctly.
+                  ✗ nextSteps routing IGNORED by executor (still blocked by validator).
+  status_update:  ✓ Updates entity status via DB.
+                  ✗ Raw DB update — may not emit domain events (indirect loop risk).
+  assignment:     ✓ Specific and role-based assignment work.
+                  ✗ round_robin unimplemented (blocked by validator).
+  delay:          ✗ No-op — executes instantly (blocked by validator).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — REMAINING CATASTROPHIC RISKS ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+── H-01: CATASTROPHIC — No Immutable Workflow Snapshots ─────────────────────────
+
+Impact: Corrupted approval resume. Silent wrong-step execution.
+
+Current state:
+  The executor receives steps as a parameter from engine.ts (loaded at trigger time).
+  This means initial execution uses the correct step configuration.
+  BUT: resumeExecution() re-fetches the workflow definition from the DB to get steps.
+  If an admin edited the workflow definition between the approval pause and the resume,
+  the resumed execution runs from a DIFFERENT step configuration than what originally
+  triggered the execution.
+
+Concrete scenario:
+  1. Workflow W1 has steps: [notification(0), approval(1), send_email(2)].
+  2. A ticket event triggers W1. Execution pauses at approval(1).
+  3. Admin edits W1: replaces steps with [notification(0), approval(1), delete_record(2)].
+  4. Approval is granted → resumeExecution() loads updated definition.
+  5. Step 2 is now delete_record — executes on resumed context.
+  6. Result: wrong, potentially destructive step executed. No error. No warning.
+
+Why steps_snapshot was not yet stored:
+  Phase 4-A through 4-E focused on the runtime governance model.
+  The design (in workflow-governance-phase-4-review.txt, Section 1.4) specified
+  that a steps snapshot stored in execution.context is a prerequisite for safe
+  approval resume. This was noted as P4-E scope but the context snapshot was
+  not yet stored in engine.ts.
+
+Current execution.context JSONB stores:
+  { triggerEvent, triggerData, _executionChain, _busEventId, ... }
+  It does NOT store: { _stepsSnapshot: WorkflowStep[] }
+
+Risk level: CRITICAL for any approval-using workflow.
+  If the definition is not edited while paused: risk is zero.
+  If the definition IS edited while paused: guaranteed wrong-step execution.
+
+── H-02: CATASTROPHIC — No Condition Branching Execution ────────────────────────
+
+Impact: Customers configure "if approved → do X, else → do Y" workflows.
+Neither branch is followed. The for-loop advances to array-next step. Silent.
+
+Current state:
+  The governance validator BLOCKS all condition steps with non-empty onTrue/onFalse.
+  This prevents the silent bug from manifesting in production.
+  But it also means the ENTIRE condition step feature is unusable.
+  Customers who build workflows expecting branching get a "blocked" error at activation.
+
+What's needed:
+  The DAG cursor model designed in workflow-governance-phase-4-review.txt (Section 3)
+  must be implemented. It is a contained change to executor.ts only:
+  replace the for-loop with a cursor-based work queue that reads result.output.nextSteps.
+  The condition step handler itself does NOT need to change.
+
+Risk level without fix:
+  Any workflow requiring conditional logic (approval outcome → different paths,
+  priority-based routing, department-specific handling) cannot be built.
+  This blocks the majority of real enterprise workflow use cases.
+
+── H-03: CATASTROPHIC — No Delay Scheduling ─────────────────────────────────────
+
+Impact: Time-based workflows (24h escalation, 7-day follow-up, hourly reminders)
+cannot be built. Blocked at validator. Customers who expect delay-based automation
+are completely blocked.
+
+Current state:
+  The validator blocks delay steps. Correct decision — implementing a fake delay
+  that executes instantly would be worse than blocking it.
+
+What's needed:
+  A persistent timer mechanism. Options in order of complexity:
+    Option A (Minimal): pg_cron or custom SQL scheduled jobs — trigger resumption
+      at a specific timestamp. No external infrastructure.
+    Option B (In-process): A background Node.js process that polls for
+      executions in status='waiting_delay' and resumes them when delay_until < now().
+      Requires a new 'waiting_delay' status and a polling loop (10-minute poll).
+    Option C (External): A job queue (Bull/BullMQ/pg-boss). Most robust but adds
+      infrastructure dependency.
+
+  Option B is the pragmatic choice for a single-process architecture.
+
+── H-04: CATASTROPHIC — No Background TTL Sweeper ──────────────────────────────
+
+Impact: Executions stuck at waiting_approval (approval never provided) accumulate
+forever. P4-B's lazy TTL only fires at inter-step boundaries — but a waiting_approval
+execution is not executing. It will never hit the boundary.
+
+Concrete scenario:
+  100 leave requests per week require approval.
+  All approvals take > 24 hours (timeout_at has passed).
+  No background sweeper exists.
+  After 3 months: 1,200 timed_out-eligible executions still in 'waiting_approval'.
+  DB bloats with zombie executions. Stuck endpoint shows 1,200 entries.
+  Only admin force-timeout (manual, one-by-one) can clear them.
+
+What's needed:
+  A background sweeper process (setInterval or pg_cron) that:
+    SELECT id FROM workflow_executions
+    WHERE status IN ('running', 'waiting_approval')
+      AND timeout_at IS NOT NULL AND timeout_at < now()
+    LIMIT 100;
+  For each: UPDATE SET status='timed_out', completed_at=now()
+            (with P4-D guarded WHERE status NOT IN TERMINAL).
+  Run every 5 minutes. Log batch results. Add metrics (swept count per run).
+
+Risk: Without this, the stuck endpoint is only a diagnostic tool.
+No execution is ever auto-closed without explicit admin intervention.
+
+── H-05: CATASTROPHIC — No Per-Tenant Execution Budget ──────────────────────────
+
+Impact: One tenant with aggressive automation can exhaust DB connection pool
+and degrade performance for ALL tenants on the same instance.
+
+Current protection:
+  P3-B: 100 executions/minute/workspace. This cap is too high and too coarse.
+  100 concurrent executions × multiple DB queries per step = serious DB pressure.
+  Also: the 100/min cap counts ALL executions started, not concurrent active ones.
+  A workspace can have 100 executions running simultaneously, all mid-step.
+
+Missing:
+  a) Concurrency cap: max N simultaneous active executions per workspace.
+     (N = 10 is a reasonable starting point for most enterprise deployments.)
+  b) Execution budget per workspace per day (configurable per workspace tier).
+  c) Notification budget per workspace per day.
+  d) Step execution budget per workspace per day.
+  e) Queue depth limit: if a workspace exceeds its concurrency cap, new
+     executions are created in 'pending' and started when slots open.
+
+── H-06: HIGH — No Versioning History ───────────────────────────────────────────
+
+Impact: Admin edits workflow → cannot see what it looked like before.
+Cannot compare versions. Cannot understand why old executions behaved differently.
+Cannot rollback to a known-good configuration.
+
+Current state:
+  workflow_definitions.steps is a single mutable JSONB column.
+  No version history table. No parent_version_id column. No published_at timestamp.
+  When an admin changes steps (allowed only in draft status — P3-F), the old
+  steps are permanently gone.
+
+Risk scenarios:
+  - A workflow produces unexpected results in production. Admin cannot see what
+    changed or when. No rollback path.
+  - A compliance audit requires: "what did the approval workflow look like on 2026-04-01?"
+    No answer is possible.
+
+Design note (see Section 3 of this document):
+  The full versioning architecture is designed below.
+  Implementation does not require external tools — only DB schema changes.
+
+── H-07: HIGH — No Simulation / Dry-Run ─────────────────────────────────────────
+
+Impact: Customers cannot safely test workflows before going live.
+The only way to test a workflow is to create real events (create real tickets,
+submit real forms) and observe what happens. Side effects (notifications sent,
+tasks created, statuses changed) cannot be undone.
+
+Enterprise customers will not expose the workflow builder to employees without
+a test mode. This is a table-stakes feature for no-code builders.
+
+(See Section 5 of this document for the simulation architecture design.)
+
+── H-08: HIGH — No Audit Immutability ───────────────────────────────────────────
+
+Impact: Approval records in workflow_approvals can be deleted or updated by
+anyone with direct DB access or a compromised admin account. In regulated
+industries (healthcare, finance, government), audit records must be tamper-evident.
+
+Current state:
+  workflow_approvals rows can be deleted if the parent workflow_execution is
+  deleted (the execution has ON DELETE CASCADE from workflow_definitions).
+  However workflow_definitions now use soft delete (P3-E) — so cascade doesn't
+  fire from soft-deletes. But hard deletes are still possible at the DB level.
+
+Missing:
+  a) Application-layer DELETE prevention on workflow_approvals.
+  b) Hash-chained audit log (each record includes hash of previous record's content).
+  c) Append-only guarantee enforced at the DB level (no UPDATE/DELETE permissions).
+  d) Audit log export capability (for compliance officers).
+
+── H-09: HIGH — JSONB Size Growth Risk ──────────────────────────────────────────
+
+Impact: Workflow contexts and step inputs/outputs can grow unbounded.
+A notification step that logs full recipient lists (recipientIds: [1..500]) per output.
+A status_update step that logs full ticket payload as input.
+Multiplied by thousands of executions: GB-level JSONB in workflow_execution_steps.
+
+Current state:
+  workflow_execution_steps.input stores the full step config + full execution context.
+  workflow_execution_steps.output stores the full step output.
+  workflow_executions.context stores full triggerData.
+  No size limits. No payload truncation. No compression.
+
+Risk amplifier:
+  A workflow triggered on every form submission, with a form payload containing
+  large text fields (e.g., multi-page survey responses) → triggerData is stored
+  in full for every execution context.
+
+── H-10: HIGH — Approval Timeout Still Decorative ───────────────────────────────
+
+Impact: Customers configure "auto-reject after 48 hours if no approval" —
+expecting this to work. It never fires. The configuration is stored but silently
+ignored. This is a trust-destroying UX failure.
+
+Current state:
+  ApprovalStep.config.timeoutHours and .onTimeout are type-defined and DB-persisted.
+  executeApprovalStep() ignores both fields.
+  P4-B's TTL and P4-E's resume mechanism do not read approval timeout config.
+
+What's needed:
+  When an approval step pauses execution, store the approval-specific deadline:
+    approval_deadline = started_at + step.config.timeoutHours * 3600 * 1000
+  The background sweeper (H-04) checks this deadline per execution step.
+  On expiry: execute onTimeout logic (auto_approve → resumeExecution, auto_reject
+  → rejectExecution, escalate → notify escalation target).
+
+── H-11: MEDIUM — No Execution Archival Strategy ────────────────────────────────
+
+Impact: workflow_executions, workflow_execution_steps, workflow_approvals tables
+grow without bound. After 12 months of heavy use: millions of rows, slow queries,
+bloated DB, expensive backups.
+
+No archival strategy, no retention policy, no partition plan currently exists.
+
+── H-12: MEDIUM — triggerEventLogId Never Populated ─────────────────────────────
+
+Impact: The event-to-execution trace link is broken. Cannot answer:
+"Which event triggered this execution?" from the execution record.
+Cannot correlate workspace_event_logs with workflow_executions.
+
+Current state:
+  schema/workflows.ts: trigger_event_log_id column exists (nullable FK).
+  engine.ts: creates execution with trigger_event_log_id = NULL always.
+  The workspace_event_logs row ID is available in the engine at the time of execution
+  creation (it's in the event payload) but not written to the execution record.
+
+This was documented as a blind spot in event-observability-architecture-review.txt.
+It is a one-line fix but hasn't been applied despite multiple phases.
+
+── H-13: MEDIUM — task Completion Does Not Resume Execution ─────────────────────
+
+Impact: Workflows that include task steps ("create a task for HR to review")
+expect subsequent steps to run after the task is completed. They don't.
+Task completion fires an event in the application, but no code links task
+completion to execution resumption.
+
+This means task steps are effectively "fire and forget" from the workflow's
+perspective. Any step after a task step is dead code in the current model.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — WORKFLOW VERSIONING ARCHITECTURE PROPOSAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Design only. No implementation.
+
+3.1  Problem Statement
+──────────────────────
+
+The current model has one problem (definition mutation) and one missing capability
+(version history). They are related but distinct.
+
+  Problem A: Live edits corrupt in-flight executions.
+    An execution in 'waiting_approval' stores no steps snapshot. When resumed,
+    it reads the live definition which may have changed. Wrong steps execute.
+
+  Problem B: No version history.
+    Once steps are saved, the previous version is gone.
+    Rollback, comparison, and compliance queries are impossible.
+
+3.2  Two-Layer Solution
+────────────────────────
+
+  LAYER 1 (Execution Snapshot — solves Problem A, minimal complexity):
+    Store a frozen copy of steps in the execution record at trigger time.
+    resumeExecution() reads from this snapshot, not from the live definition.
+
+  LAYER 2 (Version History Table — solves Problem B, adds audit capability):
+    Store every activated version of a workflow definition in a history table.
+    Allows rollback, comparison, compliance audit.
+
+3.3  Layer 1: Execution Snapshot (Immediate Priority)
+───────────────────────────────────────────────────────
+
+  Schema change (workflow_executions):
+    ADD COLUMN steps_snapshot JSONB NULL
+      — Frozen copy of workflow_definitions.steps at execution trigger time.
+      — NULL for legacy executions (backward compatible).
+
+  Engine.ts change:
+    When creating a new execution:
+      steps_snapshot = JSON.stringify(steps)
+    Write to workflow_executions.steps_snapshot at INSERT.
+
+  resumeExecution() change:
+    1. Fetch execution from DB (already does this).
+    2. Read steps_snapshot from execution record.
+    3. If steps_snapshot IS NULL (legacy): read from live definition (current behavior).
+    4. If steps_snapshot IS NOT NULL: use snapshot — ignore live definition.
+    5. Never fetch workflow_definitions for step configuration during resume.
+
+  What this achieves:
+    - Approval resumes use exactly the steps that were active when the execution
+      was triggered. Live edits to the definition have ZERO effect on in-flight
+      executions.
+    - Backward compatible: NULL snapshot falls back to current behavior.
+    - Storage cost: ~1-10 KB per execution (step configs are small JSONB).
+
+  Additional: store the definition version at trigger time:
+    ADD COLUMN workflow_version INTEGER NULL
+      — Denormalized from workflow_definitions.version at trigger time.
+      — Allows "this execution ran version 3 of workflow W" queries.
+
+3.4  Layer 2: Version History Table
+─────────────────────────────────────
+
+  New table: workflow_definition_versions
+
+    id           serial PRIMARY KEY
+    definition_id integer  NOT NULL  FK → workflow_definitions.id (no cascade delete)
+    workspace_id  integer  NOT NULL  FK → workspaces.id
+    version       integer  NOT NULL  (1, 2, 3, ...)
+    steps         jsonb    NOT NULL  — full step config at this version
+    conditions    jsonb    — top-level conditions at this version
+    name          text     NOT NULL  — workflow name at this version
+    activated_by  integer  FK → users.id (SET NULL on delete)
+    activated_at  timestamptz NOT NULL DEFAULT now()
+    deactivated_at timestamptz  — set when a newer version was activated
+    notes         text     — optional change notes from the activating admin
+
+  Indexes:
+    (definition_id, version)  UNIQUE — one row per version per definition
+    (workspace_id, activated_at)  — for compliance audit queries
+
+  Write point (workflow_definitions):
+    ADD COLUMN version INTEGER NOT NULL DEFAULT 1
+    ADD COLUMN parent_version_id INTEGER NULL FK → workflow_definition_versions.id
+
+  When POST /activate fires:
+    1. Run validation.
+    2. Read current version number from workflow_definitions.
+    3. INSERT into workflow_definition_versions (version = current + 1, steps = new steps).
+    4. UPDATE workflow_definitions.version = current + 1.
+    5. UPDATE workflow_definitions.steps = new draft steps.
+    6. Store steps_snapshot in new executions = the just-activated steps.
+
+3.5  Lifecycle Model (Updated)
+──────────────────────────────
+
+  workflow_definitions.status progression:
+    draft → validated → active → deprecated → archived
+
+  Active is now immutable by design (P3-F already enforces this).
+  Edit = create a new draft (either in-place if the current status is not active,
+  or by POST /workflows — a new workflow replacing the old one).
+
+  Future: allow "minor edits" to active workflows (description, name changes)
+  that do NOT affect steps or conditions — these don't create a new version.
+  Step/condition changes ALWAYS create a new version.
+
+3.6  Rollback Model
+────────────────────
+
+  POST /workflows/:id/rollback/:versionId
+    1. Load target version from workflow_definition_versions.
+    2. Run validation on the target steps (conditions may have changed since).
+    3. If valid: copy target version's steps into workflow_definitions.steps.
+    4. Create a new version record (version = current + 1) with the rolled-back steps.
+    5. Mark the rollback: notes = "Rolled back to version N by user X".
+    6. Set workflow_definitions.status = 'active'.
+    7. Store rollback version in new executions.
+
+  What rollback does NOT do:
+    - Does not affect in-flight executions (they use their own steps_snapshot).
+    - Does not delete any version history rows.
+    - Does not undo completed executions that ran under a previous version.
+
+3.7  Historical Execution Compatibility
+──────────────────────────────────────────
+
+  Executions created BEFORE versioning is added:
+    - steps_snapshot = NULL → read live definition for resume (current behavior).
+    - workflow_version = NULL → unknown version.
+    - Safely backward compatible.
+
+  Executions created AFTER versioning is added:
+    - steps_snapshot = frozen steps at trigger time.
+    - workflow_version = the version number when the execution was created.
+    - Resume, diagnostics, and compliance queries can all work correctly.
+
+3.8  Schema Evolution Safety
+──────────────────────────────
+
+  The JSONB steps format in workflow_definition_versions rows is frozen at
+  save time. If the step schema evolves (new fields added), older version rows
+  retain the old schema. The executor must handle missing optional fields gracefully
+  (TypeScript optional fields, default values in step handlers).
+
+  Never add REQUIRED fields to step configs without a migration path.
+  New step types (added in future phases) will simply be absent from old versions
+  — the validator will correctly block activating old versions with unknown types.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — VALIDATION ENGINE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  Current State (P3-A)
+──────────────────────────
+
+  The existing validateWorkflow(steps, triggerEvent) → ValidationResult is a
+  static structural validator. It checks:
+    - Step types against a blocklist (approval, delay, condition-with-branches, round_robin).
+    - Notification content (title/message present).
+    - Recipient types (warns on unresolved types).
+    - Task title presence.
+
+  It does NOT check:
+    - Dependencies between steps (step A needs an output from step B which comes after A).
+    - Circular dependencies in condition branches (step A → condition → step A).
+    - Impossible paths (no step at index onTrue[0] exists in steps array).
+    - Invalid assignee resolution (assigneeId=999 doesn't exist in this workspace).
+    - Notification fanout estimate (role="manager" in a 500-user workspace → 50+ recipients).
+    - Recursion risk detection (trigger event = event that status_update step would fire).
+    - Step index uniqueness (two steps with the same index value).
+    - Empty workflow (zero steps).
+    - Context field references (step B reads ctx.stepOutputs[A] but A doesn't output that field).
+
+4.2  Pre-Publish Validation Requirements
+──────────────────────────────────────────
+
+  Pre-publish validation must catch everything that would cause a silent failure
+  at runtime. Divide into three tiers:
+
+  TIER 1 — Structural Integrity (fail validation):
+    1. Step index uniqueness: every step must have a unique .index value.
+    2. Step index continuity: step indices must be 0-based and sequential for
+       linear workflows. Non-sequential only allowed in condition-branched DAGs.
+    3. Empty steps: a workflow with 0 steps should warn (not block — valid for testing).
+    4. onTrue/onFalse reference check: every index in onTrue/onFalse must correspond
+       to an existing step.index value in the steps array.
+    5. Step type known: every step.type must be in the recognized set (extend existing warn).
+
+  TIER 2 — Dependency Validation (warn or fail based on severity):
+    6. Circular condition reference: step A's onTrue points to step B, which has
+       a condition pointing back to step A. Detect via DFS cycle detection on the
+       step graph.
+    7. Impossible path: condition step at index 5, onTrue: [10]. No step with index
+       10 exists. The "true" branch is dead — the workflow silently skips it.
+    8. Dead branch detection: a step that is only reachable via a branch that itself
+       is only reachable via a branch — deeply nested. Warn if depth > 3.
+
+  TIER 3 — Runtime Risk Detection (warn — configurable block):
+    9. Fanout estimate: if recipientType="role" and role="member", estimate recipient
+       count from DB. If estimate > threshold (configurable, default 50) → WARN:
+       "This notification step may send to N recipients. Current cap is 50."
+   10. Recursion risk: if the workflow's triggerEvent matches the event that
+       status_update steps in this workflow would emit (via known status transitions).
+       Warn: "This workflow may create a recursion chain."
+   11. Assignee resolution: if assigneeType="specific" and assigneeId=N, verify
+       user N exists in this workspace. Fail if not found.
+   12. Department head resolution: if approverType="department_head", verify the
+       referenced entity has a department head user assigned.
+
+4.3  Circular Dependency Detection Algorithm
+─────────────────────────────────────────────
+
+  Build a directed graph from steps:
+    Nodes: step.index values.
+    Edges:
+      Linear steps: edge from step[i].index to step[i+1].index (next in array).
+      Condition steps: edges from step.index to each index in onTrue and onFalse.
+
+  Run DFS from each node. If DFS encounters a node in its current recursion stack:
+    → CIRCULAR_DEPENDENCY_DETECTED error: report the cycle path.
+
+  Time complexity: O(V + E) where V = steps.length, E = condition branches.
+  For workflows with < 50 steps (the realistic maximum), this is negligible (<< 1ms).
+
+4.4  Quota Validation at Activation Time
+──────────────────────────────────────────
+
+  Before allowing a workflow to be activated, check tenant quota limits:
+    a) Active workflow count: MAX_ACTIVE_WORKFLOWS_PER_WORKSPACE (e.g., 50).
+       If adding this workflow would exceed the limit → validation error.
+    b) Step count: MAX_STEPS_PER_WORKFLOW (e.g., 25).
+       A workflow with 100 steps is a configuration error, not a valid design.
+    c) Notification steps count: MAX_NOTIFICATION_STEPS_PER_WORKFLOW (e.g., 10).
+       Prevents a single workflow from generating 500 notifications per execution.
+
+  Quota limits should be workspace-configurable (stored in workspaces table or
+  a workspace_settings table) to allow different limits for different tenant tiers.
+
+4.5  Migration Compatibility Validation
+────────────────────────────────────────
+
+  When Step Schema v2 is introduced (new required fields on existing step types):
+    The validator must be able to run against version 1 step configs stored in
+    workflow_definition_versions and report which old versions are incompatible.
+    This provides a migration path: "Version 2 of Workflow W is incompatible with
+    the current validator. Re-publish to upgrade."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — SIMULATION / DRY-RUN ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  The Problem with Testing Without Simulation
+─────────────────────────────────────────────────
+
+  Testing a workflow in production requires:
+    - Creating real data (a real ticket, a real leave request, a real form submission).
+    - Accepting that all notifications fire to real users.
+    - Accepting that all task assignments are created for real employees.
+    - Accepting that all status updates change real records.
+    - Cleaning up the test data manually afterward.
+
+  For enterprise customers, this is unacceptable:
+    "I want to test my 10-step HR onboarding workflow without sending real emails
+    to 30 managers and creating real tasks in the HR system."
+
+5.2  Simulation Architecture Design
+─────────────────────────────────────
+
+  PRINCIPLE: Simulation runs the same executor logic against a simulated context
+  but intercepts all side effects (DB writes, notifications, SSE, status updates).
+  No real data is created. No real notifications are sent.
+
+  IMPLEMENTATION MODEL: Test-double injection pattern.
+
+  Key insight: all step handlers receive the execution context and make DB writes.
+  Simulation replaces DB writes with in-memory logging.
+
+  New API endpoint:
+    POST /api/workflows/:id/simulate
+    Body: {
+      simulatedEvent:  string,           — event type to simulate (ticket.created)
+      simulatedData:   Record<unknown>   — payload data (what the event would contain)
+      stopAtStep?:     number,           — simulate up to this step index, then stop
+    }
+    Returns:
+      { executionId: null (no real execution), simulation: true,
+        steps: SimulatedStepResult[], stoppedAt?: number, error?: string }
+
+  SimulatedStepResult per step:
+    { stepIndex, stepType, stepName, conditionPassed: bool,
+      skipped: bool, skipReason?: string,
+      sideEffects: { type, description, previewData }[],
+      nextSteps: number[],
+      branchTaken: 'true'|'false'|null,
+      duration: number (ms) }
+
+5.3  Side Effect Interceptors
+───────────────────────────────
+
+  For each step handler, define what constitutes a "side effect" and what its
+  simulation preview looks like:
+
+  notification step:
+    Side effect: INSERT into notifications table.
+    Simulation: Resolve recipients → return ["Would notify: John Smith, Jane Doe (+N more)"].
+    No DB write. Return resolved recipient list for preview.
+
+  approval step:
+    Side effect: INSERT notifications to approvers, pause execution.
+    Simulation: Resolve approvers → return preview, mark as PAUSED.
+    No DB write. Return approver list and "would pause for approval" note.
+
+  task step:
+    Side effect: INSERT into workflow_tasks.
+    Simulation: Return "Would create task: [title] assigned to [user] with priority [X]".
+    No DB write.
+
+  status_update step:
+    Side effect: UPDATE tickets/approvals/workflow_tasks status.
+    Simulation: Return "Would change ticket #N status from 'open' to 'resolved'".
+    No DB write.
+
+  assignment step:
+    Side effect: UPDATE ticket assigneeId.
+    Simulation: Resolve assignee → return "Would assign ticket #N to John Smith".
+    No DB write.
+
+  condition step:
+    Side effect: Route execution to a branch (onTrue or onFalse).
+    Simulation: Evaluate condition against simulatedData → return evaluation result
+    and which branch would be taken. Highlight the taken branch in the UI.
+
+  delay step:
+    Side effect: Pause execution for N minutes.
+    Simulation: Return "Would pause for [N] minutes". No wait.
+
+5.4  What Simulation Cannot Fully Replicate
+─────────────────────────────────────────────
+
+  Simulation is a preview, not a guarantee. Limitations to communicate to users:
+    a) Recipient resolution uses CURRENT workspace users. If a user is added/removed
+       between simulation and real execution, recipients will differ.
+    b) Status update previews reference CURRENT entity statuses. Real execution sees
+       the entity status at the time of execution.
+    c) Condition evaluation uses SIMULATED data. Conditions that reference computed
+       step outputs (ctx.stepOutputs[N]) cannot be fully simulated without
+       re-running prior steps first (but prior steps have been simulated, not executed).
+    d) Round-robin assignment cannot be deterministically previewed without knowing
+       the current round-robin state.
+
+5.5  Routing Preview
+─────────────────────
+
+  The simulation response must include a VISUAL routing preview:
+    - All steps listed in definition order.
+    - Condition steps show: conditionResult (true/false based on simulatedData),
+      branchTaken ('true' or 'false'), and which steps would be skipped.
+    - "Reachable steps" highlighted.
+    - "Unreachable steps" (in the not-taken branch) shown as dimmed.
+
+  This answers the customer question: "If I submit a leave request where
+  duration > 5 days, which path through the workflow is taken?"
+
+  Implementation: run the simulation with sample data that triggers each condition
+  both ways — present two simulation results (true branch, false branch) side by side.
+
+5.6  Dry-Run vs. Simulation Distinction
+─────────────────────────────────────────
+
+  The two terms are sometimes used interchangeably. For this platform:
+
+  SIMULATION:  Runs the executor logic with intercepted side effects.
+               No real data touched. Produces a preview report.
+               Safe for any user with workflow.view permission.
+
+  DRY-RUN:    Runs the full executor with real DB writes but in a TRANSACTION
+               that is immediately ROLLED BACK.  Side effects are real during
+               execution but reverted. Not recommended for production multi-tenant
+               because:
+                 - Notifications cannot be rolled back (already sent).
+                 - External integrations (future) cannot be rolled back.
+                 - DB transactions spanning multiple awaits are dangerous.
+               AVOID dry-run. Use simulation instead.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — TENANT GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  Current Tenant Protection (Inventory)
+────────────────────────────────────────────
+
+  ✓ P3-B: 100 executions/minute/workspace (rate limit)
+  ✓ P3-C: 5 chain depth limit + loop detection per event chain
+  ✓ P3-D: 50-recipient cap per notification/approval step
+  ✓ P3-E: Soft delete — history preserved when workflow is "deleted"
+  ✓ P3-F: Draft/activate gate — no immediately-live deployments
+  ✓ Workspace isolation: all queries filter by workspaceId (correct)
+  ✓ P4-B: 24h TTL per execution
+  ✓ P4-C: Cancellation mechanism for workspace managers
+
+  MISSING:
+  ✗ Concurrent execution concurrency cap (per workspace)
+  ✗ Daily execution budget per workspace tier
+  ✗ Daily notification budget per workspace
+  ✗ Step execution budget (per workspace, prevents N-deep recursion via fanout)
+  ✗ Storage growth protection (JSONB size limit per execution record)
+  ✗ SSE connection limit per user
+  ✗ Noisy neighbor protection (one tenant consuming >X% of DB connections)
+  ✗ Automation storm detection (sudden spike in executions for one workspace)
+
+6.2  Per-Tenant Execution Budgets Design
+──────────────────────────────────────────
+
+  New table: workspace_governance_settings
+    workspace_id       FK (primary key)
+    max_active_executions   integer  DEFAULT 20
+    max_executions_per_day  integer  DEFAULT 1000
+    max_notifications_per_day integer DEFAULT 5000
+    max_workflows_active    integer  DEFAULT 50
+    max_steps_per_workflow  integer  DEFAULT 25
+    max_recipients_per_step integer  DEFAULT 50
+    execution_ttl_hours     integer  DEFAULT 24
+
+  These settings override the global constants in engine.ts and the step handlers.
+  Per-tenant customization: a premium workspace can have max_executions_per_day=10000.
+  Enforcement:
+    - max_active_executions: checked at engine.ts trigger time (COUNT running + waiting).
+    - max_executions_per_day: checked at trigger time (COUNT started_at > today).
+    - max_notifications_per_day: checked in notification/approval step handlers.
+    - Others: enforced at activation validation time.
+
+6.3  Noisy Tenant Protection
+──────────────────────────────
+
+  The current model has no protection against a tenant creating a massive burst
+  of executions. P3-B's 100/minute cap is too coarse.
+
+  Recommended layered approach:
+
+  Layer 1 (Concurrency cap):
+    At trigger time: COUNT executions WHERE workspace_id=? AND status IN ('running', 'waiting_approval').
+    If count >= max_active_executions → create execution with status='pending', don't start yet.
+    A background scheduler (or future re-check on heartbeat) picks up pending executions.
+    Current behavior without a queue: the pending execution stays pending until
+    admin manually triggers it, or a future execution queue processes it.
+
+  Layer 2 (Connection pool protection):
+    Add a DB connection pool per-workspace slot concept. Not a full implementation —
+    just a guard: if a workspace has > N concurrent DB queries in flight
+    (approximated by counting DB statements in logs), throttle new executions.
+    Pragmatic: hard to implement without instrumentation. Log-based alerting is
+    a more realistic starting point.
+
+  Layer 3 (Automation storm detection):
+    Compare current 60-second execution count to the 7-day average.
+    If current > 5× average → emit a structured WARNING log tagged [automation_storm].
+    Alert the super_admin dashboard. Do NOT auto-block (false positive risk).
+    Let admin investigate and manually throttle or cancel.
+
+6.4  Event Fanout Explosion Scenarios
+──────────────────────────────────────
+
+  Scenario A: Bulk ticket import
+    100 tickets imported via API → 100 "ticket.created" events → 100 executions
+    triggered simultaneously → 100 × 50 notifications = 5,000 notification rows.
+    Mitigation:
+    - P3-B rate limit triggers at 100/minute (barely catches this).
+    - Concurrency cap (H-05, not yet implemented) would queue excess executions.
+    - Bulk import routes should set a "bulk_import=true" metadata flag in events.
+    - WorkflowEngine checks bulk_import flag → skip trigger (configurable per workflow).
+
+  Scenario B: Status update loop
+    Workflow W1 on "ticket.created" includes a status_update step.
+    status_update calls db.update(ticketsTable) — this does NOT emit a bus event
+    (unlike route handlers which call appEventBus.emit).
+    Current state: no loop. Route-based status changes DO emit events.
+    BUT: if status_update step is ever refactored to use the route-level service
+    layer (which emits events), WG-01 loop risk re-emerges.
+    Mitigation: document that status_update step MUST use direct DB writes, never
+    call application-level services that emit events.
+
+  Scenario C: Notification amplification
+    Workflow W1 sends notification to 50 managers.
+    If a "notification.created" event exists and a workflow listens to it:
+    → 50 executions per original execution → recursive explosion.
+    Mitigation: the platform does NOT emit "notification.created" bus events today.
+    The SSE push happens inline without a bus event. This should NEVER change
+    without evaluating WG-01 risk.
+
+6.5  SSE Abuse Protection
+──────────────────────────
+
+  Current SSE model:
+    In-memory Map: userId → Response[].
+    No limit on connections per user.
+    A malicious client can open 1,000 SSE connections → memory exhaustion.
+
+  Recommended:
+    MAX_SSE_CONNECTIONS_PER_USER = 5 (configurable).
+    When a new connection arrives: if existing connections for this user >= limit,
+    close the oldest connection (or reject the new one with 429).
+    Log: { userId, connectionCount, action: 'sse_connection_limited' }.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — AUDIT & COMPLIANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  Current Audit Coverage
+────────────────────────────
+
+  ✓ workflow_approvals: who decided, what action, when, on which step.
+  ✓ workflow_execution_steps: full step-by-step trace per execution.
+  ✓ workspace_event_logs: every dispatched event with payload.
+  ✓ activity_logs: human-readable history of user actions.
+  ✓ Structured pino logs: race detections, governance events, cancellations.
+  ✓ GET /executions/:id/approvals: approval audit trail per execution.
+
+  ✗ No approval record for admin-bypass actions (force-timeout on waiting_approval).
+  ✗ No immutability guarantee on any of these tables.
+  ✗ No hash chain / tamper evidence.
+  ✗ No retention policy enforcement.
+  ✗ No audit log export API.
+  ✗ Cancellation audit: "who cancelled" is only in pino logs, not in DB.
+  ✗ Timeout audit: "who force-timed-out" is only in pino logs, not in DB.
+
+7.2  Approval Audit Integrity
+───────────────────────────────
+
+  Current:
+    workflow_approvals records are correct but mutable.
+    The table has ON DELETE CASCADE from workflow_executions (via the FK).
+    If workflow_executions is deleted (which is now impossible via soft-delete in P3-E
+    but possible via direct DB access), approval records cascade-delete.
+    No tamper evidence exists.
+
+  Required for compliance:
+    a) Application-layer: no DELETE endpoint for workflow_approvals.
+    b) Row-level security (PostgreSQL RLS): DENY DELETE on workflow_approvals
+       for the application DB user. Only a separate DB admin can delete.
+       This prevents even a compromised application from deleting audit records.
+    c) Append-only enforcement: consider a trigger BEFORE DELETE that RAISES EXCEPTION.
+    d) Hash chain (optional, for high-security environments):
+       Each approval record stores: previous_hash = SHA256(previous record's content).
+       A broken chain indicates tampering. Computable without external systems.
+
+7.3  Actor Attribution Guarantees
+──────────────────────────────────
+
+  Current attribution:
+    - Approval decisions: decidedBy FK in workflow_approvals → user.id.
+    - Cancellation: in pino logs only (cancelledBy req.userId).
+    - Force-timeout: in pino logs only (adminId req.userId).
+    - Execution trigger: triggeredBy on workflow_executions.
+
+  Missing attribution (requires schema additions):
+    - cancelled_by INTEGER FK users.id (add to workflow_executions).
+    - cancelled_at TIMESTAMPTZ (add to workflow_executions).
+    - timed_out_by INTEGER FK users.id (NULL if auto-TTL, set if admin force-timeout).
+    - timed_out_at TIMESTAMPTZ.
+    - These can be added as nullable columns without breaking existing functionality.
+
+  Why important:
+    "Who cancelled the onboarding workflow for employee E?" is an HR/compliance question.
+    The answer today requires searching pino logs by executionId. Unreliable at scale.
+    A DB column makes it a simple query.
+
+7.4  Admin Override Auditability
+──────────────────────────────────
+
+  POST /executions/:id/timeout (force-timeout):
+    Current: structured WARN log. No DB record.
+    Required: insert into a new workflow_execution_events table:
+      (execution_id, event_type='force_timeout', actor_id, note, occurred_at)
+    This table accumulates all non-status operational events on an execution.
+
+  POST /executions/:id/cancel:
+    Current: structured WARN log + DB flag.
+    Required: same — insert into workflow_execution_events.
+
+  Benefit: single API for fetching all operational events on an execution:
+    GET /executions/:id/events → timeline of all status changes, cancellations,
+    timeouts, approval decisions.
+
+7.5  Retention Requirements
+─────────────────────────────
+
+  There is currently no retention policy.
+  For regulated industries, audit records must be retained for a defined period:
+    - approval decisions: typically 7 years (HR compliance).
+    - execution history: typically 2 years (operational compliance).
+    - event logs: typically 1 year (security audit).
+
+  The platform must:
+    a) Define retention periods per table (in config, not hard-coded).
+    b) Implement an archival sweep that moves old records to an archive table
+       (or cold storage) rather than deleting them.
+    c) Mark archived records clearly (archived = true, archived_at timestamp).
+    d) Provide API for compliance export: GET /compliance/audit-export?from=&to= .
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — DATA LIFECYCLE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1  Current Data Growth Model
+──────────────────────────────
+
+  Per execution:
+    - 1 row in workflow_executions (JSONB context: ~1-10 KB)
+    - N rows in workflow_execution_steps (N = step count, each ~2-20 KB of JSONB input/output)
+    - M rows in workflow_approvals (M = number of approval steps, usually 1)
+    - No archival. No partitioning. Grows indefinitely.
+
+  Estimation for a busy tenant (500 executions/day, 10 steps average):
+    - workflow_executions: 500/day × 5 KB = 2.5 MB/day = 900 MB/year.
+    - workflow_execution_steps: 500/day × 10 steps × 10 KB = 50 MB/day = 17 GB/year.
+    - workspace_event_logs: 500/day × 2 KB = 1 MB/day = 365 MB/year.
+
+  At 50 tenants this scale: >850 GB/year of workflow data alone.
+  Without archival, the DB becomes unmaintainable within 2-3 years.
+
+8.2  JSONB Payload Growth
+──────────────────────────
+
+  The biggest risk is workflow_execution_steps.input which stores:
+    { step: <full step config>, context: <full ExecutionContext> }
+  The ExecutionContext includes:
+    - triggerData: full event payload (can be large for form submissions)
+    - stepOutputs: outputs of all prior steps (grows with each step)
+    - resolvedData: flat merge of all stepOutputs (duplicates the above)
+
+  By step 10, the context JSONB in the step 10 input includes:
+    - All 10 steps' outputs stored in stepOutputs.
+    - The flat merge of all 10 outputs in resolvedData.
+    - The original triggerData.
+  This can easily be 50-100 KB per step row for data-heavy workflows.
+
+  Immediate mitigation:
+    - Do NOT store the full context in step input. Store only:
+      { step: <step config>, stepIndex: N, executionId: ID }
+    - Step outputs are already separately stored in workflow_execution_steps.output.
+    - The context can be reconstructed from execution + prior step outputs.
+    - Estimated saving: 80% reduction in step input JSONB size.
+
+  Long-term:
+    - MAX_JSONB_SIZE_BYTES = 64KB per column (enforced at application layer before INSERT).
+    - Truncate with a marker: { _truncated: true, _originalSize: N, ...first 60KB }.
+    - Log a WARNING when truncation occurs.
+
+8.3  Execution Archival Strategy
+──────────────────────────────────
+
+  PHASE 1 (Short-term): Soft archival via status flag.
+    ADD COLUMN archived BOOLEAN NOT NULL DEFAULT FALSE to workflow_executions.
+    ADD COLUMN archived_at TIMESTAMPTZ to workflow_executions.
+    A background job marks terminal executions older than RETENTION_DAYS as archived.
+    Archived rows are excluded from list endpoints by default (opt-in via ?includeArchived=true).
+    No data movement — just a flag. Fast to implement.
+
+  PHASE 2 (Medium-term): Physical archival to cold table.
+    CREATE TABLE workflow_executions_archive — identical schema, different tablespace.
+    Move archived rows from workflow_executions to workflow_executions_archive.
+    workflow_execution_steps and workflow_approvals move similarly.
+    Cold queries possible but slower (acceptable — compliance only).
+
+  PHASE 3 (Long-term): Partitioning by month.
+    Partition workflow_executions and workflow_execution_steps by started_at (monthly).
+    PostgreSQL declarative partitioning: CREATE TABLE ... PARTITION BY RANGE (started_at).
+    Old partitions can be detached and attached to a cold storage database.
+    This is the most scalable approach but requires planning before the table is large.
+
+8.4  Notification Retention
+─────────────────────────────
+
+  notifications table: no retention policy.
+  A workspace with 500 users receiving 10 notifications/day = 1.8M rows/year.
+  Recommendation: DELETE FROM notifications WHERE created_at < now() - INTERVAL '90 days'
+  as a nightly job. Users don't need notification history older than 90 days.
+  Alternatively: soft archive (archvied flag) if older history is required for compliance.
+
+8.5  workspace_event_logs Retention
+─────────────────────────────────────
+
+  workspace_event_logs is the most important audit table (contains full event payloads).
+  Retention: 12 months hot, then move to cold storage.
+  Estimated size: 1 KB/row × 500 events/day × 50 tenants = 25 MB/day = 9 GB/year.
+  Manageable — but needs the archival pipeline from §8.3.
+
+8.6  Partitioning Needs (Future)
+──────────────────────────────────
+
+  Tables that will need partitioning within 2-3 years at enterprise scale:
+    1. workflow_executions          — partition by started_at (monthly)
+    2. workflow_execution_steps     — partition by started_at (monthly, via FK join)
+    3. workspace_event_logs         — partition by created_at (monthly)
+    4. notifications                — partition by created_at (monthly)
+    5. activity_logs                — partition by created_at (monthly)
+
+  Design now, implement in 12-18 months (before tables exceed 50M rows).
+  PostgreSQL 14+ declarative partitioning is straightforward but requires
+  planning FKs carefully (partitioned tables have FK constraints differently).
+
+8.7  Cold Storage Strategy
+───────────────────────────
+
+  For compliance: cold data must be queryable, not just stored.
+  Recommendation:
+    - Cold tables: same PostgreSQL instance, different tablespace (cheaper disk).
+    - Very old data (>3 years): export to JSONL files in object storage.
+    - Provide a compliance export API that can query both hot and cold tables.
+    - No full cold→hot restore needed — cold queries acceptable at 2-5s latency.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — ENVIRONMENT GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1  Does the Platform Need Environment Separation?
+─────────────────────────────────────────────────────
+
+  Short answer: Yes, but not as separate physical environments.
+  The multi-tenant architecture (one DB, workspace isolation) means environment
+  separation must be modeled WITHIN a workspace, not across deployments.
+
+  For a single-workspace enterprise customer, the need is:
+    "I want to test my HR workflow without affecting the production HR processes."
+
+  This is currently impossible — there is only one "production" workflow engine
+  per workspace. Activating a workflow = it runs on all real events.
+
+9.2  Draft Environment (Immediate Requirement)
+───────────────────────────────────────────────
+
+  The draft/activate lifecycle (P3-F) is the first step.
+  Draft workflows do not trigger on real events. This is the "dev environment".
+  The missing piece: a way to TEST draft workflows without activating them.
+  This is the simulation/dry-run feature from Section 5.
+
+  With simulation: draft = your dev environment. Activate = publish to production.
+  No additional infrastructure needed.
+
+9.3  Staging Workflow Execution
+─────────────────────────────────
+
+  For enterprise customers who need to test against REAL data (but not real
+  notifications/assignments):
+
+  OPTION A: Test workspace.
+    Create a separate workspace for testing (e2e-test, staging).
+    Workflows in the test workspace trigger on real events within that workspace.
+    All test data stays isolated by workspace.
+    Super_admin can provision "test" workspaces with reduced limits.
+
+  OPTION B: Simulation mode per execution.
+    Tag a specific execution as a "simulation" via a flag in the trigger payload.
+    The executor checks this flag and intercepts all side effects (notification dry,
+    task dry, status_update dry).
+    Side effects are logged but not applied.
+    This is the dry-run concept from Section 5.
+
+  Recommendation: Option A is simpler and already supported by the workspace model.
+  Option B requires significant executor changes. Defer Option B to Phase 7.
+
+9.4  Production Publish Gates
+───────────────────────────────
+
+  Currently: any admin with workflow.manage can activate a workflow.
+  For enterprise: activation should require a second-level approval.
+
+  Design:
+    New permission: workflow.publish (separate from workflow.manage).
+    Flow:
+      workflow.manage: create draft → submit for publish review
+      workflow.publish: review draft → approve → activate (or reject)
+
+    This is the "publish approval" pattern used by major no-code platforms.
+    Requires no new infrastructure — just a new permission level and
+    a "pending_publish" status in the workflow lifecycle.
+
+    DB change: workflow_definitions.status add 'pending_publish'.
+    Transition: draft → pending_publish (by workflow.manage).
+    Transition: pending_publish → active (by workflow.publish only).
+    Transition: pending_publish → draft (rejected).
+
+9.5  Tenant-Safe Experimentation
+──────────────────────────────────
+
+  The platform must ensure that:
+    a) Admin cannot create a workflow that runs on another tenant's events.
+       GUARANTEED: workspace isolation (all queries filter by workspaceId).
+    b) Admin cannot reference entities (users, departments) from other workspaces.
+       PARTIALLY GUARANTEED: assigneeId and recipientId are not cross-validated at
+       publish time. Validator should check that referenced user IDs exist in this
+       workspace (Section 4.2, item 11).
+    c) Admin cannot use a workflow to exfiltrate data from other workspaces.
+       GUARANTEED: step handlers all query with workspaceId context.
+       Risk: if a future step handler (API call step, webhook step) is added,
+       it could post data to external URLs. Requires whitelist control.
+
+9.6  Feature Flags
+────────────────────
+
+  The platform doesn't need a full feature flag system. However:
+  Introduce a workspace_features table:
+    workspace_id, feature (text), enabled (bool), enabled_by, enabled_at.
+
+  Use for:
+    - condition_branching: enabled per workspace (when DAG executor is ready, enable
+      gradually — not for all workspaces at once).
+    - delay_scheduling: enabled per workspace (when background scheduler is ready).
+    - simulation_mode: enabled per workspace.
+    - round_robin_assignment: enabled per workspace.
+    - workflow_versioning: enabled globally once ready.
+
+  This allows gradual feature rollout without hard-coded constants in the codebase.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — OPERATIONAL GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+10.1  Current Operational Visibility
+─────────────────────────────────────
+
+  Available today:
+  ✓ GET /executions/stuck          — overdue executions
+  ✓ GET /executions/failed         — failed executions with error details
+  ✓ GET /executions/:id            — full step timeline for one execution
+  ✓ GET /executions/:id/approvals  — approval audit trail
+  ✓ GET /executions/               — paginated execution list with status filter
+  ✓ Pino structured logs           — machine-readable, searchable
+  ✓ Platform stats (super admin)   — workspace/user/ticket counts
+
+  Missing:
+  ✗ Per-workspace execution health score
+  ✗ Workflow-level error rates (% of executions that fail per workflow)
+  ✗ Stuck execution count by workspace (real-time)
+  ✗ Approval bottleneck visibility (avg wait time per approval step)
+  ✗ Automation storm detection
+  ✗ Execution duration histogram per workflow
+  ✗ Notification delivery rate
+  ✗ No alerting mechanism (no webhook, no email alert when stuck count exceeds N)
+
+10.2  Operational Dashboard Requirements
+──────────────────────────────────────────
+
+  Super-admin operational dashboard needs:
+
+  Platform-wide:
+    - Total active executions right now (running + waiting_approval)
+    - Total stuck executions (timeout_at passed, non-terminal)
+    - Executions per minute / hour (trend graph)
+    - Error rate: % of executions that ended in 'failed' or 'error' in last 24h
+    - Top 5 workspaces by execution count (noisy neighbor detection)
+    - Top 5 workflows by failure rate
+
+  Per-workspace:
+    - Active execution count
+    - Stuck execution count
+    - Failure rate (last 7 days)
+    - Avg execution duration (percentiles: p50, p95, p99)
+    - Approval wait time: avg time executions spend in waiting_approval
+
+  Per-workflow:
+    - Total executions: 7d / 30d / all-time
+    - Success rate, failure rate, timeout rate, cancellation rate
+    - Avg duration per execution
+    - Step failure breakdown: which steps fail most often
+    - Approval bottleneck: avg wait time per approval step
+
+10.3  Stuck Execution Monitoring
+──────────────────────────────────
+
+  The GET /executions/stuck endpoint exists but:
+  - It's a pull API — admin must check it manually.
+  - No alert fires when stuck count exceeds a threshold.
+  - No per-workspace stuck count summary.
+
+  Recommended monitoring loop:
+    A periodic job (every 5 minutes, same as background sweeper):
+    SELECT workspace_id, COUNT(*) as stuck_count
+    FROM workflow_executions
+    WHERE status IN ('running', 'waiting_approval')
+      AND timeout_at IS NOT NULL AND timeout_at < now()
+    GROUP BY workspace_id;
+
+    For any workspace_id where stuck_count > STUCK_ALERT_THRESHOLD (default: 10):
+    → Emit a structured WARNING log tagged [stuck_alarm].
+    → (Future) POST to super_admin webhook endpoint.
+    → (Future) Insert into a platform_alerts table for dashboard display.
+
+10.4  Execution Anomaly Detection
+───────────────────────────────────
+
+  For each workspace, maintain a rolling average of executions per hour.
+  If current hour count > 5× rolling average:
+    → Emit [automation_storm] log event.
+    → Alert super_admin via the platform alerts mechanism.
+    → Do NOT auto-throttle immediately (investigate first — may be intentional).
+
+  This is a lightweight anomaly detector that doesn't require ML or external tools.
+  Implementation: compare COUNT(executions WHERE started_at > now()-1h)
+  against AVG(hourly counts over last 7 days) — computable in one SQL query.
+
+10.5  Workflow Error Rate Monitoring
+──────────────────────────────────────
+
+  Add a materialized view (or periodic computation):
+    workflow_execution_stats:
+      workflow_id, period (day/week/month),
+      total_executions, completed_count, failed_count, timed_out_count,
+      cancelled_count, error_rate, avg_duration_ms
+
+  Refresh daily. Expose via:
+    GET /api/workflows/:id/stats?period=7d
+
+  Used by: workflow detail pages, operational dashboards, tenant health scoring.
+
+10.6  Tenant Health Scoring
+────────────────────────────
+
+  A simple health score per workspace (0-100):
+
+  Factors:
+    - Error rate (last 7 days): -5 per 1% above 5% threshold
+    - Stuck execution count: -10 per stuck execution above 5
+    - Active workflow count: bonus for well-configured workspaces
+    - Execution volume (normalized): positive signal for active usage
+    - Approval bottleneck: -3 per hour over 24h average wait time
+
+  Score < 50 → WARN level on super_admin dashboard.
+  Score < 20 → ERROR level, manual investigation required.
+
+  This is computable from existing data — no new DB tables needed beyond stats view.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — WHAT NOT TO DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following are architectural over-engineering that would introduce complexity,
+external dependencies, or operational burden disproportionate to the current scale:
+
+✗ Kubernetes / container orchestration
+  The platform runs on a single Node.js process with PostgreSQL.
+  Horizontal scaling is possible with read replicas, not Kubernetes.
+  Add Kubernetes only when a single Node instance cannot handle peak load.
+
+✗ Microservices
+  The monolith is appropriate for a team of this size.
+  The event bus architecture is already clean enough for future decomposition.
+  Service decomposition adds network latency, distributed tracing complexity,
+  and deployment overhead not justified at current scale.
+
+✗ Distributed orchestration (Temporal.io, Apache Airflow)
+  The cooperative executor model with guarded transitions is sufficient for the
+  workflow complexity required. Temporal would solve distributed execution durability
+  but adds: a separate Temporal server, a Golang worker, client SDK dependencies,
+  and a completely new operational model. Not justified until execution volume
+  exceeds what a single PostgreSQL-backed process can handle (millions/day).
+
+✗ Kafka / event streaming
+  The appEventBus + eventDispatcher architecture is synchronous enough for current
+  needs (10,000 events/day). Kafka is justified at 1M+ events/day with multiple
+  consumer groups. Not needed here.
+
+✗ Multi-region replication
+  Single-region PostgreSQL with daily backups is sufficient for a single-tenant
+  enterprise deployment. Multi-region adds complexity and cost not justified
+  until SLA requirements demand 99.99% availability.
+
+✗ ML-based anomaly detection
+  The simple rolling average anomaly detection from Section 10.4 is sufficient.
+  ML models require training data pipelines, model serving, and maintenance
+  overhead. Overkill for workflow anomaly detection at this scale.
+
+✗ Full DAG parallelism (concurrent branches)
+  The DAG cursor model designed in Phase 4 supports sequential DAG execution.
+  Parallel branch execution (both onTrue and onFalse running simultaneously)
+  requires concurrent execution tracking, merge point synchronization, and
+  failure handling for partially-completed parallel paths. This is Phase 7+.
+  Not needed for current enterprise use cases.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — PHASED IMPLEMENTATION ROADMAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phases are sequenced by: (1) blocking risk elimination, (2) customer value, (3) scale.
+Each phase is independent enough to deliver value on its own.
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 5 — EXECUTION SAFETY HARDENING (2-3 weeks)
+Priority: CATASTROPHIC RISK ELIMINATION
+─────────────────────────────────────────────────────────────────────────────────
+
+  P5-A  Steps Snapshot in Execution Record (H-01)
+    Add steps_snapshot JSONB NULL to workflow_executions.
+    Engine stores frozen steps at trigger time.
+    resumeExecution() reads snapshot — never re-fetches definition.
+    Impact: Eliminates definition drift on approval resume. Critical correctness fix.
+    Effort: Small (schema + 3 lines in engine.ts + 5 lines in executor.ts).
+
+  P5-B  Background TTL Sweeper (H-04)
+    setInterval(sweeper, 5 * 60 * 1000) in engine.ts startup.
+    Sweeper: SELECT stuck executions, UPDATE status='timed_out' with P4-D guard.
+    Batch size: 100 per run.
+    Log: { swept: N, action: 'ttl_sweep_run' }.
+    Impact: Eliminates zombie waiting_approval executions.
+    Effort: Small (new sweeper file, wired into engine startup).
+
+  P5-C  triggerEventLogId Population Fix (H-12)
+    One-line fix in engine.ts: store workspace_event_logs row ID in execution INSERT.
+    Impact: Completes event-to-execution trace link. Essential for diagnostics.
+    Effort: Trivial (one missing assignment that was never written).
+
+  P5-D  Approval Timeout Enforcement (H-10)
+    When an approval step pauses execution: store approval_deadline in workflow_approvals.
+    Background sweeper checks approval_deadline — fires onTimeout logic.
+    Impact: Makes the approval timeout config functional (not decorative).
+    Effort: Medium (sweeper + approval record update + resume/reject on timeout).
+
+  P5-E  Actor Attribution Columns (Section 7.3)
+    ADD COLUMN cancelled_by, cancelled_at, timed_out_by, timed_out_at to workflow_executions.
+    Updated in P4-C cancel route and P4-B timeout route.
+    Impact: Audit trail completeness. Required for compliance.
+    Effort: Small (schema + 2 route handler updates).
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 6 — DAG EXECUTION + CONDITION BRANCHING (3-4 weeks)
+Priority: CUSTOMER VALUE (unlock condition branching)
+─────────────────────────────────────────────────────────────────────────────────
+
+  P6-A  DAG Cursor Executor
+    Replace for-loop in executor.ts with cursor-based work queue.
+    Condition step: read result.output.nextSteps → push to pending queue.
+    Linear steps: advance to next by array order (backward compatible).
+    Skipped branches: log with status='skipped'.
+    P5-A snapshot: resolve steps from steps_snapshot (not live definition).
+    Impact: Unblocks condition branching — enables all conditional workflows.
+    Effort: Large (executor.ts rewrite + new tests for branching + skipped logging).
+
+  P6-B  Condition Validator Unblock
+    Remove WG-03_CONDITION_BRANCHING_BLOCKED from validator.ts.
+    Add instead: circular dependency detection, impossible path detection (Section 4.3).
+    Impact: Customers can activate condition-branched workflows.
+    Effort: Medium (validator update + DFS cycle detection).
+
+  P6-C  Step Index Alignment Fix
+    Executor currently uses array position `i` for stepIndex logging.
+    After DAG cursor: all routing uses step.index, not array position.
+    Fix: all stepIndex DB writes use step.index, not array position i.
+    Impact: Correct step tracking for non-sequential index workflows.
+    Effort: Small within P6-A (same rewrite).
+
+  P6-D  Input Size Optimization
+    Remove full ExecutionContext from workflow_execution_steps.input.
+    Store only: { stepIndex, stepType, stepName, executionId }.
+    Output remains full (needed for diagnostics).
+    Impact: 80% reduction in step row storage size.
+    Effort: Small (executor.ts change to step log INSERT).
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 7 — VERSIONING + SIMULATION (4-5 weeks)
+Priority: CUSTOMER BUILDER EXPOSURE (safe workflow building)
+─────────────────────────────────────────────────────────────────────────────────
+
+  P7-A  Workflow Definition Versions Table
+    CREATE workflow_definition_versions (Section 3.4).
+    POST /activate creates a version record.
+    ADD version column to workflow_definitions.
+    Impact: Full version history, rollback capability.
+    Effort: Medium (schema + route update + new endpoints).
+
+  P7-B  Workflow Rollback Endpoint
+    POST /workflows/:id/rollback/:versionId.
+    Loads version from history, re-validates, re-activates.
+    Impact: Admins can recover from bad workflow deployments.
+    Effort: Small (builds on P7-A).
+
+  P7-C  Simulation Engine
+    POST /workflows/:id/simulate (Section 5).
+    Side effect interceptors per step handler.
+    Routing preview generation.
+    Impact: Customers can safely test workflows without real side effects.
+    Effort: Large (new simulation executor variant + interceptors per step handler).
+
+  P7-D  Enhanced Validation (Section 4.2)
+    Tier 2 and Tier 3 validators: assignee resolution, fanout estimate, recursion risk.
+    Circular dependency detection.
+    Impact: Catches more configuration errors before activation.
+    Effort: Medium.
+
+  P7-E  Publish Approval Gate
+    Add workflow.publish permission.
+    Add 'pending_publish' status.
+    Transition: draft → pending_publish (manage) → active (publish) or rejected.
+    Impact: Two-person rule for workflow activation in regulated environments.
+    Effort: Small (permission + status + route guard).
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 8 — DELAY SCHEDULING (2-3 weeks)
+Priority: WORKFLOW CAPABILITY (time-based automation)
+─────────────────────────────────────────────────────────────────────────────────
+
+  P8-A  Delay Status + Persistence
+    Add status='waiting_delay', delay_until TIMESTAMPTZ to workflow_executions.
+    When delay step runs: set status='waiting_delay', delay_until=now()+delayMinutes.
+    Impact: Delay step is no longer a no-op — correctly pauses.
+    Effort: Medium (schema + executor change).
+
+  P8-B  Delay Sweeper (extends P5-B sweeper)
+    Sweeper checks: WHERE status='waiting_delay' AND delay_until < now().
+    For each: re-enter executor from next step (same pattern as approval resume).
+    Impact: Time-based workflow steps work correctly.
+    Effort: Medium (sweeper extension + delay resume function).
+
+  P8-C  Delay Validator Unblock
+    Remove WG-04_DELAY_BLOCKED from validator.ts.
+    Replace with: max delay limit (e.g., 30 days — configurable per workspace).
+    Impact: Customers can activate delay-using workflows.
+    Effort: Small.
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 9 — TENANT GOVERNANCE + QUOTAS (2-3 weeks)
+Priority: SCALING SAFETY (multi-tenant production scale)
+─────────────────────────────────────────────────────────────────────────────────
+
+  P9-A  workspace_governance_settings Table (Section 6.2)
+    Per-tenant execution budgets, notification budgets, workflow limits.
+    Enforce in engine.ts, step handlers, validator.
+    Impact: Prevents noisy-tenant degradation.
+    Effort: Medium.
+
+  P9-B  Concurrency Cap Per Workspace
+    At trigger time: COUNT active executions for workspace.
+    If >= max_active_executions: create execution in 'pending', don't start.
+    A future queue pick-up mechanism starts pending executions as slots open.
+    Impact: DB connection pool protected from single-tenant exhaustion.
+    Effort: Medium (engine.ts count + queue pick-up concept).
+
+  P9-C  SSE Connection Limit (Section 6.5)
+    MAX_SSE_CONNECTIONS_PER_USER = 5.
+    On new connection: check existing count, close oldest if over limit.
+    Impact: SSE memory exhaustion protection.
+    Effort: Small.
+
+  P9-D  Anomaly Detection (Section 10.4)
+    Automation storm detection: compare current vs rolling average.
+    Log [automation_storm] event. Alert super_admin.
+    Impact: Operational visibility into automation abuse.
+    Effort: Small (one SQL query comparison in sweeper).
+
+─────────────────────────────────────────────────────────────────────────────────
+PHASE 10 — COMPLIANCE HARDENING (3-4 weeks)
+Priority: REGULATED ENTERPRISE ADOPTION
+─────────────────────────────────────────────────────────────────────────────────
+
+  P10-A  Audit Immutability (Section 7.2)
+    Application-layer DELETE prevention on workflow_approvals.
+    PostgreSQL DENY DELETE for app DB user.
+    BEFORE DELETE trigger raises exception.
+    Impact: Tamper-evident approval records.
+    Effort: Medium (DB role + trigger + route guard).
+
+  P10-B  Execution Events Table (Section 7.4)
+    workflow_execution_events: (execution_id, event_type, actor_id, note, occurred_at).
+    Record force-timeout, cancel, approval decisions in DB.
+    GET /executions/:id/events → full operational timeline.
+    Impact: Complete audit trail without log search.
+    Effort: Medium.
+
+  P10-C  Data Archival Pipeline (Section 8.3)
+    Phase 1: archived flag on workflow_executions.
+    Nightly sweeper: mark terminal executions older than RETENTION_DAYS as archived.
+    Impact: List endpoints exclude old data by default, improving query performance.
+    Effort: Small (schema + sweeper extension).
+
+  P10-D  Compliance Export API
+    GET /compliance/audit-export?type=approvals&from=&to= → JSONL export.
+    GET /compliance/audit-export?type=executions&from=&to= → JSONL export.
+    Impact: Compliance officers can run their own audits.
+    Effort: Medium.
+
+  P10-E  Operational Dashboards
+    GET /platform/workflow-stats → platform-wide execution metrics.
+    GET /workspaces/:id/workflow-stats → per-workspace health.
+    GET /workflows/:id/stats → per-workflow error rates, durations.
+    Tenant health score computation.
+    Impact: Super-admin visibility for proactive operations.
+    Effort: Medium (SQL aggregation views + endpoints).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — FINAL RECOMMENDATION BEFORE ENTERPRISE ROLLOUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+13.1  Honest Assessment: Where the Platform Stands Today
+──────────────────────────────────────────────────────────
+
+  The Phase 3 + Phase 4 work produced a genuinely solid runtime engine foundation.
+  The executor is cooperative, the transitions are exactly-once, the approval lifecycle
+  is complete, and the test coverage (287 tests) gives real confidence.
+
+  However, this is an INTERNAL OPERATIONS PLATFORM currently used by internal admins
+  who configure workflows carefully. It is NOT yet suitable for:
+
+  ❌ Customer-facing workflow builder (no simulation, no versioning, no rollback).
+  ❌ Production scale (>20 active tenants without quotas or concurrency caps).
+  ❌ Regulated industries (no audit immutability, no retention policy).
+  ❌ Workflow types beyond linear approval (no condition branching, no delay).
+  ❌ Self-service onboarding (too easy to create workflows with silent failure modes).
+
+13.2  What Must Be Done Before Each Milestone
+───────────────────────────────────────────────
+
+  Before "Internal Production Rollout" (self-hosted, internal admins only):
+    MUST: P5-A (steps snapshot) — prevents silent wrong-step execution on resume.
+    MUST: P5-B (background sweeper) — prevents zombie waiting_approval accumulation.
+    MUST: P5-C (triggerEventLogId fix) — completes trace link.
+    SHOULD: P5-E (actor attribution) — audit trail completeness.
+    CAN DEFER: Everything in Phase 6+.
+
+    Rationale: Internal admins understand the platform limitations.
+    They won't use condition branching (blocked) or delay (blocked).
+    The runtime is correct for linear approval-based workflows.
+
+  Before "Customer Workflow Builder Exposure" (tenants build their own workflows):
+    MUST: ALL of Phase 5.
+    MUST: Phase 7-C (simulation) — customers WILL create broken workflows.
+    MUST: Phase 7-D (enhanced validation) — catch errors before activation.
+    MUST: Phase 7-E (publish approval gate) — prevent accidental live deployments.
+    SHOULD: Phase 7-A/B (versioning + rollback) — recovery from bad deployments.
+    SHOULD: Phase 9-A/B (quotas + concurrency cap) — isolation between tenants.
+    CAN DEFER: Phase 6 (DAG) — blocked at validator, customers won't see it.
+
+  Before "Enterprise Onboarding" (>50 tenants, regulated industries):
+    MUST: ALL of Phase 5 + Phase 7 + Phase 9.
+    MUST: Phase 10-A (audit immutability).
+    MUST: Phase 10-B (execution events table).
+    MUST: Phase 10-C/D (archival + compliance export).
+    SHOULD: Phase 6 (DAG + condition branching) — enterprise needs branching.
+    SHOULD: Phase 8 (delay scheduling) — enterprise needs time-based automation.
+    SHOULD: Phase 10-E (operational dashboards) — proactive operations at scale.
+
+  Before "Large Tenant Adoption" (single tenant >500 users, >5,000 events/day):
+    MUST: ALL of Phase 9 (tenant governance).
+    MUST: Phase 6-D (input size optimization) — storage cost control.
+    MUST: Phase 8 (delay scheduling) — busy tenants need async automation.
+    SHOULD: Phase 10-C (archival) — DB growth becomes a real cost.
+    SHOULD: Partitioning plan for the 5 main tables.
+
+13.3  Top 5 Priorities By Risk-Adjusted Impact
+────────────────────────────────────────────────
+
+  PRIORITY 1: P5-A — Steps Snapshot (1-2 days)
+    Risk: CATASTROPHIC. Approval resume silently runs wrong steps on edited definitions.
+    Effort: Tiny. One schema column, 3 lines in engine.ts, 5 lines in executor.ts.
+    Impact per effort: HIGHEST in the roadmap.
+
+  PRIORITY 2: P5-B — Background TTL Sweeper (2-3 days)
+    Risk: CATASTROPHIC. Zombie waiting_approval executions accumulate forever.
+    Effort: Small. A setInterval loop with a batched DB sweep.
+    Impact: Every approval workflow in the platform benefits.
+
+  PRIORITY 3: P5-C — triggerEventLogId Fix (< 1 hour)
+    Risk: MEDIUM but HIGH EMBARRASSMENT. A trace link documented as "broken" for
+    multiple phases should be fixed before customer-facing work.
+    Effort: One missing line in engine.ts. No excuses for this being open.
+
+  PRIORITY 4: P7-C — Simulation Engine (1-2 weeks)
+    Risk: HIGH customer trust. Without simulation, customers will create workflows
+    that send real notifications to real users during testing.
+    This is the first feature that will visibly differentiate the platform as
+    enterprise-grade vs. amateur-grade.
+    Effort: Significant but contained. Interceptor pattern is clean.
+
+  PRIORITY 5: P9-A/B — Per-Tenant Quotas + Concurrency Cap (1-2 weeks)
+    Risk: HIGH operational risk. One automation bug at one tenant can spike DB
+    connections for all tenants.
+    Effort: Medium. workspace_governance_settings table + enforcement in 3 places.
+
+13.4  Governance Maturity Score (Current vs Target)
+─────────────────────────────────────────────────────
+
+  Dimension                      Current   Target (Ent. Ready)
+  ─────────────────────────────  ────────  ───────────────────
+  Runtime safety                 9/10      10/10 (after P5-A)
+  Transition correctness         10/10     10/10  ✓ DONE
+  Approval lifecycle             9/10      10/10 (after P5-D)
+  Execution governance           7/10      10/10 (after P5-B, P9)
+  Versioning                     1/10      9/10  (after P7-A/B)
+  Validation quality             5/10      9/10  (after P7-D, P6-B)
+  Simulation capability          0/10      9/10  (after P7-C)
+  Tenant isolation               6/10      9/10  (after P9-A/B)
+  Audit completeness             5/10      9/10  (after P10-A/B)
+  Data lifecycle                 1/10      8/10  (after P10-C/D)
+  Operational visibility         4/10      9/10  (after P10-E)
+  Condition branching            0/10      9/10  (after P6-A/B)
+  Delay scheduling               0/10      9/10  (after P8)
+  ─────────────────────────────  ────────  ───────────────────
+  Overall                       ~5/10     ~9/10  (after all phases)
+
+13.5  The One Non-Negotiable Principle Going Forward
+──────────────────────────────────────────────────────
+
+  Every feature added to the workflow engine must answer three questions before
+  implementation begins:
+
+  1. SAFETY: Can this feature be used to harm data, exhaust resources, or bypass
+     governance? If yes, what is the guard?
+
+  2. OBSERVABILITY: When this feature behaves unexpectedly, what structured log
+     entry will tell the operator exactly what happened and why?
+
+  3. TESTABILITY: Is the guard logic expressible as a pure function that can be
+     unit-tested without a DB or HTTP server?
+
+  These three questions are what transformed the executor from a naive for-loop
+  into the production-grade engine it is today. They must apply to every phase
+  that follows.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX A — COMPLETE RISK REGISTER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ID    Severity     Description                          Phase   Status
+  ────  ───────────  ───────────────────────────────────  ──────  ─────────────────
+  H-01  CATASTROPHIC  Steps snapshot missing (def drift)   P5-A    OPEN
+  H-02  CATASTROPHIC  Condition branching blocked          P6-A    OPEN (validator blocks)
+  H-03  CATASTROPHIC  Delay scheduling impossible          P8      OPEN (validator blocks)
+  H-04  CATASTROPHIC  No background TTL sweeper            P5-B    OPEN
+  H-05  CATASTROPHIC  No per-tenant execution budgets      P9-A    OPEN
+  H-06  HIGH          No versioning history                P7-A    OPEN
+  H-07  HIGH          No simulation / dry-run              P7-C    OPEN
+  H-08  HIGH          No enhanced validation               P7-D    OPEN
+  H-09  HIGH          No audit immutability                P10-A   OPEN
+  H-10  HIGH          Approval timeout decorative          P5-D    OPEN
+  H-11  MEDIUM        No execution archival                P10-C   OPEN
+  H-12  MEDIUM        triggerEventLogId never populated    P5-C    OPEN (trivial fix)
+  H-13  MEDIUM        Task completion ≠ resume execution   P6      OPEN
+  H-14  MEDIUM        Round-robin unimplemented            P6-B    OPEN (validator blocks)
+  H-15  MEDIUM        No operational dashboards            P10-E   OPEN
+  WG-01 CLOSED        Recursive event loop                 P3-B/C  ✓ Mitigated
+  WG-02 CLOSED        Approval resume missing              P4-E    ✓ DONE
+  WG-03 MITIGATED     Condition branching ignored          P3-A    ✓ Blocked → P6 to enable
+  WG-04 MITIGATED     Delay is no-op                       P3-A    ✓ Blocked → P8 to enable
+  WG-05 OPEN          Execution version drift              H-01    → P5-A
+  WG-06 MITIGATED     No draft/publish lifecycle           P3-F    ✓ Draft/activate done
+  WG-07 MITIGATED     No TTL enforcement                   P4-B    ✓ Lazy TTL done; sweeper P5-B
+  WG-08 MITIGATED     Notification fanout                  P3-D    ✓ Capped at 50
+  WG-09 OPEN          No per-tenant limits                 H-05    → P9
+  WG-10 MITIGATED     No schema validation                 P3-A    ✓ Basic; enhanced in P7-D
+  WG-11 CLOSED        No approval audit record             P4-E    ✓ workflow_approvals done
+  WG-12 MITIGATED     Round-robin unimplemented            P3-A    ✓ Blocked → P6 to enable
+  WG-13 OPEN          Approval timeout decorative          H-10    → P5-D
+  WG-14 OPEN          triggerEventLogId no FK / no value   H-12    → P5-C (trivial)
+  WG-15 CLOSED        Mutable context pollution            P4-A    ✓ DONE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX B — WHAT IS GENUINELY PRODUCTION-GRADE (SUMMARY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  The following capabilities are PRODUCTION-GRADE as of Phase 4-E:
+
+  Runtime engine:
+  ✓ Exact-once status transition safety (P4-D) — 8 guarded UPDATEs, no race conditions.
+  ✓ Context isolation per execution (P4-A) — no cross-step or cross-execution pollution.
+  ✓ Cooperative cancellation (P4-C) — clean abort at step boundaries.
+  ✓ Lazy TTL enforcement (P4-B) — 24h deadline, timed_out status, stuck endpoint.
+  ✓ Approval resume lifecycle (P4-E) — guarded re-entry, audit trail, workspace-scoped.
+
+  Governance surface:
+  ✓ Draft/activate lifecycle (P3-F) — no accidentally-live deployments.
+  ✓ Structural validation gate (P3-A) — dangerous step types blocked before activation.
+  ✓ Rate limit + recursion guard (P3-B/C) — noisy tenant and loop protection.
+  ✓ Fanout cap (P3-D) — 50-recipient limit per step.
+  ✓ Soft delete (P3-E) — execution history preserved.
+  ✓ Multi-tenant isolation — workspace-scoped on all queries.
+
+  Test coverage:
+  ✓ 287 pure logic tests (P4-A through P4-E) — zero DB, zero mocks.
+  ✓ All 5 test files passing. Full test suite runtime: ~1.1 seconds.
+  ✓ Three-question gate enforced: safety, observability, testability.
+
+  These are real, measured qualities — not aspirational. The engine is ready
+  to run linear approval workflows in a controlled internal production environment.
+  The path to enterprise readiness is clear and phased. It starts with P5-A.
+
+══════════════════════════════════════════════════════════════════════════════════
+END OF REVIEW — workflow-platform-hardening-review.txt
+══════════════════════════════════════════════════════════════════════════════════

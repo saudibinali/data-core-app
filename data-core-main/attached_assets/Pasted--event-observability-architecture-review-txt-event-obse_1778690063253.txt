@@ -1,0 +1,279 @@
+راجع:
+- event-observability-architecture-review.txt
+- event-observability-phase-0-1-report.txt
+
+ثم نفّذ فقط:
+PHASE 2 — Diagnostics APIs & Operational Visibility
+
+بدون أي external telemetry systems أو observability overengineering.
+
+عنوان المهمة:
+EVENT DIAGNOSTICS PHASE 2 — Operational Visibility APIs
+
+المهمة الحالية:
+بناء طبقة Diagnostics تشغيلية حقيقية فوق الـ Event Platform الحالية.
+
+الهدف:
+تمكين:
+- event inspection
+- workflow tracing
+- listener diagnostics
+- operational debugging
+- admin visibility
+
+داخل النظام نفسه عبر APIs structured وقابلة للبناء عليها لاحقًا في Admin UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — EVENT DETAIL API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/events/:id
+
+المقصود:
+workspace_event_logs.id
+
+المطلوب:
+إرجاع:
+- event الأساسية
+- payload
+- result.listeners
+- status
+- error
+- createdAt
+- processedAt
+
+مع enrichments التالية:
+
+A) linked activity_logs
+عبر:
+activity_logs.bus_event_id
+↔ payload._busEventId
+
+B) linked notifications
+عبر:
+notifications.bus_event_id
+
+C) linked workflow_executions
+عبر:
+workflow_executions.trigger_event_log_id
+
+D) derived diagnostics
+مثل:
+- totalListenerDuration
+- failedListenersCount
+- notificationsCount
+- workflowCount
+
+المطلوب:
+- workspace isolation
+- proper auth
+- no N+1 disasters
+- pagination فقط إذا لزم للـ notifications/activity arrays
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — WORKFLOW EXECUTIONS LIST API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/workflows/executions
+
+المطلوب:
+filters:
+- status
+- workflowId
+- workspaceId
+- triggeredBy
+- date range
+
+إرجاع:
+- execution الأساسية
+- workflow name/key
+- trigger event name
+- triggerEventLogId
+- startedAt
+- completedAt
+- computed duration
+- currentStepIndex
+- status
+
+المطلوب:
+- workspace isolation
+- indexed queries
+- no deep payloads بالقائمة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — WORKFLOW EXECUTION DETAIL API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/workflows/executions/:id
+
+المطلوب:
+- execution الأساسية
+- triggering event
+- linked workspace_event_log
+- workflow definition metadata
+- ordered execution steps timeline
+
+لكل step:
+- step name/type
+- status
+- startedAt
+- completedAt
+- computed duration
+- input/output summary
+- error summary
+
+المطلوب:
+- clean timeline structure
+- no giant raw payloads
+- redact sensitive fields إذا لزم
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FAILED EVENTS VIEW API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/events/failed
+
+المطلوب:
+إرجاع:
+- failed events
+- partially failed events
+- listener failures
+- retryCount
+- error summaries
+
+filters:
+- eventName
+- module
+- workspaceId
+- date range
+
+المطلوب:
+تمييز:
+- failed بالكامل
+- partial listener failure
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FAILED WORKFLOWS VIEW API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ endpoint:
+
+GET /api/workflows/executions/failed
+
+المطلوب:
+- failed executions فقط
+- آخر failed step
+- error summary
+- workflow key/name
+- trigger event
+- execution duration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — SSE DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بدون redesign.
+
+أضف فقط:
+- getConnectionCount()
+- optional workspace grouping إذا سهل
+
+ثم أنشئ:
+
+GET /api/health/sse-connections
+
+super_admin only.
+
+المطلوب:
+- total active connections
+- optional per-workspace counts
+- no personal data exposure
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — STRUCTURED SSE DEBUG LOGGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل sse.ts:
+أضف debug logs فقط:
+
+- userId
+- workspaceId إن وجد
+- event type
+- delivered true/false
+- connection count
+
+بدون noisy info logs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — PERFORMANCE & QUERY SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+- proper indexes usage
+- no full-table scans الكبيرة
+- no huge payload serialization بالقوائم
+- limit/offset pagination عند الحاجة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- Grafana
+- OpenTelemetry
+- replay systems
+- queues
+- retry engines
+- websocket redesign
+- live dashboards
+- metrics DB
+- external tracing vendors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — PRESERVE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تغيّر:
+- EventBus architecture
+- bridge direction
+- workflow runtime logic
+- leave domain lifecycle
+- idempotency behavior
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- diagnostics ownership boundaries
+- الفرق بين audit trail و diagnostics APIs
+- why enrichment happens server-side
+- why raw payloads minimized
+- timeline reconstruction strategy
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+event-diagnostics-phase-2-report.txt
+
+ويحتوي:
+- جميع APIs المضافة
+- response structures
+- enrichment strategy
+- query optimization notes
+- workflow traceability behavior
+- failed events behavior
+- SSE diagnostics behavior
+- أي technical debt متبقي
+- readiness assessment قبل Admin UI layer

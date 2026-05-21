@@ -1,0 +1,410 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 6-D — Governance APIs & Operational Control Surface
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Status:   COMPLETE
+Tests:    725 / 725 passed  (0 failures)
+TS:       0 errors
+Phase:    P6-D builds on P6-C governance engine (656 tests)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. GOVERNANCE API ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Three-layer design:
+
+  [DB]
+    ↓  async DB queries
+  [Governance Engine — P6-C pure functions]
+    evaluateTenantHealth()
+    computeOperationalMetrics()
+    detectStuckExecutions()
+    generateGovernanceAlerts()
+    ↓  plain in-memory model objects
+  [Serialization Layer — P6-D pure functions]
+    serializeHealthResponse()
+    serializeMetricsResponse()
+    serializeStuckResponse()
+    serializeAlertsResponse()
+    serializeAlertItem()
+    deriveStuckSeverity()
+    ↓  safe API response shapes
+  [Route Handlers — P6-D Express routes]
+    GET /governance/health
+    GET /governance/metrics
+    GET /governance/stuck
+    GET /governance/alerts
+    ↓  structured log events + JSON response
+
+Files added / extended:
+  artifacts/api-server/src/lib/workflows/governance.ts
+    — 200 lines appended (serializers, response types, constants)
+  artifacts/api-server/src/routes/governance.ts
+    — 220 lines, 4 read-only endpoints
+  artifacts/api-server/src/routes/index.ts
+    — import + router.use(governanceRouter) registered after workflowsRouter
+  artifacts/api-server/src/lib/workflows/__tests__/governance-api.test.ts
+    — 69 test cases across T1–T15
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. ENDPOINT RESPONSE MODELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /governance/health
+  Auth:   requireAuth + requireWorkspaceAdmin
+  Shape:
+    {
+      capturedAt:          ISO string
+      workspaceId:         number
+      severity:            "healthy" | "warning" | "degraded" | "critical"
+      indicators:          TenantHealthIndicators
+      alerts:              AlertApiItem[]   ← capped at 10
+      stuckExecutionCount: number           ← count only, no raw rows
+      stormSeverity:       "none" | "warning" | "critical"
+      metrics: {
+        activeExecutions
+        waitingApprovalCount
+        waitingDelayCount
+        approvalBacklogCount
+        delayBacklogCount
+        workflowErrorRate
+        averageExecutionDurationMs
+      }
+    }
+  Hardening:
+    • No raw execution rows, stepsSnapshot, context, or error fields
+    • Alerts capped at MAX_ALERTS_IN_HEALTH (10); use /alerts for full list
+    • stuckExecutions exposed as count only; use /stuck for detail
+
+GET /governance/metrics
+  Auth:   requireAuth + requireWorkspaceAdmin
+  Shape:
+    {
+      capturedAt:  ISO string
+      workspaceId: number
+      counts: {
+        active, waitingApproval, waitingDelay,
+        completed, failed, timedOut, cancelled
+      }
+      backlog: {
+        approvalBacklogCount
+        delayBacklogCount
+      }
+      performance: {
+        averageExecutionDurationMs
+        workflowErrorRate
+      }
+    }
+  Notes:
+    • Structured for future dashboard chart compatibility
+    • counts/backlog/performance are stable top-level sections
+    • No per-execution detail or context
+
+GET /governance/stuck
+  Auth:   requireAuth + requireWorkspaceAdmin
+  Query:  (none — full list, capped)
+  Shape:
+    {
+      capturedAt: ISO string
+      total:      number        ← true total before truncation
+      truncated:  boolean       ← true when total > 100
+      limit:      100
+      data: [{
+        executionId
+        workflowId
+        status
+        stuckReason: "running_too_long" | "approval_overdue" | "delay_overdue"
+        stuckDurationMs
+        overdueMs
+        severity: "warning" | "critical"
+      }]
+    }
+  Hardening:
+    • Sorted by overdueMs descending (most critical first)
+    • Capped at MAX_STUCK_RESULTS = 100
+    • No raw execution context, stepsSnapshot, error, or workspaceId
+    • Per-entry severity derived: overdueMs ≥ 4h → critical, else warning
+
+GET /governance/alerts
+  Auth:    requireAuth + requireWorkspaceAdmin
+  Query:   ?page=1&limit=20  (limit max 50)
+  Shape:
+    {
+      capturedAt: ISO string
+      total:      number
+      page:       number
+      limit:      number
+      data: [{
+        code
+        severity: "info" | "warning" | "critical"
+        title
+        description
+        affectedWorkflowIds:   number[]   ← capped at 20
+        affectedExecutionIds:  number[]   ← capped at 20
+        detectedAt:            ISO string
+        recommendedAction
+      }]
+    }
+  Notes:
+    • Alerts regenerated fresh from current state on each request
+    • No alert persistence or acknowledgment store
+    • Fully paginated; page/limit clamped to safe ranges
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ALL four endpoints are READ-ONLY. Enforced at multiple layers:
+
+A) No DB mutations in route handlers
+   — Route file contains only SELECT-equivalent operations
+     (evaluateTenantHealth, computeOperationalMetrics, detectStuckExecutions
+      all query but never mutate).
+
+B) No scheduler interaction
+   — WorkflowScheduler is not imported in governance.ts or governance route.
+   — No poll triggers, no wakeAt modifications.
+
+C) No execution state changes
+   — No UPDATE of workflowExecutionsTable.
+   — No changes to cancel_requested, status, or timeoutAt.
+
+D) No alert acknowledgment
+   — No GovernanceAlert store; alerts are recomputed per-request.
+   — No "suppress", "dismiss", or "acknowledge" API surface.
+
+E) Serialization layer is synchronous and pure
+   — serializeHealthResponse / serializeMetricsResponse /
+     serializeStuckResponse / serializeAlertsResponse are all sync.
+   — They cannot make network calls or DB writes by design.
+   — Tests confirm they return plain Object instances (not ORM entities).
+
+F) Input mutation protection
+   — serializeStuckResponse uses [...stuck].sort() — does not mutate input.
+   — All serializers operate on cloned or sliced sub-arrays.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. PAYLOAD HARDENING STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Constants (all exported for test use):
+
+  MAX_STUCK_RESULTS    = 100   (stuck list cap)
+  MAX_ALERTS_PAGE      = 50    (alerts per page cap)
+  MAX_AFFECTED_IDS     = 20    (affectedWorkflowIds / affectedExecutionIds cap per alert)
+  MAX_ALERTS_IN_HEALTH = 10    (alerts in compact health response)
+  STUCK_CRITICAL_OVERDUE_MS = 14_400_000  (4h — critical severity threshold)
+
+Hardening rules applied:
+
+  1. No raw execution rows in any response
+     — Rows are consumed by pure engine functions; serializers
+       receive model objects only (metrics, stuck, alerts, summary).
+
+  2. No stepsSnapshot, context, or error fields
+     — governance.ts serializers expose only typed, named fields.
+     — Structural exclusion: TypeScript interfaces do not include these.
+
+  3. Stuck list capped + sorted
+     — serializeStuckResponse sorts by overdueMs desc, slices at 100,
+       sets truncated=true and returns true total so callers know.
+
+  4. Alert affected-ID lists capped per alert
+     — .slice(0, MAX_AFFECTED_IDS) in serializeAlertItem.
+     — Prevents single pathological alert from dominating response size.
+
+  5. Pagination bounds clamped
+     — page = Math.max(1, page)
+     — limit = Math.min(MAX_ALERTS_PAGE, Math.max(1, limit))
+     — Out-of-range page returns empty data, not 400.
+
+  6. capturedAt always present
+     — Every response has an ISO timestamp so callers know data freshness.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. OBSERVABILITY ADDITIONS (P6-D)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Four new structured log events emitted via req.log.info on every request:
+
+  governance_api_health_requested
+    fields: workspaceId, actorId, resultCounts{alertCount, stuckCount, stormCount},
+            responseSeverity, action
+
+  governance_api_metrics_requested
+    fields: workspaceId, actorId,
+            resultCounts{active, failed, waitingTotal, approvalBacklog, delayBacklog},
+            responseSeverity (derived from workflowErrorRate), action
+
+  governance_api_stuck_requested
+    fields: workspaceId, actorId, resultCounts{stuckCount, truncated},
+            responseSeverity (healthy/warning/critical by count threshold), action
+
+  governance_api_alerts_requested
+    fields: workspaceId, actorId,
+            resultCounts{totalAlerts, page, limit, returnedCount},
+            responseSeverity, action
+
+All four constants are exported from governance.ts:
+  GOVERNANCE_ACTION_HEALTH_REQUESTED   = "governance_api_health_requested"
+  GOVERNANCE_ACTION_METRICS_REQUESTED  = "governance_api_metrics_requested"
+  GOVERNANCE_ACTION_STUCK_REQUESTED    = "governance_api_stuck_requested"
+  GOVERNANCE_ACTION_ALERTS_REQUESTED   = "governance_api_alerts_requested"
+
+Combined observability (P6-C + P6-D):
+  P6-C events (5): tenant_health_assessed, stuck_execution_detected,
+                   automation_storm_detected, scheduler_backlog_detected,
+                   workflow_operational_warning
+  P6-D events (4): governance_api_health_requested,
+                   governance_api_metrics_requested,
+                   governance_api_stuck_requested,
+                   governance_api_alerts_requested
+  Total: 9 observability events covering the full governance layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. TENANT ISOLATION BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tenant isolation is enforced through:
+
+  A) requireAuth middleware
+     — Validates JWT, resolves DB user, attaches req.workspaceId.
+     — No workspaceId → 403 before any governance function is called.
+
+  B) All governance engine functions accept workspaceId as argument
+     — evaluateTenantHealth(workspaceId, db, now)
+     — computeOperationalMetrics(workspaceId, db, now)
+     — detectStuckExecutions(workspaceId, db, now)
+     — DB queries filter by workspaceId in WHERE clause (P6-C).
+
+  C) workspaceId is embedded in every response
+     — Health, metrics, alerts responses include workspaceId.
+     — Callers can verify they received their own workspace's data.
+
+  D) requireWorkspaceAdmin
+     — Governance data is restricted to admin role and above.
+     — Members and managers cannot access error rates, stuck lists,
+       or governance alerts.
+
+  E) No cross-workspace leakage possible
+     — Serializers receive model objects already scoped to one workspace.
+     — T8 tests verify workspaceId=42 and workspaceId=99 produce
+       isolated responses with no cross-tenant bleed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Test suite:  governance-api.test.ts
+Test groups: 15 (T1–T15)
+Tests:       69 new tests
+
+Results: 725 / 725 PASSED  (0 failures, 0 skipped)
+         TypeScript: 0 errors
+
+T1   Health response shape — required fields, no raw rows          6 tests  ✓
+T2   Metrics response — correct aggregates, structured shape        5 tests  ✓
+T3   Stuck response — excludes non-stuck, maps fields correctly     4 tests  ✓
+T4   Alerts response — stable governance codes, pagination          6 tests  ✓
+T5   All serializers are read-only — sync, return plain objects     5 tests  ✓
+T6   Large payloads truncated safely                                5 tests  ✓
+T7   Response shapes remain stable — deterministic                  4 tests  ✓
+T8   Tenant scoping preserved through serialization                 4 tests  ✓
+T9   No DB mutations — structural proof via sync return type        5 tests  ✓
+T10  Observability action constants have correct stable values       6 tests  ✓
+T11  deriveStuckSeverity threshold boundary                         4 tests  ✓
+T12  serializeAlertItem caps affectedIds at MAX_AFFECTED_IDS        4 tests  ✓
+T13  serializeAlertsResponse pagination clamping                    5 tests  ✓
+T14  serializeStuckResponse sort order (overdueMs desc)             3 tests  ✓
+T15  Health response alerts capped at MAX_ALERTS_IN_HEALTH          3 tests  ✓
+
+Testing strategy:
+  All tests are pure model tests — no DB, no HTTP, no supertest.
+  Serialization functions are exported from governance.ts and
+  tested directly with in-memory data, following the P6-C pattern.
+  This gives fast, deterministic coverage of all response contracts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. REMAINING OPERATIONAL GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following are intentionally out of scope for P6-D (read-only surface):
+
+A) Alert persistence and acknowledgment
+   — Alerts are recomputed on every request from live state.
+   — No alert store, no history, no deduplication across requests.
+   — Risk: repeated alerts for the same condition on every poll.
+   — Mitigation path: P6-E could add an alert_events table and
+     acknowledgment endpoint.
+
+B) Alert notification delivery
+   — No email/webhook/Slack delivery of governance alerts.
+   — Consumers must poll these endpoints.
+   — Mitigation path: connect to SMTP (already available) in a
+     future notification-delivery phase.
+
+C) Historical metrics trend
+   — /governance/metrics returns a single point-in-time snapshot.
+   — No time-series or sparkline data for dashboards.
+   — Mitigation path: periodic snapshot storage in a metrics_snapshots
+     table; /governance/metrics/history endpoint.
+
+D) Stuck execution remediation API
+   — /governance/stuck is read-only; force-timeout and cancel exist
+     in /workflows/executions/:id/force-timeout and /cancel
+     but are not linked from the governance surface.
+   — Mitigation path: governance dashboard can call existing endpoints.
+
+E) HTTP-level integration tests
+   — All tests are pure model tests.
+   — No supertest / real HTTP coverage of auth guard behavior,
+     403 on missing workspaceId, or pagination query-param parsing.
+   — Mitigation path: add integration tests in a future P6-E test pass.
+
+F) Real-time push
+   — No SSE or WebSocket stream for governance events.
+   — Dashboards must poll.
+   — Mitigation path: extend existing SSE infrastructure (stream.ts)
+     with a governance-events channel.
+
+G) Super-admin cross-workspace aggregation
+   — /governance/* is workspace-scoped.
+   — Platform-wide aggregation (e.g. top-N stuck workspaces) is absent.
+   — Mitigation path: /platform/governance endpoint behind
+     requireSuperAdmin in a future platform-governance phase.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. READINESS ASSESSMENT — BEFORE GOVERNANCE DASHBOARD PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+READY:
+
+  ✓ All four governance endpoints are live and registered
+  ✓ Response shapes are stable and typed (exported interfaces)
+  ✓ Payload hardening applied (caps, exclusions, sort)
+  ✓ Tenant isolation enforced at auth + DB + serialization layers
+  ✓ Observability events emitted on every request (workspaceId, actorId, severity)
+  ✓ 725/725 tests passing, 0 TS errors
+  ✓ All serializers are pure functions → easy to mock in dashboard tests
+  ✓ capturedAt present on all responses → dashboards can show data freshness
+  ✓ Pagination on /alerts → ready for infinite scroll or paginated table
+  ✓ truncated flag on /stuck → dashboards can warn when list is partial
+  ✓ Severity fields on stuck items and health → color-coded UI badges are trivial
+  ✓ GOV-* alert codes are stable strings → dashboard can map codes to icons
+
+NOT YET READY (for a complete production dashboard):
+
+  ⚠  No historical metrics — dashboard can only show current state, no trends
+  ⚠  No alert acknowledgment — dashboard cannot dismiss or snooze alerts
+  ⚠  No real-time push — dashboard must poll (suggested: 30s interval)
+  ⚠  No HTTP integration tests — auth/403 behavior not covered by automated tests
+
+MINIMUM VIABLE DASHBOARD is possible now:
+  - Health severity badge (green/yellow/orange/red)
+  - Active executions + error rate cards (from /metrics)
+  - Stuck executions table with severity coloring (from /stuck)
+  - Active governance alerts list with codes and recommended actions (from /alerts)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+P6-D COMPLETE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

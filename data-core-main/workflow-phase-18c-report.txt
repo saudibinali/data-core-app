@@ -1,0 +1,122 @@
+================================================================================
+WORKFLOW PHASE 18C — LEAVE CANONICAL MIGRATION PLAN
+================================================================================
+Date: 2026-05-19
+Type: PLANNING / DESIGN / SAFETY / MAPPING ONLY
+Status: COMPLETE
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-C produced a full leave migration blueprint from legacy hr_employee_leaves
+to canonical leave_requests + leave_approval_steps. The canonical API
+(routes/leave.ts) is already implemented with transactions, balance locks,
+conflict detection, bus events, and notifications — but production databases
+created from Drizzle journal 0000 lack the canonical tables (P18-B D1).
+
+Production UI (hr-me-leave.tsx, hr-attendance.tsx, hr-employee-detail.tsx)
+still uses legacy endpoints. Critical defect: self-service leave list calls
+GET /hr/attendance/leaves which requires hr.manage — employees cannot list
+their own requests reliably.
+
+Recommended execution: L1 DB migration on staging first, then API tests,
+then frontend bridge with legacy write freeze before broad rollout.
+
+================================================================================
+FILES CREATED
+================================================================================
+1.  p18-c-canonical-leave-architecture-plan.md
+2.  p18-c-leave-migration-sql-plan.md
+3.  p18-c-legacy-to-canonical-mapping-plan.md
+4.  p18-c-leave-api-transition-plan.md
+5.  p18-c-frontend-transition-plan.md
+6.  p18-c-leave-data-integrity-risk-audit.md
+7.  p18-c-leave-canonical-readiness-decision.md
+8.  p18-c-leave-execution-phases.md
+9.  workflow-phase-18c-report.txt (this file)
+
+================================================================================
+CANONICAL LEAVE DECISION
+================================================================================
+- Canonical tables: leave_requests, leave_approval_steps
+- Canonical API: routes/leave.ts (POST/GET/PATCH approve|reject|withdraw)
+- Canonical balances: hr_leave_balances (shared today)
+- Legacy: hr_employee_leaves + hr.ts paths — freeze then read-only, no drop
+- request_number: LRQ-YYYYMM-RAND (new); LRQ-MIG-{legacyId} (migration)
+- business_days_count: server calcBusinessDays; used for balance/conflicts
+
+================================================================================
+MIGRATION BLOCKERS (remain until P18-D L1)
+================================================================================
+- leave_requests / leave_approval_steps not in 0000_sad_midnight.sql
+- No Drizzle journal entry for leave domain yet
+- Staging/prod DB may not have tables → leave.ts fails on INSERT
+
+================================================================================
+API CONFLICTS
+================================================================================
+C1 CRITICAL: POST /hr/me/leave-requests (legacy table) vs POST /hr/leave-requests
+C2 HIGH: PATCH /hr/attendance/leaves/:id vs canonical approve/reject
+C3 HIGH: Self-service list uses hr.manage-only GET /hr/attendance/leaves
+C4 MEDIUM: Client daysCount vs server businessDaysCount
+C5 MEDIUM: status pending vs pending_approval
+Gap: No canonical HR-on-behalf submit for /hr/employees/:id/leaves
+
+================================================================================
+UI CONFLICTS
+================================================================================
+- hr-me-leave.tsx: legacy submit + broken/wrong list API + hr.view policies
+- hr-attendance.tsx: legacy approve buttons
+- hr-employee-detail.tsx: legacy CRUD
+- Missing UI for withdraw, pending_approval, requestNumber
+- App.tsx /self-service/leave lacks self_service.view guard (P18-B P7)
+
+================================================================================
+DATA INTEGRITY RISKS (top)
+================================================================================
+CRITICAL: R1 duplicate rows (dual tables), R3 double balance, R7 stale balances,
+          R10 cross-workspace (mitigated in canonical code if workspace_id kept)
+HIGH: R2 double approval, R4 legacy races, R5 legacy partial writes, R12 list 403
+Mitigation: no dual-write; L5 legacy freeze before prod UI; L4 reconciliation
+
+================================================================================
+ROLLOUT STRATEGY (summary)
+================================================================================
+L1 DDL → L2 API tests → L3 frontend flag → L4 data migrate → L5 legacy write
+freeze → L6 legacy read-only → L7 handler cleanup (table retained)
+
+No dual-write. Deprecation headers on legacy POST/PATCH. Feature flag for UI.
+
+================================================================================
+READINESS VERDICT
+================================================================================
+Write migration spec:     GO
+Apply migration prod:     BLOCKED
+Switch UI:                BLOCKED
+Enable canonical prod:    BLOCKED
+Stop legacy APIs now:     BLOCKED
+Data migration:           PARTIAL (plan ready, execute after L1)
+
+================================================================================
+RECOMMENDED NEXT EXECUTION PHASE (ONE ONLY)
+================================================================================
+P18-D — Leave DB Migration & Staging Verification
+
+(Rationale: DDL is the hard blocker for leave.ts, tests, and UI cutover.
+ HR Baseline Tests should follow L1 or run in parallel on migrated CI DB.)
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No migrations applied
+[x] No schema modified
+[x] No APIs changed
+[x] No frontend changed
+[x] No permissions changed
+[x] No data migrated
+[x] Planning/documentation only
+[x] P18-D not started
+
+================================================================================
+END OF PHASE 18C REPORT
+================================================================================

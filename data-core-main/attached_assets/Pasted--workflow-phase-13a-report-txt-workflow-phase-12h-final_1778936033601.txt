@@ -1,0 +1,392 @@
+راجع:
+- workflow-phase-13a-report.txt
+- workflow-phase-12h-final-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/lib/tenant-registry.ts
+- artifacts/api-server/src/routes/tenants.ts
+- artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+- artifacts/ops-platform/src/lib/tenant-registry-config.ts
+- artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+- workspacesTable
+- existing audit/event patterns
+- requireSuperAdmin middleware
+- SuperAdminRoute
+- TENANT_REGISTRY_SAFETY_CONTRACT
+
+ثم نفّذ فقط:
+P13-B — Workspace Lifecycle Management & Controlled State Transitions
+
+ولا تنفّذ:
+- payment provider integration
+- automatic subscription enforcement
+- tenant deletion
+- hard delete
+- HR employee management
+- billing invoices
+- external legal notices
+- automatic suspension jobs
+- plan entitlement engine
+- module access enforcement
+
+عنوان المهمة:
+WORKFLOW PHASE 13-B — Workspace Lifecycle Management & Controlled State Transitions
+
+المهمة الحالية:
+تحويل Tenant Registry من read-only visibility إلى controlled lifecycle administration.
+
+الهدف:
+تمكين السوبر أدمن من تنفيذ انتقالات حالة Workspace بشكل آمن ومراقب:
+- activate
+- suspend
+- restore
+- lock
+- archive
+
+بطريقة:
+controlled, audited, deterministic, non-destructive lifecycle management
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT P13-A FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- TenantStatus model
+- WorkspaceOperationalStatus model
+- workspaces.status values الحالية: active / suspended / disabled
+- tenant registry APIs
+- tenant registry UI
+- existing auth/super-admin guards
+- existing audit/event/logging patterns
+- هل يوجد audit table أو platform activity table مناسب
+
+حدّد:
+- كيف يتم تمثيل حالة workspace حاليًا
+- هل نحتاج توسيع status values أو نستخدم الموجود
+- أين نسجل lifecycle events
+- كيف نمنع transitions غير المسموحة
+- كيف نحافظ على backward compatibility مع P13-A
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — LIFECYCLE STATE MACHINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم state machine واضحة:
+
+WorkspaceLifecycleState:
+- pending_activation
+- active
+- suspended
+- locked
+- archived
+
+Compatibility mapping:
+- workspaces.status = active    → active
+- workspaces.status = suspended → suspended
+- workspaces.status = disabled  → archived أو locked حسب الموجود
+
+Allowed transitions:
+
+pending_activation → active
+active → suspended
+active → locked
+active → archived
+suspended → active
+suspended → locked
+suspended → archived
+locked → active
+locked → suspended
+locked → archived
+archived → active فقط إذا restore مسموح
+archived → suspended اختياري إذا منطقي
+
+ممنوع:
+- transition لنفس الحالة بدون سبب
+- delete
+- hard destroy
+- bypass audit
+- unknown → destructive state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — LIFECYCLE ACTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+
+WorkspaceLifecycleAction:
+- activate
+- suspend
+- restore
+- lock
+- archive
+
+لكل action:
+- label
+- description
+- allowedFrom
+- targetState
+- severity
+- requiresReason: true
+- requiresConfirmation: true
+- isDestructive: false
+- auditEventType
+
+مهم:
+archive هنا soft/archive status فقط، ليس حذف بيانات.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — REASON / CONFIRMATION CONTRACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+كل lifecycle action لازم يطلب:
+- reason
+- confirmation checkbox أو typed confirmation
+- optional internalNote
+- actorId من session
+- timestamp
+- previousState
+- targetState
+
+Validation:
+- reason required
+- reason min length مثلاً 10
+- target transition must be allowed
+- actor must be super-admin
+- tenant must exist
+- no self-contradicting action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — BACKEND MUTATION API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف endpoint واحد محكوم:
+
+PATCH /platform/tenants/:tenantId/lifecycle
+
+Body:
+{
+  "action": "suspend" | "activate" | "restore" | "lock" | "archive",
+  "reason": "...",
+  "internalNote": "... optional",
+  "confirmation": true
+}
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenantId
+- load workspace
+- derive current lifecycle state
+- validate action allowed
+- update workspace status فقط حسب mapping
+- record lifecycle event/audit
+- structured log
+- return updated PlatformTenantProfile
+
+مهم:
+- لا تضف أكثر من endpoint الآن
+- لا تضف billing logic
+- لا automatic enforcement
+- لا delete
+- لا HR data mutation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — LIFECYCLE EVENT / AUDIT RECORD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا يوجد platform activity/audit table:
+سجل:
+- eventType: workspace_lifecycle_transition
+- tenantId
+- workspaceId
+- actorId
+- action
+- previousState
+- targetState
+- reason
+- internalNote
+- occurredAt
+- metadata
+
+إذا لا يوجد table مناسب:
+- أضف pure structured logging أولًا
+- أو أضف minimal lifecycle event table فقط إذا المشروع pattern يسمح
+
+الأولوية:
+audit-safe بدون تعقيد زائد.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND HOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف hook:
+
+useWorkspaceLifecycleTransition()
+
+يستخدم mutation واحد فقط.
+
+لكن:
+- محصور في صفحة Super Admin Tenants
+- يعرض loading state
+- يعيد fetch tenant registry بعد النجاح
+- يعالج error states
+- لا يوجد mutations ثانية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND UI CONTROLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Lifecycle Controls
+
+يعرض فقط actions المسموحة حسب current state.
+
+لكل action:
+- button واضح
+- severity styling
+- confirmation modal
+- reason textarea required
+- internal note optional
+- confirmation checkbox
+- submit disabled حتى تكتمل الشروط
+
+ممنوع:
+- delete button
+- hard archive wording
+- billing/payment wording
+- automatic action wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — POST-ACTION UX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بعد نجاح action:
+- show success toast/alert
+- close modal
+- refresh tenant registry
+- updated status يظهر فورًا
+- detail panel يعرض latest state
+- لا redirect
+
+عند الفشل:
+- show error message
+- لا تغير UI optimistically إلا إذا المشروع عنده pattern واضح
+- لا تخفي الحالة السابقة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Workspace Lifecycle MUST:
+- remain super-admin only
+- require reason
+- require confirmation
+- validate allowed transitions
+- record audit/log event
+- be non-destructive
+- never delete workspace
+- never mutate HR employee data
+- never trigger billing/payment
+- never auto-suspend
+- never send external notices
+- fail closed on unknown state
+
+أي:
+controlled lifecycle administration فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+lifecycle state derivation stable
+
+T2:
+action map stable
+
+T3:
+allowed transitions deterministic
+
+T4:
+invalid transition rejected
+
+T5:
+reason required
+
+T6:
+confirmation required
+
+T7:
+non-super-admin blocked
+
+T8:
+tenant not found returns 404
+
+T9:
+successful transition updates workspace status
+
+T10:
+audit/log event emitted
+
+T11:
+updated tenant profile returned
+
+T12:
+frontend allowed actions derived correctly
+
+T13:
+modal validation blocks submit without reason/confirmation
+
+T14:
+no delete/hard-destroy/billing/payment labels exist
+
+T15:
+mutation hook count limited to lifecycle only
+
+T16:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- automatic lifecycle evaluator
+- subscription expiry enforcement
+- payment integration
+- invoice logic
+- tenant deletion
+- hard archive
+- HR user deletion
+- module entitlement enforcement
+- email/legal notices
+- bulk lifecycle actions
+- self-service tenant controls
+
+خلك:
+controlled manual lifecycle transition فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13b-report.txt
+
+ويحتوي:
+- lifecycle state machine
+- action model
+- transition validation rules
+- backend mutation API
+- audit/log behavior
+- frontend lifecycle controls
+- confirmation/reason contract
+- safety guarantees
+- tests results
+- remaining lifecycle gaps
+- readiness assessment قبل Subscription Lifecycle Foundations

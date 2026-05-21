@@ -1,0 +1,192 @@
+================================================================================
+WORKFLOW PHASE 16-B — ENTITLEMENT & FEATURE ACCESS MODEL
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P16-B only — do not start P16-C)
+
+================================================================================
+1. ENTITLEMENT CATALOG
+================================================================================
+
+Source: artifacts/api-server/src/lib/workspace-entitlement-catalog.ts
+(mirrored in API responses for frontend consumption)
+
+Modules (18):
+  core, hr, recruitment, onboarding, attendance, leave, payroll, performance,
+  lms, succession, workflows, notifications, documents, analytics, integrations,
+  ai_automation, communication, admin_console
+
+Sample features (12):
+  hr.employee_profiles, recruitment.job_requisitions, onboarding.task_templates,
+  attendance.shift_schedules, leave.approval_flows, payroll.salary_components,
+  performance.review_cycles, lms.course_catalog, documents.employee_files,
+  analytics.executive_dashboards, integrations.api_access,
+  ai_automation.assistant_actions
+
+Rules:
+  - core cannot be disabled (isCore flag + server validation)
+  - feature keys must belong to their module
+  - catalog is static/config-driven and extensible
+  - no payment linkage
+
+================================================================================
+2. DATABASE MODEL
+================================================================================
+
+Table: workspace_entitlements (lib/db/src/schema/workspace-entitlements.ts)
+
+Fields:
+  id, workspaceId, subscriptionId (optional), moduleKey, featureKey,
+  isEnabled, source, effectiveFrom, effectiveUntil, reason, internalNotes,
+  createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - featureKey empty string in DB = module-level entitlement (API exposes null)
+  - unique (workspaceId, moduleKey, featureKey)
+  - no hard delete — isEnabled=false / upsert only
+  - optional link to workspace_subscriptions (P16-A)
+  - coexists with legacy tenant_entitlement_overrides (P13-D)
+
+================================================================================
+3. PERMISSIONS ADDED (37 total platform permissions)
+================================================================================
+
+  - platform.entitlements.read
+  - platform.entitlements.update
+
+Role matrix (additive):
+  - root_platform_owner / platform_admin: read + update
+  - finance_admin: read + update
+  - sales_admin: read only
+  - support_admin / auditor / read_only_operator: read only
+  - workspace_support: none
+
+Legacy P13 permissions (entitlements.read / entitlements.override.update) unchanged.
+
+================================================================================
+4. BACKEND APIs (platform only)
+================================================================================
+
+Router: artifacts/api-server/src/routes/workspace-entitlements.ts
+
+  GET  /platform/tenants/:tenantId/entitlements/catalog → platform.entitlements.read
+  GET  /platform/tenants/:tenantId/entitlements         → platform.entitlements.read
+  PUT  /platform/tenants/:tenantId/entitlements       → platform.entitlements.update (bulk upsert)
+  PATCH /platform/tenants/:tenantId/entitlements/:entitlementId → platform.entitlements.update
+
+Not implemented:
+  - DELETE entitlement
+  - Tenant-side entitlement APIs
+  - Login blocking / enforcement endpoints
+  - Payment fields
+
+================================================================================
+5. HELPER BEHAVIOR (read-only)
+================================================================================
+
+File: artifacts/api-server/src/lib/workspace-entitlement-resolver.ts
+
+  - resolveWorkspaceEntitlements(workspaceId) → per-module enabled state + features
+  - canWorkspaceUseFeature(workspaceId, moduleKey, featureKey?) → boolean
+
+Behavior:
+  - core module always returns enabled
+  - feature row overrides module default when present
+  - respects effectiveFrom / effectiveUntil dates
+  - no mutations, redirects, or login blocking (for P16-C+ consumers)
+
+================================================================================
+6. FRONTEND — ENTITLEMENTS & FEATURES SECTION
+================================================================================
+
+Location: Tenant Registry → Subscription & Entitlements tab
+Wrapper: SubscriptionEntitlementsConsole.tsx
+  - Subscription State (P16-A) when platform.subscriptions.read
+  - Entitlements & Features (P16-B) when platform.entitlements.read
+
+Component: EntitlementsFeaturesPanel.tsx
+  - Module list with features, enabled/disabled, source, dates, notes
+  - core shown locked/enabled
+  - Toggle controls require platform.entitlements.update + disable reason field
+
+Hooks (use-workspace-entitlements.ts):
+  - useTenantEntitlementCatalog(tenantId)
+  - useTenantEntitlements(tenantId)
+  - useUpdateTenantEntitlements()
+  - useUpdateTenantEntitlement()
+
+React Query keys:
+  - ["platform","tenants",tenantId,"entitlements","catalog"]
+  - ["platform","tenants",tenantId,"entitlements"]
+
+================================================================================
+7. VALIDATION
+================================================================================
+
+  - Tenant must exist
+  - subscriptionId must belong to same workspace if provided
+  - moduleKey must be in catalog
+  - featureKey must belong to moduleKey when set
+  - core cannot be set isEnabled=false (blocked + audit)
+  - effectiveFrom <= effectiveUntil
+  - reason required when disabling (min 10 chars)
+  - forbidden payment/Stripe/card/tax payload keys rejected
+
+================================================================================
+8. AUDIT EVENTS
+================================================================================
+
+  - workspace_entitlements_updated (bulk PUT)
+  - workspace_entitlement_changed (PATCH single)
+  - workspace_entitlement_change_blocked (invalid change e.g. disable core)
+
+Metadata: actorId, workspaceId/tenantId, entitlementId, moduleKey, featureKey,
+previousEnabled, nextEnabled, source, reason, timestamp.
+
+================================================================================
+9. SAFETY GUARANTEES (ENTITLEMENT_MODEL_SAFETY_CONTRACT — all true)
+================================================================================
+
+  entitlementModelOnly, noBroadEnforcement, noTenantLoginBlocking,
+  noAutomaticSuspension, noElectronicPayment, noStripe, noCheckout,
+  noPaymentGateway, noInvoiceGenerationEngine, noTaxCalculation, noZatcaIntegration,
+  noAccountingLedger, noEmailSending, noDestructiveWorkspaceActions,
+  noCustomPermissions, coreModuleAlwaysEnabled, permissionGated,
+  auditEntitlementChanges
+
+Config: artifacts/ops-platform/src/lib/entitlement-model-config.ts
+
+================================================================================
+10. TEST RESULTS
+================================================================================
+
+api-server (P16-B targeted):
+  - workspace-entitlement-catalog.test.ts — PASS
+  - workspace-entitlement-resolver.test.ts — PASS
+  - workspace-entitlements.test.ts — PASS (24 tests in batch)
+
+ops-platform:
+  - phase-16b-entitlements.test.ts — PASS
+
+Permission count assertions updated to 37 platform permissions.
+
+================================================================================
+11. INTENTIONAL LIMITATIONS (for P16-C — NOT STARTED)
+================================================================================
+
+P16-C next phase: Workspace Limits & Quotas
+
+Left for P16-C and later:
+  - Seat/storage/API quota enforcement
+  - Usage metering tied to entitlements
+  - Application-wide module route blocking
+  - Login or workspace suspension enforcement
+  - Automated plan-driven entitlement sync from billing
+  - Payment, invoicing, tax, email automation
+
+P16-B delivers catalog, persistence, platform APIs, read-only resolver,
+audit trail, and Super Admin UI indicators only — no broad enforcement.
+
+================================================================================
+END OF PHASE 16-B REPORT
+================================================================================

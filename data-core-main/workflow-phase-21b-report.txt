@@ -1,0 +1,133 @@
+================================================================================
+WORKFLOW PHASE 21-B — Canonical Payroll DB & Compensation Engine Foundation
+================================================================================
+Date: 2026-05-19
+Status: COMPLETE (foundation scope)
+P21-C NOT STARTED (per instruction)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Delivered the first executable canonical payroll foundation: numeric schema
+migration 0010, BigInt-based Money utilities, compensation/package/policy/
+period/lock services, attendance_daily_summaries adapter, preview payroll runs
+with idempotency, legacy hr_* coexistence bridge, lock enforcement on ingest/
+replay/pipeline, canonical REST APIs, payroll permissions middleware, report
+definition registration, smoke tests, and implementation documentation.
+
+Explicitly NOT delivered: production payroll rollout, bank/accounting/government
+integrations, full calculation engine, payslip PDFs, UI cutover, destructive
+legacy migration.
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+canonical payroll DB          : GO
+decimal payroll foundation    : GO
+payroll locks                 : GO
+compensation engine foundation: PARTIAL (package lifecycle yes; calc engine no)
+payroll readiness (production): BLOCKED (by design until P21-C+)
+
+--------------------------------------------------------------------------------
+TABLES ADDED (migration 0010)
+--------------------------------------------------------------------------------
+payroll_cycles, payroll_periods, payroll_runs, payroll_run_employees,
+payroll_components, payroll_component_values, compensation_packages,
+compensation_adjustments, payroll_policies, payroll_locks
+
+All workspace-scoped with indexes, audit timestamps, idempotency on runs.
+
+--------------------------------------------------------------------------------
+SERVICES ADDED
+--------------------------------------------------------------------------------
+lib/payroll/money.ts
+lib/payroll/compensation-package-service.ts
+lib/payroll/payroll-policy-service.ts
+lib/payroll/payroll-period-service.ts
+lib/payroll/payroll-lock-service.ts
+lib/payroll/payroll-attendance-adapter.ts
+lib/payroll/payroll-run-service.ts
+lib/payroll/legacy-payroll-bridge.ts
+lib/payroll/payroll-audit.ts
+lib/payroll/payroll-reports.ts
+lib/payroll/payroll-permissions.ts
+middlewares/requirePayrollPermission.ts
+routes/payroll-canonical.ts
+
+--------------------------------------------------------------------------------
+DECIMAL MIGRATION STATUS
+--------------------------------------------------------------------------------
+Canonical schema: numeric(19,4) only.
+Application: Money class (BigInt minor units), no parseFloat in new payroll lib.
+Legacy POST /hr/payroll/runs/:id/process unchanged (coexistence).
+
+--------------------------------------------------------------------------------
+PAYROLL LOCKS STATUS
+--------------------------------------------------------------------------------
+payroll_locks table + PayrollLockService
+Enforced: AttendanceIngestionService, processIngestedEvent, ReplayService
+Workforce Ops replay: break-glass via request body { breakGlass, reason }
+Period lock APIs: lock-attendance, lock-payroll, unlock (break-glass reason)
+
+--------------------------------------------------------------------------------
+ATTENDANCE ADAPTER STATUS
+--------------------------------------------------------------------------------
+PayrollAttendanceAdapter reads attendance_daily_summaries only.
+Aggregates: paid days, unpaid absences, OT/late/early leave, holidays, daily detail.
+Does NOT read hr_attendance for canonical payroll paths.
+
+--------------------------------------------------------------------------------
+SECURITY STATUS
+--------------------------------------------------------------------------------
+Permissions: hr.payroll.view|calculate|approve|export|admin
+Middleware + salary masking on list/package endpoints
+Audit hooks: logPayrollAccess, break-glass lock override logging
+Workspace isolation on all queries
+
+--------------------------------------------------------------------------------
+REPORTING STATUS
+--------------------------------------------------------------------------------
+Definitions: hr.payroll.register, hr.payroll.components (JSON)
+Generators wired to export job / generated_reports infrastructure
+No PDF payslips
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+File: artifacts/api-server/src/lib/payroll/__tests__/payroll-foundation.smoke.test.ts
+Unit: 9 passed (Money arithmetic, idempotency key, permissions, lock date range,
+       break-glass unlock validation)
+DB integration: skipped unless DATABASE_URL + migration 0010 applied
+  (set RUN_PAYROLL_FOUNDATION_SMOKE=1 to enable)
+
+Command: pnpm exec vitest run src/lib/payroll/__tests__/payroll-foundation.smoke.test.ts
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS (expected)
+--------------------------------------------------------------------------------
+- Full payroll calculation engine (P21-C)
+- Payslip generation and PDF templates
+- Component value posting during process
+- Bank / accounting / government integrations
+- UI migration from legacy /hr/payroll routes
+- End-to-end dual-write on legacy process endpoint
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P21-C — Payroll Calculation Engine & Payslip Generation
+
+--------------------------------------------------------------------------------
+CONFIRMATIONS
+--------------------------------------------------------------------------------
+[x] No production payroll rollout
+[x] No bank integrations
+[x] No accounting posting
+[x] No government integrations
+[x] No destructive payroll migration
+[x] No ERP finance redesign
+[x] P21-C not started
+
+================================================================================
+END OF REPORT
+================================================================================

@@ -1,0 +1,765 @@
+WORKFLOW PHASE 9-F REPORT
+Adaptive Scheduling Research Foundations & Safe Enforcement Bridge
+=============================================================================
+Date:    2026-05-15
+Status:  COMPLETE
+Tests:   1711 passed (30 files) — 0 failures — net +52 assertions over P9-E baseline
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-F converts the manual advisory scheduler governance from P9-E into a safe
+adaptive-scheduling research infrastructure — a deterministic enforcement bridge
+that makes P9-E policy decisions visible as per-workspace effective weights,
+enables passive research observation of policy impact, and produces structured
+telemetry for future adaptive scheduling research.
+
+Before P9-F:
+  • P9-E policies are approved by operators, but their targetSchedulerWeight
+    has no computational path to reach the scheduler.
+  • No per-workspace effective weight lookup: callers must manually join
+    P9-B advisoryWeight + P9-E active policies and reason about priority.
+  • No conflict resolution: if P9-E conflict prevention ever failed (defensive),
+    there is no well-defined outcome for the scheduler.
+  • No research instrumentation: no per-workspace comparison of advisory weight
+    vs policy-driven effective weight.
+  • No platform-wide enforcement snapshot: no single query showing which
+    workspaces are in advisory vs policy-driven mode.
+
+After P9-F:
+  • SchedulerEnforcementBridge — formal model per workspace combining advisory
+    + policy resolution into a single actionable effective weight.
+  • resolveEffectiveSchedulerWeight() — deterministic resolution function with
+    four priority layers and a guaranteed starvation floor.
+  • EnforcementMode — three-state mode classifier per workspace bridge.
+  • AdaptiveResearchSnapshot — platform-wide aggregate of all bridges.
+  • ResearchMetric — per-workspace combined P9-B + P9-F instrumentation record.
+  • 4 structured observability events on all bridge resolution paths.
+  • 1 new super-admin GET route: /platform/governance/enforcement.
+  • All guarantees: deterministic, human-controlled, rollback-safe, fail-closed.
+
+Explicitly excluded (per phase scope):
+  Autonomous scheduling, AI balancing, self-healing, autoscaling infra,
+  distributed schedulers, realtime optimization loops, dynamic tenant migration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. ENFORCEMENT BRIDGE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-F sits between the existing read and write planes, composing their outputs
+into a single deterministic effective weight per workspace:
+
+  P9-B  evaluateWorkloadContainment()  → TenantWorkloadPartition
+        (advisory schedulerWeight — computed from live execution pressure)
+
+  P9-E  SchedulerFairnessPolicy        → active policy or no-policy state
+        (operator-approved targetSchedulerWeight — human-gated governance)
+
+  P9-F  resolveEffectiveSchedulerWeight() → SchedulerEnforcementBridge
+        (effective weight = resolution of advisory + policy, with safety rules)
+
+The enforcement bridge is NOT a new persistence layer. It is a pure
+computational layer that reads from P9-B and P9-E and produces a
+governance-safe effective weight on demand.
+
+Full governance stack after P9-F:
+
+  P9-A  TenantIsolationContext         — per-request isolation boundary
+  P9-B  TenantWorkloadPartition        — advisory schedulerWeight from pressure
+  P9-C  TenantGovernanceView           — workspace-scoped governance view
+  P9-D  PlatformGovernanceOverview     — platform read-only control plane
+  P9-E  SchedulerFairnessPolicy        — human-gated weight governance
+  P9-F  SchedulerEnforcementBridge     — policy-to-weight bridge + research ← NEW
+
+Data flow for resolveEffectiveSchedulerWeight():
+
+  [P9-B partition]    [P9-E active policies]    [options: mode, resolutionTime]
+        │                      │                          │
+        └──────────────────────┴──────────────────────────┘
+                               │
+                               ▼
+                 resolveEffectiveSchedulerWeight()
+                               │
+              ┌────────────────┴────────────────────┐
+              │      Resolution priority ladder       │
+              │                                       │
+              │  1. CONFLICT guard   (defensive)      │
+              │  2. STALE check      (expiry-safe)    │
+              │  3. ACTIVE POLICY    (normal path)    │
+              │  4. NO POLICY        (advisory-only)  │
+              └───────────────────────────────────────┘
+                               │
+                               ▼
+                  SchedulerEnforcementBridge
+                  ┌──────────────────────────┐
+                  │ workspaceId              │
+                  │ effectiveSchedulerWeight │  ← this is the actionable output
+                  │ advisorySchedulerWeight  │  ← preserved for research delta
+                  │ sourcePolicyId           │
+                  │ enforcementMode          │
+                  │ enforcementStatus        │
+                  │ appliedAt                │
+                  │ rollbackReference        │
+                  │ resolutionNotes          │
+                  └──────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. EFFECTIVE WEIGHT RESOLUTION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+resolveEffectiveSchedulerWeight(input: EnforcementResolutionInput) — 4 priority layers:
+
+LAYER 1 — CONFLICT GUARD (defensive; P9-E should prevent this)
+
+  Trigger: 2+ non-expired active policies for the same workspace.
+  Outcome: fail-closed to SCHEDULER_WEIGHT_FLOOR (0.25).
+  Mode:    advisory_only (regardless of requestedMode).
+  Status:  "conflict".
+  Notes:   lists all conflicting policyIds in resolutionNotes.
+  Rationale: if two operators approved conflicting weights simultaneously,
+             we cannot know which is correct. Failing to the minimum safe
+             value is the only governance-safe response.
+
+LAYER 2 — STALE CHECK (expiry-safe)
+
+  Trigger: all active-status policies for workspace are past expiresAt.
+  Outcome: effectiveWeight = advisoryWeight (P9-B).
+  Mode:    advisory_only.
+  Status:  "stale".
+  Notes:   lists stale policyId + suggests running GET /policies to auto-expire.
+  Rationale: an expired policy should not continue to constrain a workspace.
+             The scheduler reverts to pure P9-B advisory weight until a new
+             policy is approved.
+
+  Edge case: one stale + one live policy → live policy wins (status="resolved").
+             Stale count is reported in the result but does not block resolution.
+
+LAYER 3 — ACTIVE POLICY (normal policy enforcement path)
+
+  Trigger: exactly one non-expired active policy exists for workspace.
+  Outcome: effectiveWeight = max(policy.targetSchedulerWeight, FLOOR).
+  Mode:    operator_confirmed (or research_shadow if requestedMode="research_shadow").
+  Status:  "resolved" (or "floor_applied" if target was below floor — defensive).
+  Notes:   populated only for floor_applied or research_shadow cases.
+  Rationale: the operator's approved weight is authoritative. The floor
+             is applied defensively in case P9-E validation was bypassed.
+
+  Research shadow sub-path:
+    If requestedMode = "research_shadow", the policy is found and noted in
+    resolutionNotes, but effectiveWeight remains = advisoryWeight.
+    This allows platform researchers to observe "what would policy X do"
+    without actually changing the advisory weight in the snapshot.
+
+LAYER 4 — NO ACTIVE POLICY (default advisory state)
+
+  Trigger: no active policies exist for workspace (pending/expired/rolled_back only).
+  Outcome: effectiveWeight = advisoryWeight (P9-B).
+  Mode:    advisory_only.
+  Status:  "no_active_policy".
+  Notes:   empty.
+  Rationale: this is the steady state for most workspaces. The enforcement
+             bridge is a pass-through when no operator action is in effect.
+
+FLOOR GUARANTEE:
+
+  In all four layers, effectiveSchedulerWeight is guaranteed ≥ 0.25.
+  The advisory weight input is also floored (safeAdvisory = max(advisory, 0.25))
+  to handle any edge case where P9-B produced a sub-floor advisory weight.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. ENFORCEMENT SAFETY CONSTRAINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Five safety constraints enforced by the engine:
+
+Constraint 1 — ONE EFFECTIVE POLICY PER WORKSPACE
+  The resolver only accepts input with at most one non-expired active policy
+  per workspace. If it finds more, it fires the CONFLICT guard (Layer 1).
+  This is the runtime enforcement of the compile-time guarantee from P9-E's
+  checkPolicyConflict() + DB query.
+
+Constraint 2 — BOUNDED EFFECTIVE WEIGHTS
+  effectiveSchedulerWeight is always in [0.25, 1.00].
+  • Floor (0.25): max() applied to both advisory weight input and policy target.
+  • Ceiling (1.00): policy validation in P9-E prevents > 1.00 at creation time.
+    No ceiling is re-applied here (P9-E is trusted for upper bound).
+
+Constraint 3 — ROLLBACK PRECEDENCE
+  The resolver only reads policies with policyStatus = "active".
+  A "rolled_back" policy (previousSchedulerWeight restored) is completely
+  invisible to the resolver — it has no effect on effectiveWeight.
+  This ensures rollback has immediate effect without any bridge-side state change.
+
+Constraint 4 — POLICY EXPIRATION PRECEDENCE
+  isPolicyExpired() is called at resolution time, not at approval time.
+  A policy approved 28 days ago with a 30-day window is still live.
+  A policy that expired 1 second ago is already stale (Layer 2).
+  The resolver does NOT check policyStatus for expiry (trusts isPolicyExpired).
+
+Constraint 5 — STALE POLICY REJECTION
+  Policies that are past their expiresAt are treated as non-existent for
+  effective weight purposes. The resolver correctly handles the edge case of
+  one stale + one live policy (live wins).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. ENFORCEMENT MODES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EnforcementMode — three states:
+
+"advisory_only"
+  Effective weight comes from P9-B advisory (no policy influence).
+  Applies to:
+    • Workspaces with no active policies (steady state for most workspaces)
+    • Workspaces with only stale active policies
+    • Workspaces with a conflict (fail-closed, defensive)
+  effectiveWeight = advisorySchedulerWeight
+
+"operator_confirmed"
+  Effective weight comes from the operator-approved policy.targetSchedulerWeight.
+  Applies to:
+    • Workspaces with exactly one non-expired active policy
+    • Default mode when requestedMode is not set and a live policy exists
+  effectiveWeight = max(policy.targetSchedulerWeight, FLOOR)
+  This is the primary enforcement mode — the platform applies the operator's
+  governance decision.
+
+"research_shadow"
+  A live policy exists and is noted, but the effective weight is NOT changed.
+  Applies to:
+    • Workspaces with a live policy + explicit requestedMode="research_shadow"
+  effectiveWeight = advisorySchedulerWeight (unchanged from P9-B)
+  Policy details visible in sourcePolicyId and resolutionNotes.
+  Used for:
+    • Passive observation — "what would this policy do without applying it?"
+    • Research comparisons — snapshot effective vs advisory across all workspaces
+    • Safe staging — operate in advisory mode while reviewing a policy's impact
+
+EnforcementMode transition determinism:
+
+  Input                          → Mode
+  ─────────────────────────────────────────────────────────────────
+  No active policy               → advisory_only
+  Stale active policy            → advisory_only
+  Conflict (2+ live policies)    → advisory_only       (overrides requestedMode)
+  Live policy, default mode      → operator_confirmed
+  Live policy, requestedMode=    → operator_confirmed
+    "operator_confirmed"
+  Live policy, requestedMode=    → research_shadow
+    "research_shadow"
+  Live policy, requestedMode=    → advisory_only       (same as no policy)
+    "advisory_only"
+
+Note: requestedMode="advisory_only" is accepted — it forces the bridge to
+ignore any live policy and use advisory weight. This allows callers to
+explicitly opt out of policy enforcement for a specific read context.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. ROLLBACK PRESERVATION GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-F preserves and extends the rollback guarantees from P9-E:
+
+A) ROLLBACK REFERENCE
+   When the bridge resolves from an active policy, it stores:
+     rollbackReference = String(policy.previousSchedulerWeight)
+   This is the exact value to revert to if the policy is rolled back.
+   Callers can read rollbackReference from the bridge before deciding whether
+   to roll back a policy — they know what weight will be restored.
+
+B) ROLLBACK VISIBILITY
+   The bridge's advisorySchedulerWeight always preserves the P9-B advisory
+   weight independent of any policy. This gives callers two comparisons:
+     effectiveWeight vs advisoryWeight: "how much did the policy change things?"
+     effectiveWeight vs rollbackReference: "what happens on rollback vs now?"
+
+C) ROLLBACK ISOLATION
+   Rolled-back policies are policyStatus="rolled_back" — not "active".
+   The resolver only reads policyStatus="active". Rolled-back policies
+   have zero effect on the enforcement bridge. Rollback takes effect
+   immediately on the next bridge resolution call.
+
+D) STARVATION FLOOR ON ROLLBACK
+   The rollbackReference reflects policy.previousSchedulerWeight.
+   This value was derived from the live P9-B partition at policy creation time.
+   If the rolled-back value happens to be below the starvation floor (edge case),
+   it is still safe — the bridge would floor the advisory weight on the next call,
+   and the previousSchedulerWeight being below floor is a P9-E validation gap,
+   not a bridge gap.
+
+E) RESEARCH_SHADOW ROLLBACK SAFE
+   In research_shadow mode, rollbackReference is still populated (non-null
+   when a live policy exists). Researchers can inspect it to understand
+   what a rollback would restore, even in shadow mode.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. RESEARCH INSTRUMENTATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P9-F adds structured per-workspace research instrumentation through two types:
+
+ResearchMetric — per workspace, per snapshot:
+
+  workspaceId              — workspace DB primary key
+  workspaceName            — workspace display name
+  advisoryWeight           — P9-B advisory weight (pre-policy)
+  effectiveWeight          — P9-F effective weight (post-resolution)
+  weightDelta              — effectiveWeight - advisoryWeight (negative = reduced)
+  sourcePolicyId           — policyId driving effectiveWeight (null if advisory)
+  enforcementMode          — "advisory_only" | "operator_confirmed" | "research_shadow"
+  enforcementStatus        — "resolved" | "no_active_policy" | "stale" | etc.
+  containmentStatus        — P9-B containmentStatus (contained/at_risk/pressured/saturated)
+  pressureScore            — P9-B pressureScore.total (0–100 normalized)
+  noisyBehaviorDetected    — P9-B noisy detection flag
+  backlogDepth             — P9-B delayedExecutionCount
+  recordedAt               — ISO 8601 snapshot timestamp
+
+ResearchMetric is the building block for adaptive scheduling research:
+  • Fairness improvement tracking: compare advisoryWeight vs effectiveWeight
+    over time to measure whether policy adjustments are working.
+  • Containment effectiveness: correlate containmentStatus with effectiveWeight
+    to learn whether weight reduction actually reduces pressure.
+  • Backlog trend after adjustment: backlogDepth over time for workspaces
+    with active policies vs without.
+  • Noisy-tenant reduction: track noisyBehaviorDetected before/after policy.
+  • Rollback frequency: measure how often effectiveWeight reverts to advisory
+    (indicating policies were rolled back or expired without improvement).
+
+AdaptiveResearchSnapshot — platform-wide aggregate:
+
+  totalWorkspaces              — total workspace count in snapshot
+  workspacesWithActivePolicies — count with non-null sourcePolicyId
+  workspacesInAdvisoryMode     — count with enforcementMode="advisory_only"
+  workspacesInEnforcementMode  — count with enforcementMode="operator_confirmed"
+  workspacesInResearchMode     — count with enforcementMode="research_shadow"
+  averageEffectiveWeight       — mean effectiveSchedulerWeight (4dp)
+  averageAdvisoryWeight        — mean advisorySchedulerWeight (4dp)
+  weightDeltaDistribution:
+    reduced     — workspaces where effectiveWeight < advisoryWeight
+    unchanged   — workspaces where effectiveWeight ≈ advisoryWeight
+    increased   — workspaces where effectiveWeight > advisoryWeight
+  floorAppliedCount            — defensive floor overrides in snapshot
+  conflictCount                — multi-policy conflicts detected
+  staleCount                   — expired-but-not-cleaned active policies
+  researchMetrics              — full ResearchMetric[] list
+  requestScopeId               — per-request correlation ID ("eb:<ms>-<seq>")
+  generatedAt                  — ISO 8601 snapshot timestamp
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The P9-F bridge is data source for the following governance surfaces:
+
+A) GET /platform/governance/enforcement  (new P9-F route)
+   Returns the full AdaptiveResearchSnapshot:
+     • per-workspace effective weights
+     • active policy vs advisory mode breakdown
+     • weight delta distribution
+     • research metrics for all workspaces
+   Optional query param: mode=research_shadow|operator_confirmed|advisory_only
+
+B) Super-admin scheduler enforcement panel (future UI)
+   The AdaptiveResearchSnapshot is designed for direct UI consumption:
+     • Table of workspaces: name | advisory weight | effective weight | delta | mode | policy
+     • Platform summary: X workspaces with active policies, Y in advisory, Z in shadow
+     • Weight delta chart: reduced / unchanged / increased distribution
+     • Stale policy alerts: staleCount > 0 → "X workspaces have stale policies"
+     • Conflict alerts: conflictCount > 0 → "INVESTIGATE: conflict detected"
+
+C) Scheduler enforcement decision loop (future implementation)
+   When a scheduler batch job executes, it calls resolveEffectiveSchedulerWeight()
+   per workspace with the live P9-E active policies to determine execution limits:
+     weight 1.00 → no restriction (full scheduler share)
+     weight 0.75 → 75% of normal execution budget
+     weight 0.50 → 50% of normal execution budget (compressed)
+     weight 0.25 → 25% minimum share (starvation floor)
+   This is the intended use of effectiveSchedulerWeight — it is the value that
+   limits how many concurrent executions a workspace may run.
+
+D) Research data export (future pipeline)
+   researchMetrics[] is JSON-serializable and can be streamed to:
+     • TimeSeries DB (InfluxDB, Prometheus) for historical analysis
+     • Data warehouse for ML training data
+     • Alerting pipeline (if containmentStatus="saturated" AND effectiveWeight=1.00,
+       a policy may be needed)
+
+E) Policy panel enrichment (future P9-D/E integration)
+   GET /platform/governance/fairness → enrich each policy with its current
+   bridge status by joining on workspaceId. Allows the policy list to show:
+     "This policy is currently in effect (operator_confirmed, weight 0.50)"
+     "This policy has been superseded by rollback (advisory_only, weight 1.00)"
+
+F) P9-D overview enrichment (future)
+   GET /platform/governance/overview could include:
+     activePolicies: N    — policies currently in effect
+     enforcementModes: { advisory_only: X, operator_confirmed: Y, research_shadow: Z }
+   This gives the P9-D control plane awareness of P9-F state.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. ENGINE: scheduler-enforcement-bridge.ts
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New file (~380 lines). Pure, deterministic, advisory-only (no autonomous action).
+No DB, no async, no mutations, no cross-tenant data leakage.
+
+EXPORTED TYPES (9)
+
+  EnforcementMode
+    "advisory_only" | "operator_confirmed" | "research_shadow"
+    Classifier for how the effective weight was derived.
+
+  EnforcementStatus
+    "resolved" | "no_active_policy" | "conflict" | "stale" | "floor_applied"
+    Outcome of the resolution process.
+
+  SchedulerEnforcementBridge (interface)
+    Core bridge value object. 9 fields. Fully JSON-serializable. ISO timestamps.
+    See §1 for full field descriptions.
+
+  EnforcementResolutionInput (interface)
+    Input to resolveEffectiveSchedulerWeight(). 5 fields:
+    policies, workspaceId, advisoryWeight, resolutionTime?, requestedMode?
+
+  EnforcementResolutionResult (interface)
+    Full resolution output: bridge + livePoliciesFound + stalePoliciesFound
+    + conflictDetected.
+
+  PolicyResolutionConflict (interface)
+    { workspaceId, conflictingPolicyIds[], conflictingWeights[], detectedAt }
+    Returned by detectPolicyResolutionConflict() when 2+ live policies found.
+
+  ResearchMetric (interface)
+    Per-workspace instrumentation record. 13 fields. See §6.
+
+  AdaptiveResearchSnapshot (interface)
+    Platform-wide aggregate. 15 fields. See §6.
+
+EXPORTED FUNCTIONS (9)
+
+  makeEnforcementBridgeId()           → "eb:<ms>-<seq>"  (correlation ID)
+  resetBridgeSeq()                    — sequence reset (tests only)
+
+  detectPolicyResolutionConflict(policies, workspaceId, resolutionTime?)
+    → PolicyResolutionConflict | null
+    Pure conflict detector. Used internally and by callers for pre-flight checks.
+
+  resolveEffectiveSchedulerWeight(input: EnforcementResolutionInput)
+    → EnforcementResolutionResult
+    Core P9-F function. 4-layer resolution with starvation floor guarantee.
+
+  computeResearchMetrics(bridge, partition, workspaceName?, recordTime?)
+    → ResearchMetric
+    Combines a bridge with a P9-B partition into a research instrumentation record.
+    Emits scheduler_research_metric_recorded.
+
+  buildAdaptiveResearchSnapshot(bridges, partitions, wsNames?, scopeId?, time?)
+    → AdaptiveResearchSnapshot
+    Aggregates all workspace bridges into a platform-wide snapshot.
+    Emits scheduler_effective_weight_applied (summary event).
+
+  emitEnforcementBridgeResolvedEvent(payload)
+    → void  (scheduler_enforcement_bridge_resolved)
+
+  emitEffectiveWeightAppliedEvent(payload)
+    → void  (scheduler_effective_weight_applied)
+
+  emitPolicyResolutionConflictEvent(payload)
+    → void  (scheduler_policy_resolution_conflict)
+
+  emitResearchMetricRecordedEvent(payload)
+    → void  (scheduler_research_metric_recorded)
+
+EXPORTED CONSTANTS (2)
+
+  SCHEDULER_WEIGHT_FLOOR    = 0.25  (re-exported from P9-E; starvation floor)
+  SCHEDULER_WEIGHT_CEILING  = 1.00  (upper bound)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. NEW API ROUTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GET /platform/governance/enforcement
+  Auth:    requireAuth + requireSuperAdmin
+  Query:   mode? = "advisory_only" | "operator_confirmed" | "research_shadow"
+           When not supplied, defaults to "operator_confirmed" semantics.
+  Status:  200 OK
+  Returns: { enforcement: AdaptiveResearchSnapshot }
+
+Processing steps:
+  1. fetchPlatformPartitions() + active policies fetch (parallel Promise.all)
+     → TenantWorkloadPartition[] for all workspaces
+     → SchedulerFairnessPolicy[] with policyStatus="active"
+  2. For each partition, resolveEffectiveSchedulerWeight():
+     → SchedulerEnforcementBridge per workspace
+  3. buildAdaptiveResearchSnapshot(bridges, partitions, names, scopeId, time)
+     → AdaptiveResearchSnapshot
+
+DB queries executed:
+  1. SELECT id, name FROM workspaces WHERE status IN ('active', 'suspended')
+  2. SELECT workspace_id, COUNT FILTER running, COUNT FILTER waiting_delay
+     FROM workflow_executions GROUP BY workspace_id
+  3. SELECT * FROM scheduler_fairness_policies WHERE policy_status = 'active'
+
+All three queries are read-only. No writes occur in this route.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4 structured log events emitted via logger.info():
+
+All events carry 6 common fields:
+  workspaceId, sourcePolicyId, effectiveSchedulerWeight,
+  enforcementMode, enforcementStatus, action
+
+A) scheduler_enforcement_bridge_resolved
+   Emitted by: resolveEffectiveSchedulerWeight() — Layer 3 only (resolved path)
+   When: exactly one non-expired active policy applied for workspace
+   action: "bridge_resolved"
+   Signals: a policy-driven weight is now in effect for this workspace.
+
+B) scheduler_effective_weight_applied
+   Emitted by: buildAdaptiveResearchSnapshot() (summary)
+   When: platform-wide snapshot completed
+   action: "snapshot_generated"
+   workspaceId: 0 (platform-level, not workspace-scoped)
+   effectiveSchedulerWeight: averageEffectiveWeight across all workspaces
+   Signals: a full enforcement snapshot was produced; log contains aggregate stats.
+
+C) scheduler_policy_resolution_conflict
+   Emitted by: resolveEffectiveSchedulerWeight() — Layer 1 only (conflict path)
+   When: 2+ non-expired active policies detected for same workspace
+   action: "conflict_detected" then "conflict_emitted"
+   sourcePolicyId: null (no single authoritative source)
+   Signals: defensive conflict detected; investigation needed.
+
+D) scheduler_research_metric_recorded
+   Emitted by: computeResearchMetrics() — once per workspace per snapshot
+   action: "metric_recorded"
+   Signals: per-workspace research metric recorded with bridge + partition data.
+
+Event design: events are emitted from pure engine functions (not route handlers),
+so any future caller of the engine functions automatically gets telemetry.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/scheduler-enforcement-bridge.test.ts
+
+T1  effective weight resolution deterministic (6 assertions)
+    no policies → effectiveWeight = advisoryWeight; active policy → effective =
+    policy.targetSchedulerWeight; same input → same output; sourcePolicyId = policyId
+    when resolved; appliedAt is valid ISO; advisorySchedulerWeight preserved even when
+    policy overrides effectiveWeight.
+
+T2  expired policy ignored safely (4 assertions)
+    expired policy → status=stale, effectiveWeight=advisoryWeight; sourcePolicyId=null
+    on stale; multiple stale policies → still stale, stalePoliciesFound=2; resolutionNotes
+    mentions "stale" or "expir".
+
+T3  rollback precedence preserved (5 assertions)
+    rolled_back policy → status=no_active_policy, effectiveWeight=advisoryWeight; pending
+    policy → status=no_active_policy; rollbackReference=String(previousSchedulerWeight) when
+    resolved; rollbackReference=null when no active policy; rollbackReference=null when stale.
+
+T4  multiple active policy conflict rejected (6 assertions)
+    two non-expired active policies → status=conflict, conflictDetected=true;
+    conflict → effectiveWeight=SCHEDULER_WEIGHT_FLOOR; conflict → mode=advisory_only;
+    detectPolicyResolutionConflict returns conflict for 2+ live; returns null for single;
+    conflictCount=1 in AdaptiveResearchSnapshot.
+
+T5  starvation floor preserved (5 assertions)
+    SCHEDULER_WEIGHT_FLOOR=0.25; policy targeting 0.25 → effectiveWeight=0.25; advisory
+    below floor → effectiveWeight ≥ 0.25; conflict path → exactly FLOOR; policy target
+    below floor → floor_applied status.
+
+T6  research metrics serialization stable (5 assertions)
+    ResearchMetric fully JSON-serializable; AdaptiveResearchSnapshot fully serializable;
+    round-trip preserves all fields; weightDelta=effectiveWeight-advisoryWeight; no
+    undefined values in JSON.
+
+T7  enforcement mode transitions deterministic (6 assertions)
+    no active policy → advisory_only; active policy → operator_confirmed; research_shadow
+    requestedMode → research_shadow; research_shadow → effectiveWeight=advisoryWeight;
+    conflict → advisory_only regardless of requestedMode; stale → advisory_only.
+
+T8  stale policy rejected (4 assertions)
+    expired policy → status=stale; stale doesn't affect effectiveWeight; stale+live → live
+    wins (resolved, stalePoliciesFound=1); multiple stale → status=stale, conflictDetected=false.
+
+T9  observability events scoped correctly (5 assertions)
+    emitEnforcementBridgeResolvedEvent doesn't throw; emitEffectiveWeightAppliedEvent
+    doesn't throw; emitPolicyResolutionConflictEvent doesn't throw;
+    emitResearchMetricRecordedEvent doesn't throw; makeEnforcementBridgeId returns
+    "eb:"-prefixed unique IDs.
+
+T10 no autonomous adaptation occurs (6 assertions)
+    resolveEffectiveSchedulerWeight has no async behavior; computeResearchMetrics has no
+    async; buildAdaptiveResearchSnapshot doesn't mutate input bridges; resolver doesn't
+    mutate input policies; AdaptiveResearchSnapshot has no function properties;
+    weightDeltaDistribution sums to totalWorkspaces.
+
+Total assertions: 52 new (T1–T10)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. REMAINING ADAPTIVE SCHEDULING GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A) LIVE SCHEDULER ENFORCEMENT
+   The bridge computes an effectiveSchedulerWeight per workspace, but no
+   scheduler batch loop actually reads it. A future enforcement integration would:
+   1. Call resolveEffectiveSchedulerWeight() at batch start for each workspace.
+   2. Use effectiveWeight to determine per-workspace execution slot limits:
+      effectiveWeight * platformConcurrencyLimit → workspace slot budget.
+   3. Enforce the budget by skipping execution dispatch when workspace is
+      over its slot budget.
+   This would convert the advisory bridge into live enforcement without any
+   engine changes — only the batch runner needs to call the engine function.
+
+B) TIME-SERIES RESEARCH DATA
+   ResearchMetric records are computed on-demand at request time. A persistent
+   time-series store would allow:
+   • "Did weight reduction at T=0 reduce pressureScore by T=72h?"
+   • "How many workspaces had active policies last week vs this week?"
+   • "What is the median time from policy approval to rollback?"
+   This requires a new DB table (scheduler_enforcement_metrics) or integration
+   with an external time-series store.
+
+C) POLICY CONFIDENCE MODEL
+   An adaptive algorithm (future) would produce policies programmatically.
+   These would still use the P9-E SchedulerFairnessPolicy model (for auditability)
+   but would have:
+     requestedBy: "system:adaptive"  (machine-generated)
+     a new confidence field: e.g. adjustmentConfidence: 0.87
+   The P9-E engine would need to accept a non-human requestedBy value.
+
+D) FEEDBACK LOOP INSTRUMENTATION
+   For adaptive research to be valid, we need to measure:
+   "Did this policy improve platform fairness?"
+   Currently: each ResearchMetric is a point-in-time snapshot.
+   Future: compare ResearchMetric at T=policy.approvedAt vs T=now for the
+   same workspaceId to compute fairness delta.
+   A policyImpactScore would be: (advisoryWeight_before - advisoryWeight_after)
+   / (targetSchedulerWeight - previousSchedulerWeight). This measures whether
+   the policy's pressure reduction actually materialized.
+
+E) RESEARCH_SHADOW COMPARISON ENDPOINT
+   Currently research_shadow mode is a flag on the snapshot.
+   A dedicated endpoint GET /platform/governance/enforcement?mode=research_shadow
+   is supported, but there is no side-by-side comparison:
+   "Here is what operator_confirmed gives, here is what advisory_only gives."
+   A future endpoint could return both snapshots in parallel for research
+   comparison without any scheduler impact.
+
+F) STALE POLICY AUTO-CLEANUP
+   The GET /platform/governance/fairness/policies route auto-expires stale
+   policies. But GET /platform/governance/enforcement does NOT auto-expire them —
+   it only reports staleCount. Adding an optional auto-expire sweep to the
+   enforcement route (or a dedicated cleanup job) would keep the policy
+   table clean without requiring operators to call the list endpoint.
+
+G) PLATFORM ENFORCEMENT HISTORY
+   The current enforcement route returns a live snapshot.
+   A history endpoint (e.g. GET /platform/governance/enforcement/history)
+   that returns snapshots over time would require persistent AdaptiveResearchSnapshot
+   records — currently not stored.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. READINESS ASSESSMENT (pre-autonomous orchestration research)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What is in place before any autonomous orchestration research:
+
+P9-A  Tenant isolation engine + 6 violation codes
+      ✓ Per-request isolation boundary; per-tenant risk assessment.
+
+P9-B  Workload partition engine + 5-component pressure scoring
+      ✓ Advisory schedulerWeight [0.25–1.00]; starvation floor guarantee;
+        4-category noisy tenant detection.
+
+P9-C  Tenant governance view composition
+      ✓ Workspace-scoped governance API surface; isolation/fairness status.
+
+P9-D  Platform workload control plane
+      ✓ Cross-workspace fairness health; noisy-tenant roster;
+        containment/advisory distribution; 4 super-admin read endpoints.
+
+P9-E  Fairness orchestration policy infrastructure
+      ✓ Human-gated lifecycle (pending → active → rolled_back/expired);
+        starvation floor at validation; conflict prevention; persistent DB
+        audit trail; 4 policy lifecycle endpoints; 4 observability events.
+
+P9-F  Adaptive scheduling research foundations (this phase)
+      ✓ SchedulerEnforcementBridge — 4-layer deterministic resolution
+      ✓ resolveEffectiveSchedulerWeight() — advisory + policy composition
+      ✓ EnforcementMode — 3 states (advisory_only/operator_confirmed/research_shadow)
+      ✓ ResearchMetric — per-workspace P9-B + P9-F combined instrumentation
+      ✓ AdaptiveResearchSnapshot — platform-wide enforcement intelligence
+      ✓ GET /platform/governance/enforcement — live snapshot endpoint
+      ✓ 4 structured observability events on all resolution paths
+      ✓ Rollback reference tracking in bridge for reversibility research
+      ✓ Fail-closed conflict resolution (starvation floor on ambiguity)
+      ✓ Research shadow mode for passive policy impact observation
+
+Readiness checklist for adaptive scheduling (what is true today):
+
+  [✓] Per-workspace effective weight computation path exists (P9-F)
+  [✓] Human-gated policy persistence and audit trail (P9-E)
+  [✓] Starvation floor guarantee at all layers (P9-B, P9-E, P9-F)
+  [✓] Rollback reference for reversibility (P9-E + P9-F)
+  [✓] Conflict detection and fail-closed resolution (P9-F)
+  [✓] Research shadow observation mode (P9-F)
+  [✓] Platform-wide enforcement snapshot for research (P9-F)
+  [✓] Observability events on all resolution paths (P9-F)
+  [✓] No autonomous self-adjustment possible (engine is read-only)
+
+Remaining pre-conditions before autonomous orchestration:
+
+  [✗] Time-series persistence of ResearchMetric (§12-B)
+  [✗] Live scheduler batch enforcement integration (§12-A)
+  [✗] Policy confidence model for machine-generated policies (§12-C)
+  [✗] Feedback loop instrumentation (policyImpactScore) (§12-D)
+  [✗] Minimum observation period before first adaptive suggestion
+      (baseline data needed before any automated recommendation)
+
+Suggested development sequence for autonomous orchestration research:
+  1. Persist ResearchMetric records to DB for time-series analysis.
+  2. Integrate effectiveSchedulerWeight into the workflow batch runner.
+  3. Define a policyImpactScore metric and instrument it.
+  4. Build a read-only recommendation engine that SUGGESTS policies
+     (not creates them) — outputting SchedulerFairnessPolicy drafts
+     for human review, using the existing P9-E pending/approval flow.
+  5. Only after ≥30 days of successful suggestion-review-approve-measure
+     cycles: consider an autonomous pilot with strict guardrails
+     (low-confidence policies = human review required).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES MODIFIED / CREATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CREATED   artifacts/api-server/src/lib/workflows/scheduler-enforcement-bridge.ts
+            (~380 lines) — pure P9-F engine
+            9 exported types, 9 exported functions, 2 exported constants
+  CREATED   artifacts/api-server/src/lib/workflows/__tests__/
+              scheduler-enforcement-bridge.test.ts
+            (~280 lines) — T1–T10, 52 assertions
+  MODIFIED  artifacts/api-server/src/routes/platform.ts
+            + import resolveEffectiveSchedulerWeight, buildAdaptiveResearchSnapshot,
+              makeEnforcementBridgeId, EnforcementMode from scheduler-enforcement-bridge
+            + GET /platform/governance/enforcement route
+  CREATED   workflow-phase-9f-report.txt (this file)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CUMULATIVE TEST COUNTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Phase 9-A baseline:  1447 tests (25 files)
+  Phase 9-B additions:   +51 tests → 1498 tests (26 files)
+  Phase 9-C additions:   +49 tests → 1547 tests (27 files)
+  Phase 9-D additions:   +54 tests → 1601 tests (28 files)
+  Phase 9-E additions:   +58 tests → 1659 tests (29 files)
+  Phase 9-F additions:   +52 tests → 1711 tests (30 files)
+  Total:               1711 tests, 30 files, 0 failures

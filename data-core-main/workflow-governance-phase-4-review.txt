@@ -1,0 +1,1717 @@
+WORKFLOW GOVERNANCE — PHASE 4: EXECUTION ENGINE SAFETY REVIEW
+Analysis & Design Document — No Implementation
+Date:   2026-05-13
+Status: DESIGN ONLY — awaiting approval before any code changes.
+Scope:  executor.ts, engine.ts, types.ts, conditions.ts, all 6 step handlers,
+        workflow-governance-architecture-review.txt,
+        event-diagnostics-phase-2-report.txt,
+        workflow-governance-phase-3-report.txt
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 3 addressed the governance surface (validation, rate limits, chain guards,
+fanout caps, lifecycle states, soft delete). The executor itself was left
+unchanged: it is still the same linear for-loop that was there on day one.
+
+Phase 4 addresses the runtime internals of executeWorkflow():
+  — how steps advance,
+  — how context is shared between steps,
+  — how executions are cancelled or timed out,
+  — how condition routing will eventually work.
+
+The goals of Phase 4 analysis:
+
+  1. Understand EXACTLY what the current linear executor can and cannot do.
+  2. Design a minimal DAG execution model that fixes condition routing (WG-03)
+     without over-engineering into distributed orchestration.
+  3. Design cooperative cancellation and lazy TTL.
+  4. Design context isolation to prevent WG-15 pollution.
+  5. Design a steps snapshot so Phase 5 (approval resume) is not blind.
+  6. Confirm full backward compatibility with linear workflows.
+  7. Confirm full observability compatibility.
+  8. Produce a phased implementation plan with risks.
+
+WHAT THIS DOCUMENT DOES NOT DESIGN:
+  — Distributed queues, Temporal.io, external schedulers.
+  — Multi-process execution, worker pools.
+  — Approval resume (Phase 5 scope).
+  — Delay scheduling (Phase 5 scope).
+  — Cross-workflow dependencies (Phase 7 scope).
+  — Parallel step execution (Phase 7 scope).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — DEEP ANALYSIS: THE LINEAR EXECUTOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  Complete Walkthrough of executeWorkflow()
+──────────────────────────────────────────────
+
+The full function, annotated with what each line does and what it assumes:
+
+  UPDATE executions SET status='running'           ← immediately marks as running
+                                                     before any step has started
+  for i = 0; i < steps.length; i++               ← array position i, NOT step.index
+    INSERT execution_steps (status='running')      ← step log created BEFORE execution
+    result = await executeStep(step, ctx, id)      ← synchronous await, single attempt
+    UPDATE execution_steps (status=completed|failed)
+    UPDATE executions (currentStepIndex=i)         ← overwrites on every iteration
+    if !result.success → UPDATE status='failed', return
+    if result.waitForApproval → UPDATE status='waiting_approval', return
+    ctx.resolvedData = { ...ctx.resolvedData, ...result.output }  ← mutable merge
+  UPDATE executions (status='completed')
+
+There is no:
+  — Cancellation checkpoint between steps.
+  — TTL/timeout check between steps.
+  — Reading of result.output.nextSteps.
+  — Retry on failure.
+  — Context snapshot before each step.
+  — Steps snapshot stored in execution record.
+
+1.2  The step.index vs. Array Position Discrepancy
+────────────────────────────────────────────────────
+
+BaseStep interface declares: index: number
+The executor uses:        for (let i = 0; i < steps.length; i++)
+And logs:                 stepIndex: i   (array position, not step.index)
+
+This means if steps in the DB are stored as:
+  [{ index: 0, ... }, { index: 1, ... }, { index: 2, ... }]
+
+...they typically match. BUT if steps are ever stored out-of-order in the JSONB
+array (which JSON arrays technically allow), or if an admin creates a workflow
+where step.index values are non-sequential (0, 2, 5), then:
+
+  - Array position i does NOT equal step.index.
+  - DB logs record stepIndex=i (wrong from step's perspective).
+  - Condition step's onTrue: [2] refers to step.index=2, but the executor
+    advances to steps[i+1] regardless — not steps[step.index+1].
+
+Implication for DAG design: the DAG executor must resolve steps by step.index
+(as a Map), NOT by array position. onTrue/onFalse refer to step.index values,
+not array positions. The current executor assumes they match. This must be fixed.
+
+1.3  Mutable Context: The WG-15 Problem in Detail
+──────────────────────────────────────────────────
+
+Each step reads from:
+  data = { ...ctx.triggerData, ...ctx.resolvedData }
+
+Each step writes to ctx:
+  ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+
+This is a flat key-value merge with no namespacing. Concrete collision scenarios:
+
+  Scenario A — key collision across steps:
+    Step 0: taskStep   → output: { taskId: 42, assigneeId: 7 }
+    Step 1: notificationStep reads data.assigneeId → gets 7 (correct, intended)
+    Step 2: assignmentStep → output: { assigneeId: 99 }   (ticket re-assigned)
+    Step 3: notificationStep reads data.assigneeId → gets 99 (stale, wrong)
+
+  Scenario B — status field collision:
+    Step 0: notification → output: { notified: 3, status: "sent" }
+    Step 1: statusUpdateStep reads data.status for condition checking → gets "sent"
+              but it expected ctx.triggerData.status (the ticket status).
+
+  Scenario C — skipped flag pollution:
+    Step 0: condition step skips (condition not met) → output: { skipped: true }
+    Step 1: notification reads data.skipped → it was not meant for this step.
+
+  Scenario D — nextSteps pollution:
+    Step 2: condition step → output: { conditionResult: true, nextSteps: [4] }
+    Step 3: assignment step reads data.nextSteps → numeric array now visible in
+              data context, meaningless to assignment.
+
+The fix: each step's output must be namespaced under its stepIndex key.
+  ctx.stepOutputs[step.index] = result.output
+Context reads should target specific step outputs, not the flat merge.
+For backward compatibility, a computed resolvedData flat merge can still be
+provided during a migration period.
+
+1.4  waitForApproval: The Dead End (WG-02 + WG-11 in Code)
+────────────────────────────────────────────────────────────
+
+When result.waitForApproval is true:
+  UPDATE executions SET status='waiting_approval'
+  return  ← execution function exits permanently
+
+There is no:
+  — DB record linking this execution to any approval record.
+  — The approved step stores approverIds in output, but no approval row created.
+  — No "resume token" stored anywhere.
+  — No mechanism to call executeWorkflow again from step i+1.
+
+If approval resume is ever implemented (Phase 5), it will need:
+  A. An approval record that says "this approval is tied to execution X, step Y".
+  B. When that approval resolves (approved/rejected), a resume function that:
+       1. Loads execution X.
+       2. Loads steps from the steps snapshot (NOT from the live definition).
+       3. Resumes from step Y+1 with the correct branch (approved → onTrue, rejected → onFalse).
+       4. This requires a DAG executor, not the linear for-loop.
+
+Phase 3 blocked approval steps at the validator. Phase 4 does NOT unblock them.
+Phase 5 will design the resume mechanism. But Phase 4 must:
+  — Store a steps_snapshot in the execution record (P4-E).
+  — Redesign the executor cursor so it can resume from a specific step.
+  — These are prerequisites for Phase 5 without which Phase 5 is dangerous.
+
+1.5  The Condition Step: What It Does vs. What It Should Do
+────────────────────────────────────────────────────────────
+
+executeConditionStep() (condition.ts, line 1-18):
+  - Calls evaluateConditions(step.config.conditions, data)
+  - Returns: { conditionResult: bool, nextSteps: [indices...] }
+
+nextSteps = result ? step.config.onTrue : step.config.onFalse
+
+This is CORRECT computation. The routing information is calculated.
+But in executor.ts, at line 133-135:
+  if (result.output) {
+    ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+  }
+  // loop continues to i++ — nextSteps IGNORED
+
+The nextSteps array is merged into resolvedData and forgotten.
+No branching occurs. The loop continues to steps[i+1] unconditionally.
+
+For DAG execution, the fix is:
+  After a condition step executes, read result.output.nextSteps to determine
+  which step(s) to execute next instead of advancing to i+1.
+
+The condition step handler itself does NOT need to change.
+The executor's step-advancement logic is the only thing that changes.
+
+1.6  The status_update Step: Indirect Event Loop Risk
+──────────────────────────────────────────────────────
+
+executeStatusUpdateStep():
+  db.update(ticketsTable).set({ status: config.newStatus })
+
+This raw DB update does NOT emit any domain event.
+But the ticket routes (routes/tickets.ts) might also update tickets and emit events.
+The risk: if a workflow's status_update step updates a ticket, and something else
+(an SSE subscription, a route side-effect, or a future change) also emits a bus
+event for that ticket status change — the engine might trigger a second workflow.
+
+Phase 3's rate limit (P3-B) and chain guard (P3-C) are the backstops for this.
+Phase 4 should NOT change the status_update step itself.
+But the design documentation should note this risk.
+
+1.7  Fire-and-Forget Execution: Backpressure Problem
+──────────────────────────────────────────────────────
+
+In engine.ts, line 344:
+  void executeWorkflow(execution.id, steps, ctx).catch(...)
+
+This fires every matching workflow execution concurrently.
+If 50 workflows match the same event in a workspace:
+  50 executeWorkflow() calls start simultaneously.
+  Each makes multiple DB queries serially (within itself).
+  But across the 50: 50 concurrent series of DB queries.
+  With a pool of 10 connections: 40 executions wait for connections.
+  If each takes 500ms: queue backs up, event handler held for >5s.
+
+Phase 3's rate limit (P3-B) caps at 100/minute which is insufficient for
+burst scenarios. The real solution (beyond Phase 4 scope) is an execution queue.
+
+In Phase 4, the only safe mitigation is adding a concurrency cap per event
+dispatch: a maximum of N concurrent executeWorkflow calls within one handleEvent().
+This is a 3-line change but has correctness implications (what happens to capped
+ones? they should still be created as execution records in 'pending' status and
+resumed later — which requires the execution queue from Phase 7).
+
+For Phase 4 scope: DOCUMENT this risk, do not attempt to solve it without a queue.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — LINEAR EXECUTOR WEAKNESSES: FULL CATALOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following problems are listed in priority order, not discovery order.
+
+  W1   nextSteps output from condition step is ignored → WG-03
+       The for-loop always advances to i+1.
+       Fix: cursor-based DAG executor (P4-F).
+
+  W2   ctx.resolvedData is mutable and untyped → WG-15
+       Any step's output silently overwrites any key.
+       Fix: namespaced ctx.stepOutputs[i] (P4-A).
+
+  W3   No cancellation checkpoint between steps
+       A running execution cannot be stopped.
+       Fix: check cancelRequested flag before each step (P4-C).
+
+  W4   No TTL check between steps
+       A long-running step (or one that hangs) blocks forever.
+       Fix: lazy TTL check at each step boundary (P4-B).
+
+  W5   No steps snapshot stored in execution record
+       If the definition is edited while an execution is running (or waiting),
+       a future resume would execute from a different step configuration.
+       Fix: serialize steps into execution.context._stepsSnapshot at trigger time (P4-E).
+
+  W6   step.index vs. array position mismatch
+       onTrue/onFalse reference step.index values, not array positions.
+       The executor treats them as interchangeable. They are not.
+       Fix: build a stepMap = Map<index, step>, advance by step.index (P4-F).
+
+  W7   No retry on step failure
+       One transient DB error = full execution failure.
+       Design note: retry must be per-step-type (not all steps are idempotent).
+       Deferring to Phase 6 (retries require idempotency keys per step).
+
+  W8   Status transitions not enforced in executor
+       UPDATE executions SET status='failed' is applied regardless of current status.
+       If two concurrent invocations both fail, double-update can corrupt the record.
+       Fix: validate current status before each state transition (P4-F).
+
+  W9   currentStepIndex semantics unclear for branched execution
+       Currently: updated to i after each step.
+       With DAG: if two branches execute, which step's index is "current"?
+       Fix: for Phase 4, keep currentStepIndex as "last completed step index".
+       Add stepCursors JSONB column for multi-path tracking in Phase 7.
+
+  W10  Steps not validated at execution time
+       If steps_snapshot is not stored, executor receives steps from live definition
+       which may differ from what was active when execution was created.
+       This is particularly dangerous for approval resume (Phase 5).
+       Fix: P4-E (snapshot at trigger time).
+
+  W11  waitForApproval returns with no resume data
+       No link between execution + step + approval record.
+       Phase 5 scope, but Phase 4 must lay the ground (snapshot + cursor storage).
+
+  W12  No observability of skipped branches
+       When DAG routing skips a path (condition false → onFalse path taken, onTrue
+       steps never run), there is no record of which steps were skipped.
+       Diagnostics shows only executed steps.
+       Fix: insert step log entries with status='skipped' for bypassed steps (P4-F).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — DAG EXECUTION MODEL DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  Guiding Principle: Minimal Viable DAG
+──────────────────────────────────────────
+
+The goal is NOT to build a general-purpose directed acyclic graph engine.
+The goal is to fix condition routing (WG-03) and add cancellation/TTL checkpoints
+while preserving full backward compatibility with linear workflows.
+
+Constraints:
+  — Single-process. No worker pools. No external queues.
+  — No schema changes to workflow_definitions.steps.
+  — Linear workflows MUST behave identically to today.
+  — All existing diagnostics APIs MUST work without modification.
+  — No Phase 5 features (approval resume) in Phase 4 scope.
+
+3.2  Step Graph Representation
+────────────────────────────────
+
+The step graph is constructed in memory at execution time from the steps array.
+It is NOT stored as a graph structure in the DB.
+
+  Steps array (from JSONB):
+    [
+      { index: 0, type: "notification", ... },
+      { index: 1, type: "condition",    config: { onTrue: [3], onFalse: [2] }, ... },
+      { index: 2, type: "task",         ... },        ← false branch
+      { index: 3, type: "notification", ... },        ← true branch
+      { index: 4, type: "status_update", ... },       ← both branches merge here
+    ]
+
+  Step graph edges (implicit):
+    For linear steps (non-condition): edge from step[i] to step[i+1] by array order
+    For condition steps:  edges determined by onTrue / onFalse arrays at runtime
+
+  Step map construction:
+    const stepMap = new Map<number, WorkflowStep>();
+    for (const step of steps) {
+      stepMap.set(step.index, step);
+    }
+
+  This resolves the W6 problem: all routing uses step.index, not array position.
+
+3.3  Execution Cursor Model
+─────────────────────────────
+
+Replace the for-loop counter `i` with a cursor-based work queue.
+
+  Execution cursor state (stored in execution.context):
+    {
+      _pendingSteps:   number[],   // step indices queued to execute next
+      _completedSteps: number[],   // step indices successfully completed
+      _skippedSteps:   number[],   // step indices in bypassed branches
+      _failedStep:     number | null,
+      _stepsSnapshot:  WorkflowStep[],  // frozen copy of steps at trigger time
+    }
+
+  Initial state:
+    _pendingSteps: [steps[0].index]   (first step in the steps array by index order)
+    _completedSteps: []
+    _skippedSteps: []
+
+  Execution loop (pseudocode):
+    while (pendingSteps.length > 0) {
+      const nextStepIndex = pendingSteps.shift();
+      const step = stepMap.get(nextStepIndex);
+
+      // ← CANCELLATION CHECKPOINT (P4-C)
+      // ← TTL CHECKPOINT (P4-B)
+
+      if (!step) {
+        log warning: "step index not found in snapshot"
+        continue
+      }
+
+      execute step → result
+
+      if (!result.success) {
+        fail execution → return
+      }
+
+      if (result.waitForApproval) {
+        pause execution, store cursor → return
+        (Phase 5 will resume from here)
+      }
+
+      // Determine next steps
+      if (step.type === "condition" && result.output?.nextSteps?.length > 0) {
+        // DAG routing: follow condition output
+        pendingSteps.push(...result.output.nextSteps)
+      } else {
+        // Linear routing: advance to next step by array order
+        const nextByArray = getNextStepByArrayOrder(step.index, steps);
+        if (nextByArray !== null) pendingSteps.push(nextByArray);
+      }
+
+      // Mark skipped steps (those in the non-taken branch)
+      if (step.type === "condition") {
+        const takenBranch  = result.conditionResult ? step.config.onTrue : step.config.onFalse;
+        const skippedBranch = result.conditionResult ? step.config.onFalse : step.config.onTrue;
+        markStepsSkipped(skippedBranch);
+      }
+
+      // Merge output to namespaced context
+      ctx.stepOutputs[step.index] = result.output;
+    }
+    complete execution
+
+  getNextStepByArrayOrder(currentIndex, steps):
+    Find the step in the steps ARRAY that comes AFTER the step with index=currentIndex.
+    Returns that step's .index value, or null if there is no next step.
+    (Not currentIndex+1 — uses array position of the current step, then returns
+    the .index of the element at arrayPosition+1.)
+
+3.4  Linear Workflow Backward Compatibility
+────────────────────────────────────────────
+
+A linear workflow has steps with no condition steps (or condition steps with
+empty onTrue/onFalse). The cursor model handles this correctly:
+
+  Steps: [{index:0,...}, {index:1,...}, {index:2,...}]
+  Initial pendingSteps = [0]
+  After step 0: no condition routing → nextByArray = step at arrayPos 1 = index 1
+                pendingSteps = [1]
+  After step 1: nextByArray = index 2
+                pendingSteps = [2]
+  After step 2: nextByArray = null (end of array)
+                pendingSteps = []
+  Loop exits → completed
+
+  This is IDENTICAL to the for-loop behavior. Backward compatible.
+
+3.5  Condition Branching Execution
+────────────────────────────────────
+
+  Steps: [{index:0,...}, {index:1,type:"condition",onTrue:[3],onFalse:[2]},
+           {index:2,...}, {index:3,...}, {index:4,...}]
+  Array order: 0 → 1 → 2 → 3 → 4
+
+  Execute step 0: linear routing → pendingSteps = [1]
+  Execute step 1 (condition): evaluates to TRUE → nextSteps = [3]
+    pendingSteps = [3]
+    skippedSteps = [2]  (the false branch)
+  Execute step 3: linear routing → pendingSteps = [4]
+    (step 4 is next in array order after step 3)
+  Execute step 4: linear routing → pendingSteps = []
+  Complete.
+
+  Step 2 is logged with status='skipped', reason='branch_not_taken'.
+  The diagnostics timeline shows all 5 steps with correct statuses.
+
+3.6  Dead Branch Handling
+──────────────────────────
+
+When a condition step routes to [3] (true branch), the steps in the false branch
+that would have been reached via linear routing must be marked as skipped.
+
+Determining what to mark as skipped:
+  - The false branch is step.config.onFalse = [2].
+  - But step 2 might itself have downstream steps (e.g., 2 → 4, where 4 is the
+    merge point shared by both branches).
+  - We must NOT mark step 4 as skipped just because it appears "after" step 2 in
+    the false branch.
+
+Conservative approach (Phase 4):
+  - Only mark the IMMEDIATE onFalse/onTrue steps as skipped.
+  - Do NOT recursively traverse and mark their descendants.
+  - A skipped step's downstream steps will naturally never be added to pendingSteps
+    (since the skipped step never executes and thus never pushes its successors).
+  - This means descendants of the skipped branch are neither skipped nor executed
+    (they simply never appear in the step log).
+
+For observability, this means the step log may have gaps (e.g., step 2 logged as
+skipped, step 2's children not logged). The diagnostics API already handles missing
+step entries — it shows whatever steps are logged, in index order. This is acceptable
+for Phase 4.
+
+Full branch traversal and complete skip logging is a Phase 6 enhancement.
+
+3.7  Merge Semantics
+──────────────────────
+
+In the example above, step 4 is the "merge" point — both branches eventually reach it.
+In the cursor model, merge happens naturally: both branch paths push step 4 into
+pendingSteps, but completedSteps prevents duplicate execution.
+
+  Deduplication guard:
+    Before executing a step, check: if (completedSteps.includes(nextStepIndex)) skip.
+    This prevents step 4 from executing twice if both branches somehow both push it.
+
+  In Phase 4 (no parallel branches):
+    Only one branch executes at a time (condition step picks one branch, not both).
+    Merge deduplication is a safety net, not expected to fire in Phase 4.
+
+  In Phase 7 (parallel branches):
+    Both branches execute concurrently. Merge point must wait for BOTH branches.
+    This requires a "join" gate: "execute step 4 only after BOTH step 2 AND step 3
+    have completed". This is a Phase 7 design problem.
+
+3.8  Step Dependency Handling
+───────────────────────────────
+
+For Phase 4, steps have no explicit dependency declarations beyond:
+  - Sequential ordering (implicit from array position).
+  - Condition routing (explicit via onTrue/onFalse).
+
+A step may read from ctx.stepOutputs[i] of a previous step — this is an implicit
+dependency. If a step reads step 3's output but step 3 was skipped (false branch),
+the output will be undefined/null.
+
+Phase 4 design: steps must handle undefined stepOutputs gracefully.
+The validator (P3-A) should warn if a step config references a field from a step
+that might be skipped (static analysis — deferred to Phase 6).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — CONDITION ROUTING DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  What Already Works
+────────────────────────
+
+evaluateConditions() in conditions.ts is fully correct:
+  — Supports AND/OR logic.
+  — Supports 11 operators including exists, in, contains.
+  — Returns deterministic boolean.
+
+executeConditionStep() in steps/condition.ts is fully correct:
+  — Calls evaluateConditions().
+  — Returns nextSteps: onTrue or onFalse correctly.
+  — Returns conditionResult: bool for observability.
+
+NOTHING in the condition logic needs to change.
+The ONLY change needed is in the executor's step-advancement code.
+
+4.2  Condition Routing Semantics
+──────────────────────────────────
+
+A condition step routes execution. It does NOT execute any side effect.
+Its only job: given the current execution context, decide which steps run next.
+
+  Determinism: same context + same conditions → same routing. Always.
+    (evaluateConditions has no randomness, no side effects.)
+
+  Observable: conditionResult is logged in the step's output JSONB.
+    Admins can see: "condition evaluated to TRUE, routing to steps [3]".
+
+  No hidden routing: ALL routing decisions go through onTrue/onFalse.
+    No implicit "fall through to next step" for condition steps.
+    (Condition steps with EMPTY onTrue/onFalse: allowed by Phase 3 validator,
+    treated as "no routing" → linear advance to next step. Useful for audit-only
+    conditions that record a boolean without affecting flow.)
+
+4.3  Condition Fields: What Data Is Available
+──────────────────────────────────────────────
+
+The condition evaluates against:
+  data = { ...ctx.triggerData, ...ctx.resolvedData }
+
+With the proposed P4-A (context isolation), this becomes:
+  data = {
+    ...ctx.triggerData,
+    ...flattenStepOutputs(ctx.stepOutputs)  // backward compat read
+  }
+
+Admins configure conditions against field names.
+The fields available are:
+  - Everything in the trigger event payload (triggerData).
+  - Everything output by steps that have already completed.
+
+Risk: if a condition refers to a field that doesn't exist in the trigger data
+(e.g., "ticket.priority" when the trigger event doesn't carry priority), the
+condition evaluates against undefined → evaluateSingle returns false.
+No error is thrown. This silently routes to onFalse.
+
+Phase 4 design: document this behavior. Phase 6: static analysis warning in
+validator when condition field references are not resolvable from trigger type.
+
+4.4  Diagnostics of Branch Decisions
+──────────────────────────────────────
+
+Each condition step execution must be logged with enough detail to reconstruct
+the routing decision:
+
+  Step log output (to be logged in workflow_execution_steps.output):
+  {
+    "conditionResult":  true,
+    "takenBranch":      "onTrue",
+    "nextSteps":        [3],
+    "skippedBranch":    "onFalse",
+    "skippedSteps":     [2],
+    "conditionsEvaluated": [
+      { "field": "ticket.priority", "operator": "eq", "value": "high", "result": true }
+    ]
+  }
+
+  This is currently NOT logged. The step log only shows:
+    { conditionResult: true, nextSteps: [3] }
+
+  Adding conditionsEvaluated requires passing the raw conditions array to the
+  output, which executeConditionStep can do since it already has access to them.
+
+  Phase 4: extend executeConditionStep output to include conditionsEvaluated.
+
+4.5  No Implicit Routing
+──────────────────────────
+
+Current behavior: condition step routes to nextSteps, executor ignores it → advances to i+1.
+This is implicit routing masquerading as condition routing.
+
+After Phase 4: condition step routes ONLY to nextSteps. No implicit advance.
+If onTrue is empty AND condition is true: execution stops at the condition step.
+  (This is intentional: empty branch = "stop execution on this condition".)
+
+This is a BEHAVIOR CHANGE for condition steps that currently have onTrue: [].
+  Current:  condition evaluates → executor ignores → steps[i+1] executes.
+  After P4: condition evaluates → onTrue = [] → no next step → execution ends.
+
+Mitigation: Phase 3 validator ALREADY blocks condition steps with non-empty
+onTrue/onFalse. All currently-active workflows have condition steps ONLY with
+empty branches (they were blocked from activation with non-empty branches).
+So this behavior change only affects newly-designed workflows.
+
+But the validator should be updated in Phase 4: condition steps with empty
+onTrue AND empty onFalse should warn: "This condition step is an audit-only
+check. Execution will complete after this step regardless of condition result."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — EXECUTION CANCELLATION DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Why Cooperative Cancellation
+────────────────────────────────────
+
+executeWorkflow() is an async function running in Node.js.
+Stopping it mid-step would require:
+  A. AbortController.abort() — only works if the step uses it (none do).
+  B. Promise.race() with a timeout signal — changes step handler signatures.
+  C. Killing the process — kills everything.
+  D. Cooperative: check a flag between steps.
+
+D is the only safe option. Steps run to completion once started.
+A step that hangs (waiting on a DB query) holds a Promise that eventually resolves
+or rejects via DB timeout. We cannot safely interrupt that.
+
+Cooperative model: before starting each step, check "has cancellation been requested?".
+If yes: transition execution to 'cancelled', return.
+If no: proceed with the step.
+
+This means the current step always finishes. Cancellation takes effect at the
+NEXT step boundary. For most workflows with fast steps (< 1 second each), this
+provides effectively immediate cancellation.
+
+5.2  Cancellation Mechanism
+─────────────────────────────
+
+DB change required:
+  ALTER TABLE workflow_executions ADD COLUMN cancel_requested BOOLEAN DEFAULT FALSE;
+
+API endpoint:
+  POST /api/workflows/executions/:id/cancel
+    Auth: workflow.manage
+    Action:
+      1. Load execution.
+      2. Verify it belongs to req.workspaceId.
+      3. If status IN ('completed', 'failed', 'cancelled', 'timed_out') → 422 "already terminal"
+      4. UPDATE execution SET cancel_requested=true, cancellation_requestedAt=now()
+      5. Return 200 { executionId, status: "cancellation_requested" }
+
+Executor check (at each step boundary):
+  // Re-read cancel_requested from DB at each step boundary.
+  // In-memory flag is not reliable — another process/request could set it.
+  const [exec] = await db.select({ cancelRequested: ... }).where(id=executionId)
+  if (exec.cancelRequested) {
+    await db.update(...).set({ status: 'cancelled', completedAt: now() })
+    logger.info({ executionId }, "Workflow execution cancelled at step boundary")
+    return
+  }
+
+Note: this adds one extra SELECT per step. For workflows with many steps
+(>20), this adds DB load. Acceptable for Phase 4. Phase 7 can optimize with
+in-process cancellation tokens if needed.
+
+5.3  Cancellation Checkpoints
+───────────────────────────────
+
+Cancellation is checked at the following points in the execution loop:
+  1. BEFORE each step (primary checkpoint).
+  2. After a waitForApproval return — before storing the paused state
+     (a cancelled-while-pausing execution should be cancelled, not paused).
+
+NOT at these points:
+  — Mid-step (impossible without AbortController support in step handlers).
+  — After step failure (step already failed → cancellation moot).
+
+5.4  Cancellation Visibility
+──────────────────────────────
+
+Cancellation is fully observable:
+  - execution.status = 'cancelled'
+  - execution.completedAt set.
+  - The step log shows all completed steps as 'completed'.
+  - The step that would have run next has no log entry.
+  - A new field execution.cancelledAt can be added for precise timing.
+
+Diagnostics APIs (GET /workflows/executions/:id) already return execution.status.
+Adding 'cancelled' to the status enum is the only schema change needed.
+
+  Current status enum: pending | running | waiting_approval | completed | failed
+  Phase 4 adds: cancelled | timed_out
+
+5.5  Cancellation of waiting_approval Executions
+──────────────────────────────────────────────────
+
+An execution in 'waiting_approval' status has returned from executeWorkflow().
+The function is no longer running. The cooperative cancellation loop is no longer
+active. Cancellation must be handled differently:
+
+  For waiting_approval → cancelled:
+    The POST /cancel endpoint checks current status.
+    If status = 'waiting_approval':
+      UPDATE execution SET status='cancelled', completedAt=now(), cancelledAt=now()
+      (No resume is needed — the execution simply closes.)
+    This is a direct status transition, no executor involved.
+
+The linked approval record (Phase 5) would also need to be closed/expired.
+For Phase 4 (no approval records yet): the direct status update is sufficient.
+
+5.6  Step-Safe Abort: What Cannot Be Undone
+────────────────────────────────────────────
+
+Steps that have already completed CANNOT be rolled back. There is no undo for:
+  - Notifications already inserted (sent).
+  - Tasks already created.
+  - Status updates already applied.
+  - Assignments already updated.
+
+Cancellation means: "stop here, don't run future steps." It does NOT mean "undo
+what already ran." This is the correct semantic for a business automation system.
+The step log records exactly what ran and what didn't, enabling manual correction.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — EXECUTION TTL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1  Why TTL Without a Scheduler
+──────────────────────────────────
+
+A real TTL would require a background job (setInterval, cron, etc.) that
+periodically scans for stuck executions and marks them timed_out.
+
+Phase 4 constraint: no external schedulers. This rules out:
+  - Node.js setInterval (runs in-process, not reliable across restarts).
+  - cron (requires external dependency).
+  - DB-level scheduled jobs (PostgreSQL pg_cron — adds infrastructure).
+
+The pragmatic Phase 4 approach: Lazy TTL.
+  Check TTL at execution time (each step boundary).
+  No proactive cleanup. Stuck executions are detected when the system
+  naturally encounters them, not by a background scanner.
+
+6.2  Lazy TTL: How It Works
+─────────────────────────────
+
+DB column:
+  ALTER TABLE workflow_executions ADD COLUMN timeout_at TIMESTAMP WITH TIME ZONE;
+
+  Set at execution creation time:
+    timeout_at = started_at + DEFAULT_EXECUTION_TTL_MS (e.g., 24 hours)
+
+  At each step boundary (alongside cancel check):
+    if (new Date() > execution.timeout_at) {
+      UPDATE executions SET status='timed_out', completedAt=now()
+      logger.warn({ executionId, startedAt, timeoutAt }, "Execution TTL exceeded")
+      return
+    }
+
+  This catches executions that are still running after TTL.
+  It does NOT catch executions stuck in 'waiting_approval' (function has returned).
+
+6.3  Stuck Execution Detection: The Separate Problem
+──────────────────────────────────────────────────────
+
+"Stuck" executions are those in 'running' or 'waiting_approval' status for longer
+than the TTL, but whose executeWorkflow() function has already returned.
+
+  Running but not completing: this should be impossible under normal conditions
+  (the for-loop always reaches a terminal state). But if the process crashes
+  mid-execution, the DB record stays in 'running' forever.
+
+  waiting_approval: these are intentionally paused. TTL here = approval timeout.
+  Once Phase 5 implements approval resume, approval timeoutHours will trigger
+  auto-approve, auto-reject, or escalation. For Phase 4, these just accumulate.
+
+For Phase 4: add a diagnostics endpoint that detects stuck executions.
+  GET /api/workflows/executions/stuck
+    Returns executions WHERE status IN ('running', 'waiting_approval')
+      AND started_at < now() - INTERVAL '24 hours'
+    Admin can review and manually mark as timed_out via a separate action.
+
+  POST /api/workflows/executions/:id/timeout
+    Auth: workflow.manage (or super_admin only — more conservative)
+    Action:
+      1. Verify status is 'running' or 'waiting_approval'.
+      2. Verify started_at is sufficiently old (> TTL threshold).
+      3. UPDATE status='timed_out', completedAt=now().
+    This is a manual admin rescue operation, not automated.
+
+6.4  TTL Lifecycle and States
+────────────────────────────────
+
+Proposed execution status state machine (Phase 4 additions in brackets):
+
+  pending
+    ↓ (engine starts it)
+  running
+    ↓ success          ↓ step failure   ↓ approval step   ↓ cancel check  ↓ TTL check
+  completed           failed           waiting_approval  [cancelled]     [timed_out]
+                                           ↓ Phase 5 resume
+                                         running (again)
+
+  [cancelled]   — cancelled at step boundary (cooperative) or directly (if paused)
+  [timed_out]   — TTL exceeded mid-execution (lazy check) or manually by admin
+
+Terminal states (no further transitions):
+  completed, failed, cancelled, timed_out
+
+Non-terminal states (can transition):
+  pending, running, waiting_approval
+
+The executor must validate that the current status is the expected one before
+transitioning. Example: before UPDATE status='failed', check status='running'.
+If status is already something else (e.g., cancelled by admin mid-execution),
+do NOT overwrite — the external state wins.
+
+6.5  TTL Configuration
+───────────────────────
+
+Phase 4 design: one global default TTL (DEFAULT_EXECUTION_TTL = 24 hours).
+No per-workflow TTL configuration (deferred to Phase 6).
+
+The ApprovalStep.config.timeoutHours is a STEP-LEVEL timeout, not an execution-level
+timeout. Step-level timeouts require a scheduler (Phase 5 scope).
+
+The execution-level TTL in Phase 4 is a safety net for runaway executions,
+not a business-logic timeout.
+
+6.6  TTL Observability
+───────────────────────
+
+A timed-out execution is observable through:
+  - execution.status = 'timed_out'
+  - execution.completedAt set (the time of timeout detection)
+  - execution.error = "Execution TTL exceeded" or similar message
+  - The step log shows all steps that ran before the timeout
+  - The step that was running when timeout was detected may have no completedAt
+    (if TTL fires between INSERT and UPDATE of the step log)
+
+The diagnostics API (GET /workflows/executions/:id) already returns status and
+error. Adding 'timed_out' to the status enum is sufficient.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — EXECUTION SAFETY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  Step Isolation via Namespaced Context
+───────────────────────────────────────────
+
+Current:   ctx.resolvedData = { ...ctx.resolvedData, ...result.output }
+
+Proposed:
+  ctx.stepOutputs: Record<number, Record<string, unknown>>
+  ctx.stepOutputs[step.index] = result.output
+
+  For backward compatibility during migration:
+    ctx.resolvedData is computed on-demand as:
+      Object.values(ctx.stepOutputs).reduce((acc, out) => ({...acc, ...out}), {})
+
+    This preserves the "steps can read previous steps' data" behavior while
+    preventing unpredictable overwrites. The order of merge is by step.index.
+
+  Long-term (Phase 6):
+    Remove resolvedData entirely.
+    Steps that need prior step outputs reference them explicitly:
+      ctx.stepOutputs[2].taskId   (not ctx.resolvedData.taskId)
+
+  Why not now: changing step handlers to use explicit stepOutputs references is
+  a significant change to all 6 step handlers and would require updating the
+  validator, types, and tests. Deferred to Phase 6 to avoid scope creep.
+
+7.2  Immutable Execution Snapshot (Steps Snapshot)
+───────────────────────────────────────────────────
+
+The critical P4-E design: serialize the steps array into the execution record
+at trigger time so future resume (Phase 5) uses the correct step configuration.
+
+Storage options:
+
+  Option A: In execution.context._stepsSnapshot (JSONB field already exists)
+    PRO: no schema change required.
+    PRO: immediately available without migration.
+    CON: context JSONB grows by N * avg_step_size bytes.
+         For a 10-step workflow: ~5-10KB extra per execution row.
+         Acceptable.
+
+  Option B: New column workflow_executions.steps_snapshot JSONB
+    PRO: semantically cleaner — snapshot is a first-class column.
+    PRO: queryable without JSON path extraction.
+    CON: requires schema migration (ALTER TABLE).
+    CON: one more nullable column to manage.
+
+  Recommendation: Option A for Phase 4 (fastest, no migration).
+    context._stepsSnapshot = steps  (the steps array as received from engine.ts)
+    Option B can be promoted in Phase 5 when approval resume actually needs it.
+
+  At trigger time (in engine.ts, before calling executeWorkflow):
+    context._stepsSnapshot = steps  ← add this line
+
+  In executeWorkflow (Phase 4+):
+    const steps = (ctx as any)._stepsSnapshot as WorkflowStep[] || stepsParam;
+    ← prefer snapshot over live definition parameter
+
+7.3  Status Transition Safety
+───────────────────────────────
+
+Problem: two concurrent issues can corrupt execution status.
+
+  Issue A (restart after crash): Server crashes mid-execution. Execution stays
+  in 'running' status. On restart, nothing resumes it — correct behavior for now.
+  But if re-triggered by the same event (unlikely, but possible with retries from
+  route handler), a new execution is created — the old one stays stuck in 'running'.
+
+  Issue B (cancel race): Admin cancels execution while it's between two steps.
+  The executor hasn't yet checked cancel_requested. It proceeds to the next step.
+  Cancel completes. Executor finishes step. Now both 'cancelled' and 'running'
+  updates are racing.
+
+Proposed fix (Phase 4):
+
+  Pattern: optimistic status check before each DB write.
+    Before: UPDATE execution SET status='failed' WHERE id=?
+    After:  UPDATE execution SET status='failed'
+            WHERE id=? AND status='running'
+            RETURNING id
+
+    If no row returned → status was changed externally → log warning and return.
+    Do NOT overwrite externally-set state.
+
+  This applies to all terminal state transitions in the executor:
+    completed, failed, cancelled, timed_out.
+
+  This is a LOW-EFFORT change: add WHERE status='running' to every terminal UPDATE.
+  No transactions needed for Phase 4 (each step already runs serially in the
+  single async function; concurrent mutation of the same execution is unlikely
+  except for the cancel case).
+
+7.4  Context Isolation from Trigger Data
+──────────────────────────────────────────
+
+ctx.triggerData is the raw event payload from the trigger event.
+It is set once at execution creation and should be IMMUTABLE throughout execution.
+
+Current: triggerData is passed by reference and never mutated (good).
+Phase 4: make this explicit with a deep freeze or structural clone:
+  ctx.triggerData = structuredClone(payload.data)  ← when creating the context
+
+This prevents a step that modifies a deeply nested object in triggerData from
+affecting other steps (shallow copy protects top-level keys, deep clone protects all).
+
+7.5  Duplicate Step Execution Prevention
+────────────────────────────────────────
+
+In the cursor model, the same step index could theoretically be pushed into
+pendingSteps more than once (e.g., if two branches both route to a merge step).
+
+Guard:
+  Before executing a step, check:
+    if (completedSteps.includes(nextStepIndex)) continue;
+    if (skippedSteps.includes(nextStepIndex)) continue;
+
+  This prevents double-execution of merge-point steps.
+
+7.6  Context Size Limit (WG-07 Adjacent)
+─────────────────────────────────────────
+
+The execution.context JSONB grows unboundedly as step outputs accumulate.
+A workflow with many steps, each producing large outputs, can create very large
+context rows.
+
+Phase 4 design: add a context size check before each step output merge.
+  const contextSize = JSON.stringify(ctx.stepOutputs).length;
+  if (contextSize > MAX_CONTEXT_SIZE_BYTES) {
+    logger.warn({ executionId, contextSize }, "Execution context approaching size limit")
+    // Trim oldest step outputs if > limit
+  }
+
+  MAX_CONTEXT_SIZE_BYTES = 512KB (reasonable for a workflow automation context).
+  No hard block — just a warning. Hard block deferred to Phase 6.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — OBSERVABILITY COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1  What the Phase 2 Diagnostics APIs Depend On
+─────────────────────────────────────────────────
+
+All Phase 2 endpoints remain unchanged in Phase 4.
+Here is what each diagnostic relies on and how Phase 4 preserves it:
+
+  GET /workflows/executions
+    Uses: workflowExecutionsTable.status, startedAt, completedAt, triggeredBy
+    Phase 4 adds: 'cancelled', 'timed_out' to status enum → no breaking change.
+    Adding cancel_requested, timeout_at columns → not selected in this endpoint.
+
+  GET /workflows/executions/failed
+    Uses: status IN ('failed', 'error')
+    Phase 4: no change. 'cancelled' and 'timed_out' are separate states.
+    Admin might want cancelled/timed_out in this view — Phase 6 enhancement.
+
+  GET /workflows/executions/:id  (the rich detail view)
+    Uses: execution.context (JSONB), steps ordered by stepIndex
+    Phase 4 adds _stepsSnapshot to context → a new key in JSONB, non-breaking.
+    Phase 4 adds _pendingSteps, _completedSteps to context → same, non-breaking.
+    Step logs: now includes 'skipped' status entries for bypassed branches.
+    The diagnostics UI needs to handle 'skipped' step status — currently only
+    handles 'completed' and 'failed'. This is a UI enhancement (Phase 4 frontend task).
+
+  GET /events/:id (event detail with linked executions)
+    Uses: triggerEventLogId → workflow_executions JOIN
+    Phase 4: no change to triggerEventLogId or this query.
+
+  GET /workflows/:id (workflow detail with recent executions)
+    Uses: workflow_definitions (steps, conditions, status)
+    Phase 4: no change to this query structure.
+
+8.2  currentStepIndex Semantics
+─────────────────────────────────
+
+Currently: currentStepIndex = i (updated on every step completion).
+With DAG execution: currentStepIndex = last completed step's index.
+
+  For linear workflows: identical behavior.
+  For branched workflows: "currentStepIndex" is the last executed step, which
+    correctly represents execution progress for sequential viewing.
+  For parallel branches (Phase 7): meaning becomes ambiguous.
+
+Phase 4: keep currentStepIndex as "last completed step index".
+Add a separate context._pendingSteps array for full cursor state.
+The diagnostics API can expose _pendingSteps in the detail view.
+
+8.3  Step Log Completeness
+───────────────────────────
+
+Phase 4 changes to workflow_execution_steps:
+
+  New step status value: 'skipped'
+    Added when a condition step's non-taken branch is logged.
+    The step log entry for a skipped step:
+      status: 'skipped'
+      output: { reason: 'branch_not_taken', takenBranch: 'onTrue'/'onFalse' }
+      startedAt: null
+      completedAt: null
+
+  No changes to existing step log columns.
+  Step ordering remains by stepIndex ASC — skipped steps appear in correct position.
+
+  Timeline reconstruction (currently in GET /workflows/executions/:id):
+    SELECT ... ORDER BY step_index ASC
+    This works identically for linear, branched, and mixed workflows.
+
+8.4  Event Tracing and triggerEventLogId
+─────────────────────────────────────────
+
+The P4-E snapshot stores the steps in context._stepsSnapshot.
+The triggerEventLogId continues to link execution → event.
+Event tracing APIs (event detail → linked executions) are unaffected.
+
+No change to the bridge, dispatcher, or eventDispatcher.on() registration.
+The WorkflowEngine event handler is unchanged in structure (only the executor
+function it calls is modified).
+
+8.5  Notification Linkage
+──────────────────────────
+
+workflow notifications are inserted into notificationsTable with type='workflow'.
+This is not linked to the execution by any FK (no execution_id in notifications).
+
+Phase 4 does not change this. Notification linkage (connecting a notification
+to the execution that created it) is a Phase 6 enhancement requiring a new column
+in the notifications table.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — BACKWARD COMPATIBILITY STRATEGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+9.1  Existing Workflow Compatibility
+──────────────────────────────────────
+
+All 7 currently seeded and active workflows are linear:
+  — No condition step with non-empty onTrue/onFalse (blocked by Phase 3 validator).
+  — All steps are: notification, task (sequential).
+
+The DAG executor handles linear workflows via the "linear routing" path:
+  — No condition steps → always advance to next step by array order.
+  — Behavior: identical to current for-loop.
+
+Verification required after Phase 4 implementation:
+  For each of the 7 active workflows, manually trigger them in a dev environment
+  and compare the execution step log with the current (pre-Phase 4) behavior.
+  All step indices, statuses, and outputs must be identical.
+
+9.2  Existing Execution Records
+─────────────────────────────────
+
+  workflow_executions: no schema changes to existing columns in Phase 4.
+  (Only new columns added: cancel_requested, timeout_at — both nullable/default.)
+
+  workflow_execution_steps: no schema changes. New 'skipped' status value is
+  additive — existing queries using WHERE status='completed' are unaffected.
+
+  All existing 'completed', 'failed', 'waiting_approval' execution records remain
+  readable and correct after Phase 4 deployment.
+
+9.3  Diagnostics History
+─────────────────────────
+
+  Historical execution records stored before Phase 4 lack:
+    — context._stepsSnapshot (not set before Phase 4)
+    — context._pendingSteps (not set before Phase 4)
+    — context._completedSteps (not set before Phase 4)
+
+  These are optional fields. The DAG executor in Phase 4 checks for their presence:
+    if (!ctx._stepsSnapshot) use the steps parameter from engine.ts (backward compat)
+
+  Old execution step logs have no 'skipped' status entries — correct, because
+  old executions had no branching.
+
+  The GET /workflows/executions/:id endpoint handles missing context fields gracefully
+  (it returns them as null/undefined in the response, which the frontend ignores).
+
+9.4  What Breaks If Phase 4 Is Implemented Incorrectly
+────────────────────────────────────────────────────────
+
+(See also Section 10 — Risks.)
+
+  CORRECTNESS BREAK: If getNextStepByArrayOrder() returns the wrong step index,
+    linear workflows execute steps in wrong order.
+    Example: steps with non-sequential indices (0, 5, 10) → next-by-array-order
+    after step 0 is step 5, not step 1.
+    This is CORRECT (we follow array order, not index order). But if implemented
+    as "currentIndex + 1" instead of "next by array position", step 5 would be
+    followed by step 6 (which doesn't exist) instead of step 10.
+    Guard: unit test this function with non-sequential indices before deploying.
+
+  EXECUTION LOSS: If the cursor state is not properly initialized, pendingSteps
+    starts empty → execution "completes" immediately with no steps run.
+    Guard: assert pendingSteps.length > 0 before the main loop; fail execution
+    with error if the steps snapshot is empty.
+
+  DOUBLE-EXECUTION: If the deduplication guard (completedSteps check) is missing,
+    merge points in future branching workflows could execute twice.
+    Guard: integration test with a condition workflow before enabling condition
+    branching in the validator.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — WHAT NOT TO DESIGN OR IMPLEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following are explicitly OUT OF SCOPE for Phase 4 and should NOT be
+designed, prototyped, or partially implemented, as they would create half-baked
+infrastructure that later conflicts with proper Phase 5–7 implementations:
+
+  ✗  Distributed orchestration (Temporal.io, AWS Step Functions, Conductor)
+     This is a single-process Node.js application.
+     Over-engineering to distributed orchestration would require:
+       - Durable execution storage separate from PostgreSQL.
+       - Worker coordination infrastructure.
+       - A complete rewrite of the engine.
+     None of this is appropriate for the current architecture.
+
+  ✗  External task queues (BullMQ, RabbitMQ, Kafka)
+     The Phase 3 rate limit is sufficient backpressure for Phase 4.
+     A queue would require Redis or a broker — adding infrastructure dependencies.
+
+  ✗  Parallel step execution (running steps 2 and 3 concurrently)
+     This requires a join gate ("wait for both before continuing") which is
+     a significant complexity increase.  Phase 7 scope.
+
+  ✗  Approval resume
+     This requires: approval records, execution-to-approval mapping, resume
+     endpoint, and the Phase 4 cursor model as a foundation.
+     The cursor model (P4-F) is designed here but approval resume is Phase 5.
+
+  ✗  Delay scheduling (actual timed delays)
+     Requires a persistent timer or scheduler.  Phase 5 scope.
+     Do NOT implement setTimeout — it's lost on process restart.
+
+  ✗  Event sourcing redesign
+     The current model (DB rows for executions and steps) is correct and
+     sufficient.  Full event sourcing would require replaying all events to
+     reconstruct state — unnecessary overhead for this use case.
+
+  ✗  Microservices extraction of the workflow engine
+     The workflow engine is correctly embedded in the API server.
+     Extracting it would require internal communication infrastructure.
+
+  ✗  External schedulers (pg_cron, Agenda, node-cron)
+     The lazy TTL model is sufficient for Phase 4.
+     A scheduler adds operational complexity and potential drift issues.
+
+Keep the architecture: single Node.js process, PostgreSQL, EventBus.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each phase is independent — they can be implemented and validated before the next.
+Phases are ordered by safety impact and prerequisite dependencies.
+
+──────────────────────────────────────────────────────────────────
+P4-A  CONTEXT ISOLATION
+──────────────────────────────────────────────────────────────────
+
+  File:   executor.ts + types.ts
+  Risk:   LOW (additive change; resolvedData backward compat preserved)
+  Value:  Eliminates WG-15 context pollution.
+
+  Changes:
+    1. Add stepOutputs: Record<number, Record<string, unknown>> to ExecutionContext.
+    2. Replace the flat resolvedData merge with:
+         ctx.stepOutputs[step.index] = result.output ?? {}
+    3. Keep resolvedData as a computed getter (backward compat):
+         get resolvedData() {
+           return Object.values(this.stepOutputs)
+             .reduce((acc, out) => ({...acc, ...out}), {})
+         }
+    4. Freeze triggerData at context creation:
+         triggerData: structuredClone(payload.data)
+
+  Prerequisite: none.
+  Test: all 7 seeded workflows execute with identical step outputs.
+
+──────────────────────────────────────────────────────────────────
+P4-B  LAZY TTL + STUCK EXECUTION DETECTION
+──────────────────────────────────────────────────────────────────
+
+  Files:   executor.ts, routes/workflows.ts, lib/db/src/schema/workflows.ts
+  Risk:    LOW (new column with default, new endpoint, additive behavior)
+  Value:   Eliminates WG-07 (stuck executions accumulate forever).
+
+  Changes:
+    1. DB: ADD COLUMN timeout_at TIMESTAMP WITH TIME ZONE to workflow_executions.
+           ADD COLUMN cancel_requested_at TIMESTAMP WITH TIME ZONE (for P4-C prep).
+    2. Engine: set timeout_at = startedAt + DEFAULT_TTL (24h) at execution INSERT.
+    3. Executor: between each step, check if now() > timeout_at.
+                 If yes: UPDATE status='timed_out', return.
+    4. API: GET /workflows/executions/stuck (returns old running/waiting_approval).
+    5. API: POST /workflows/executions/:id/timeout (admin manual rescue).
+    6. Status enum: add 'timed_out' to the allowed values.
+    7. OpenAPI: update WorkflowExecution status enum.
+    8. Codegen.
+
+  Prerequisite: P4-A (so cancellation check pattern is established first).
+  Test: create an execution with very short TTL, verify it transitions to timed_out.
+
+──────────────────────────────────────────────────────────────────
+P4-C  COOPERATIVE CANCELLATION
+──────────────────────────────────────────────────────────────────
+
+  Files:   executor.ts, routes/workflows.ts, lib/db/src/schema/workflows.ts
+  Risk:    LOW (new DB column, new endpoint, optional check in executor)
+  Value:   Enables admins to stop runaway or incorrect executions.
+
+  Changes:
+    1. DB: ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT FALSE.
+    2. Executor: between each step, SELECT cancel_requested.
+                 If true: UPDATE status='cancelled', return.
+    3. API: POST /workflows/executions/:id/cancel
+              → validates workspace ownership
+              → validates execution is not already terminal
+              → UPDATE SET cancel_requested=true
+    4. For waiting_approval executions: direct UPDATE status='cancelled'.
+    5. Status enum: add 'cancelled'.
+    6. OpenAPI: update + codegen.
+
+  Prerequisite: P4-B (so TTL and cancellation checks share the same inter-step
+  checkpoint pattern — single DB read can fetch both cancel_requested and timeout_at).
+  Test: cancel an active execution between steps; verify step log is intact.
+
+──────────────────────────────────────────────────────────────────
+P4-D  STATUS TRANSITION SAFETY
+──────────────────────────────────────────────────────────────────
+
+  File:   executor.ts
+  Risk:   VERY LOW (adds WHERE clause to existing UPDATEs)
+  Value:  Prevents race conditions between cancel and executor terminal writes.
+
+  Changes:
+    For every terminal state transition in executor.ts:
+      UPDATE executions SET status='X' WHERE id=? AND status='running'
+    Check RETURNING: if nothing returned, external state change won → log + return.
+
+  Prerequisite: P4-C (cancellation exists as the main external state changer).
+  Test: concurrent cancel + step failure — only one terminal state wins.
+
+──────────────────────────────────────────────────────────────────
+P4-E  STEPS SNAPSHOT
+──────────────────────────────────────────────────────────────────
+
+  Files:   engine.ts, executor.ts
+  Risk:    LOW (additive to context JSONB, no schema change)
+  Value:   Foundation for Phase 5 approval resume; eliminates version-drift risk.
+
+  Changes:
+    1. Engine: when creating execution context, add:
+         context._stepsSnapshot = steps as unknown as Record<string, unknown>[]
+    2. Executor: at the start of executeWorkflow, prefer:
+         const effectiveSteps = ctx._stepsSnapshot as WorkflowStep[] || stepsParam
+       Use effectiveSteps for all step execution.
+    3. The execution now always runs against the steps that were active at
+       trigger time, not the (potentially edited) live definition.
+
+  Prerequisite: P4-A (context refactoring) — snapshot added to same context object.
+  Test: edit a workflow definition mid-execution; verify running execution is unaffected.
+
+──────────────────────────────────────────────────────────────────
+P4-F  MINIMAL DAG EXECUTOR
+──────────────────────────────────────────────────────────────────
+
+  File:   executor.ts (replace the for-loop)
+  Risk:   MEDIUM — most complex Phase 4 change. Must be tested exhaustively.
+  Value:  Enables condition routing (unblocks WG-03 from validator in Phase 6).
+          Provides cursor storage for Phase 5 approval resume.
+
+  Changes:
+    1. Build stepMap: Map<number, WorkflowStep> from effectiveSteps.
+    2. Initialize cursor: pendingSteps = [firstStep.index]
+    3. Replace for-loop with while(pendingSteps.length > 0) loop.
+    4. At each iteration:
+       a. Pop next step index from pendingSteps.
+       b. Check completedSteps and skippedSteps (dedup guard).
+       c. Check cancel_requested and timeout_at (reuse P4-B/P4-C check).
+       d. Execute step.
+       e. Determine next steps:
+          — If condition step + non-empty nextSteps → push nextSteps.
+          — Else → push getNextByArrayOrder(step, effectiveSteps).
+       f. Mark skipped branch steps.
+       g. Update ctx.stepOutputs[step.index].
+       h. Update DB: execution currentStepIndex, completedSteps.
+    5. Store cursor in execution context at each step boundary (for Phase 5 resume).
+    6. Insert 'skipped' step log entries for bypassed steps.
+
+  CRITICAL: getNextByArrayOrder must be implemented as:
+    const arrayPos = effectiveSteps.findIndex(s => s.index === currentStep.index)
+    const nextStep = effectiveSteps[arrayPos + 1]
+    return nextStep?.index ?? null
+
+    DO NOT implement as: currentStep.index + 1
+    (This fails for non-sequential indices like 0, 5, 10.)
+
+  Prerequisite: P4-A, P4-E (context refactoring + snapshot).
+  Prerequisite: P4-B, P4-C, P4-D (checkpoint + cancellation + safety).
+
+  Test plan (mandatory before deploying P4-F):
+    T1: Linear workflow with steps [0,1,2] — identical output to current executor.
+    T2: Linear workflow with non-sequential indices [0,5,10] — advances 0→5→10.
+    T3: Condition workflow — true branch taken, false branch skipped.
+    T4: Condition workflow — false branch taken, true branch skipped.
+    T5: Condition with empty onTrue/onFalse — execution ends at condition step.
+    T6: Cancellation mid-execution — executor stops at next checkpoint.
+    T7: TTL exceeded mid-execution — executor transitions to timed_out.
+    T8: Step failure — execution transitions to failed with correct step log.
+    T9: Merge point — two branches routing to the same step, step runs once.
+
+  Do NOT enable condition branching in the validator until T3-T5 pass.
+  Validator should still block condition steps with non-empty onTrue/onFalse
+  until the DAG executor is verified in production.
+
+──────────────────────────────────────────────────────────────────
+Phase 4 SUMMARY TABLE
+──────────────────────────────────────────────────────────────────
+
+  Step   Name                    Risk    Prerequisite   WG Fixed
+  ─────────────────────────────────────────────────────────────────
+  P4-A   Context Isolation       LOW     —              WG-15
+  P4-B   Lazy TTL                LOW     P4-A           WG-07 partial
+  P4-C   Cancellation            LOW     P4-B           —
+  P4-D   Status Transition Safety VLOW   P4-C           W8
+  P4-E   Steps Snapshot          LOW     P4-A           WG-05
+  P4-F   DAG Executor            MEDIUM  P4-A,B,C,D,E   WG-03 (partial)
+  ─────────────────────────────────────────────────────────────────
+
+  Phase 4 does NOT yet unblock condition branching for users.
+  P4-F lays the foundation. Condition steps remain blocked in the validator
+  until P4-F is verified in production (Phase 6 removes the validator block).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — RISKS IF IMPLEMENTED INCORRECTLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Risks are listed by severity. Each risk includes the mistake that causes it
+and the guard that prevents it.
+
+  ── CATASTROPHIC ────────────────────────────────────────────────
+
+  RISK-1: Linear workflows skip all steps
+    Cause:  pendingSteps initialized incorrectly (empty or wrong first step).
+    Effect: executeWorkflow() loop never enters; execution marked 'completed'
+            with no steps run.
+    Guard:  Assert effectiveSteps.length > 0 before building stepMap.
+            Assert pendingSteps = [firstStep.index] is not empty.
+            T1 integration test must pass before deployment.
+
+  RISK-2: Steps execute in wrong order
+    Cause:  getNextByArrayOrder uses step.index + 1 instead of array position.
+    Effect: Non-sequential step indices (0,5,10) cause skips or infinite loops.
+    Guard:  Implement as findIndex-based, not arithmetic. Unit test non-sequential.
+
+  RISK-3: Condition branching causes double-execution of merge step
+    Cause:  Missing completedSteps dedup guard when pendingSteps is populated.
+    Effect: Merge step runs twice → duplicate notifications, tasks, status updates.
+    Guard:  T9 must pass. Dedup guard MUST be in the loop before step execution.
+
+  ── HIGH ────────────────────────────────────────────────────────
+
+  RISK-4: Status race: cancelled execution overwritten as 'failed'
+    Cause:  Terminal UPDATEs without WHERE status='running' check.
+    Effect: Admin sees 'failed' instead of 'cancelled' — confusing audit trail.
+    Guard:  P4-D must be implemented BEFORE enabling cancellation in production.
+
+  RISK-5: Steps snapshot contains live definition (not trigger-time)
+    Cause:  context._stepsSnapshot set to a reference, not a clone.
+    Effect: If admin edits workflow after trigger, running execution uses new steps.
+    Guard:  Use structuredClone(steps) when storing in context.
+
+  RISK-6: TTL check uses server time vs. DB time inconsistency
+    Cause:  new Date() on server vs. TIMESTAMP in DB are in different timezones
+            if server timezone ≠ UTC.
+    Effect: TTL fires too early or never fires.
+    Guard:  DB timeout_at stored as TIMESTAMP WITH TIME ZONE.
+            Server-side comparison: fetch timeout_at from DB, compare in UTC.
+            Set server TZ to UTC explicitly in Node.js: process.env.TZ = 'UTC'.
+
+  RISK-7: Skipped branch steps logged with wrong stepIndex
+    Cause:  step.index used instead of actual step index from the skipped branch.
+    Effect: Step log shows wrong indices for skipped steps → timeline confusion.
+    Guard:  Skipped step index = the value in onTrue/onFalse array, not a computed value.
+
+  ── MEDIUM ──────────────────────────────────────────────────────
+
+  RISK-8: resolvedData backward compat breaks if getter throws
+    Cause:  Computed getter over stepOutputs throws on null/undefined values.
+    Effect: Steps that read ctx.resolvedData throw runtime errors.
+    Guard:  Getter implementation must handle undefined stepOutputs entries.
+            Use Object.values(this.stepOutputs ?? {}).
+
+  RISK-9: Cancel endpoint allows cancelling any workspace's execution
+    Cause:  Missing workspace ownership check in cancel route.
+    Effect: Workspace admin A cancels Workspace B's execution.
+    Guard:  Verify execution.workspaceId === req.workspaceId before updating.
+            This is the same pattern used in all other workflow routes.
+
+  RISK-10: Steps snapshot grows context JSONB beyond PostgreSQL TOAST limit
+    Cause:  Very large steps configurations (many steps with large configs).
+    Effect: INSERT/UPDATE of execution context fails with JSONB size error.
+    Guard:  Phase 4 risk is acceptable (most workflows have <20 steps).
+            Monitor context column size in production. Phase 6: enforce limit.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — FINAL RECOMMENDATIONS BEFORE IMPLEMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following must be confirmed before writing a single line of Phase 4 code:
+
+13.1  Prerequisite: Phase 3 Production Stable
+  All 7 seeded workflows must be confirmed working in the current environment.
+  The validator, activate endpoint, and soft-delete must be exercised.
+  Reason: Phase 4 modifies the same files (executor.ts). Starting Phase 4 on
+  an unstable Phase 3 base creates compounding debugging complexity.
+  Status: Phase 3 tests passed (confirmed in phase-3-report.txt). ✓
+
+13.2  Test Coverage Plan Before P4-F
+  Write the full T1-T9 test plan (Section 11, P4-F) as automated tests BEFORE
+  implementing the DAG executor. Treat them as specification tests.
+  Reason: the DAG executor is the highest-risk change (MEDIUM). Having tests
+  ready allows rapid verification during and after implementation.
+
+13.3  Do Not Unblock Condition Branching in the Validator
+  When P4-F is deployed, the Phase 3 validator still blocks condition steps
+  with non-empty onTrue/onFalse. Only after T3-T5 integration tests pass
+  in production should the validator be updated to allow condition branching.
+  Reason: the validator is the last safety gate between the DAG executor
+  and customer-configured workflows.
+
+13.4  Implement in Phase Order: A → B → C → D → E → F
+  Do not skip phases or implement them out of order.
+  Each phase is a standalone, testable improvement. If P4-B (TTL) fails in
+  production, P4-C (cancellation) can still be reverted independently.
+  Reason: risk isolation. One change at a time prevents compound failures.
+
+13.5  Monitor After P4-F Deployment
+  After deploying the DAG executor (P4-F), watch for:
+    — Any executions with 0 steps completed (RISK-1).
+    — Any executions with status='completed' but missing step logs (RISK-2).
+    — Double notifications or tasks (RISK-3).
+    — execution.context size growth (RISK-10).
+  These can be checked with simple SQL queries against workflow_executions
+  and workflow_execution_steps.
+
+13.6  Execution Chain Propagation Remains Incomplete
+  Phase 3's P3-C recursion guard tracks the chain via _executionChain in payload.
+  But status_update steps that trigger domain events don't inject _executionChain
+  into those events. The rate limit (P3-B) is the only defence for that path.
+  Phase 4 does not change this. A full solution requires that every step which
+  could emit a bus event injects the current execution's chain. This is Phase 5+.
+  Risk level with current state: MANAGED (rate limit caps at 100/min).
+
+13.7  Approval Steps Remain Blocked
+  Phase 4 does NOT unblock approval steps. The validator (Phase 3) continues
+  to block them. The cursor model and steps snapshot from Phase 4 are
+  necessary PREREQUISITES for Phase 5 approval resume — but do not constitute
+  resume by themselves. Approval steps must stay blocked until Phase 5 is complete.
+
+13.8  Performance Baseline Before Phase 4
+  Record the current execution time for a typical 3-step workflow before Phase 4.
+  The P4-B/P4-C inter-step checkpoint adds one SELECT per step (cancel_requested +
+  timeout_at). For a 3-step workflow: 3 extra SELECTs. Acceptable.
+  For a 50-step workflow: 50 extra SELECTs. At 5ms each: 250ms extra. Acceptable.
+  If this becomes a concern in production: batch cancel_requested and timeout_at
+  into the existing step log INSERT/UPDATE (read from context instead of DB).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX A — ISSUES RESOLVED BY PHASE 3 (NOT IN PHASE 4 SCOPE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  WG-01  Event loop (rate limit + chain guard): RESOLVED ✓
+  WG-02  Approval blocked by validator:          RESOLVED (partial) ✓
+  WG-03  Condition branching blocked:            BLOCKED at validator ✓ (fix = P4-F)
+  WG-04  Delay blocked by validator:             BLOCKED at validator ✓ (fix = Phase 5)
+  WG-06  Draft/publish lifecycle:                RESOLVED ✓
+  WG-08  Notification fanout cap:                RESOLVED ✓
+  WG-09  Rate limit per workspace:               RESOLVED ✓
+  WG-12  round_robin blocked:                    BLOCKED at validator ✓
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX B — ISSUES TARGETED BY PHASE 4 (THIS DOCUMENT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  WG-03  Condition branching → P4-F lays foundation; unblock in Phase 6
+  WG-05  Version drift on resume → P4-E (steps snapshot)
+  WG-07  Stuck executions forever → P4-B (lazy TTL)
+  WG-15  Context pollution → P4-A (namespaced stepOutputs)
+  W3     No cancellation → P4-C
+  W4     No TTL checkpoint → P4-B
+  W6     step.index vs array mismatch → P4-F
+  W8     Status transition races → P4-D
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX C — ISSUES DEFERRED TO PHASE 5 AND BEYOND
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  WG-02  Approval resume:          Phase 5 (requires P4-E + P4-F first)
+  WG-04  Delay scheduling:         Phase 5 (persistent timer required)
+  WG-11  Approval record mapping:  Phase 5
+  WG-12  round_robin resolver:     Phase 5
+  WG-13  Approval timeout enforce: Phase 5
+  W7     Step retry:               Phase 6 (requires idempotency keys)
+  W10    Step config validation:   Phase 6 (static analysis in validator)
+  W12    Full branch skip logging: Phase 6
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+APPENDIX D — DAG EXECUTOR PSEUDOCODE (REFERENCE IMPLEMENTATION)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This is design-level pseudocode, NOT production code.
+Purpose: make the abstract cursor model concrete and unambiguous.
+
+  async function executeWorkflow(executionId, stepsParam, ctx):
+
+    // P4-E: prefer snapshot over live parameter
+    const effectiveSteps: WorkflowStep[] =
+      (ctx._stepsSnapshot as WorkflowStep[]) ?? stepsParam
+
+    if (effectiveSteps.length === 0) {
+      mark execution failed: "No steps in snapshot"
+      return
+    }
+
+    // Build index map (O(n) once)
+    const stepMap = new Map<number, WorkflowStep>()
+    for (const s of effectiveSteps) stepMap.set(s.index, s)
+
+    // Initialize cursor (first step by array order)
+    const firstStep = effectiveSteps[0]
+    const pendingSteps: number[] = [firstStep.index]
+    const completedSteps: number[] = []
+    const skippedSteps: number[] = []
+
+    // Mark execution as running
+    await db.update(executions).set({ status: 'running' }).where(id=executionId)
+
+    while (pendingSteps.length > 0) {
+      const nextIdx = pendingSteps.shift()!
+
+      // Dedup guard
+      if (completedSteps.includes(nextIdx)) continue
+      if (skippedSteps.includes(nextIdx)) continue
+
+      const step = stepMap.get(nextIdx)
+      if (!step) {
+        log.warn("Step index not found in snapshot", { nextIdx, executionId })
+        continue
+      }
+
+      // ── P4-B: TTL check ──────────────────────────────────
+      const execRecord = await db.select({
+        cancelRequested: ...,
+        timeoutAt: ...
+      }).where(id=executionId).limit(1)
+
+      if (new Date() > execRecord.timeoutAt) {
+        await db.update(executions)
+          .set({ status: 'timed_out', error: 'TTL exceeded', completedAt: now() })
+          .where(id=executionId AND status='running')
+        return
+      }
+
+      // ── P4-C: Cancellation check ─────────────────────────
+      if (execRecord.cancelRequested) {
+        await db.update(executions)
+          .set({ status: 'cancelled', completedAt: now() })
+          .where(id=executionId AND status='running')
+        return
+      }
+
+      // Log step as 'running'
+      const [stepLog] = await db.insert(executionSteps).values({
+        executionId, stepIndex: step.index, stepType: step.type,
+        stepName: step.name, status: 'running', startedAt: now()
+      }).returning({ id })
+
+      // Execute step
+      let result: StepResult
+      try {
+        result = await executeStep(step, ctx, executionId)
+      } catch (err) {
+        result = { success: false, error: String(err) }
+      }
+
+      // Log step completion
+      await db.update(executionSteps)
+        .set({ status: result.success ? 'completed' : 'failed',
+               output: result.output, error: result.error, completedAt: now() })
+        .where(id=stepLog.id)
+
+      // Update execution cursor
+      completedSteps.push(step.index)
+      await db.update(executions)
+        .set({ currentStepIndex: step.index })
+        .where(id=executionId)
+
+      if (!result.success) {
+        // P4-D: status-safe terminal write
+        await db.update(executions)
+          .set({ status: 'failed', error: result.error, completedAt: now() })
+          .where(id=executionId AND status='running')
+        return
+      }
+
+      if (result.waitForApproval) {
+        // Store cursor in context for Phase 5 resume
+        ctx._pendingSteps = pendingSteps  // what would have run next
+        ctx._completedSteps = completedSteps
+        await db.update(executions)
+          .set({ status: 'waiting_approval', context: ctx })
+          .where(id=executionId AND status='running')
+        return
+      }
+
+      // ── P4-A: Namespaced context update ──────────────────
+      ctx.stepOutputs = ctx.stepOutputs ?? {}
+      ctx.stepOutputs[step.index] = result.output ?? {}
+
+      // ── Determine next steps ──────────────────────────────
+      const isCondition = step.type === 'condition'
+      const nextStepsOutput = result.output?.nextSteps as number[] | undefined
+
+      if (isCondition && nextStepsOutput && nextStepsOutput.length > 0) {
+        // DAG routing: condition result determines branch
+        pendingSteps.push(...nextStepsOutput)
+
+        // Mark skipped branch
+        const conditionResult = result.output?.conditionResult as boolean
+        const skippedBranch = conditionResult
+          ? (step.config.onFalse ?? [])
+          : (step.config.onTrue  ?? [])
+        for (const idx of skippedBranch) {
+          if (!completedSteps.includes(idx)) {
+            skippedSteps.push(idx)
+            // Insert skipped step log
+            await db.insert(executionSteps).values({
+              executionId, stepIndex: idx,
+              stepType: stepMap.get(idx)?.type ?? 'unknown',
+              stepName: stepMap.get(idx)?.name ?? 'unknown',
+              status: 'skipped',
+              output: { reason: 'branch_not_taken',
+                        takenBranch: conditionResult ? 'onTrue' : 'onFalse' }
+            })
+          }
+        }
+      } else {
+        // Linear routing: advance to next by array order
+        const arrayPos = effectiveSteps.findIndex(s => s.index === step.index)
+        const nextStep  = effectiveSteps[arrayPos + 1]
+        if (nextStep) pendingSteps.push(nextStep.index)
+      }
+    }
+
+    // P4-D: status-safe terminal write
+    await db.update(executions)
+      .set({ status: 'completed', completedAt: now() })
+      .where(id=executionId AND status='running')
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF DOCUMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

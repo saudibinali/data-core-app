@@ -1,0 +1,458 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 8-A — Topology Intelligence & Structural Analytics Foundations
+FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: workflow-phase-8a-report.txt
+Phase: P8-A
+Status: COMPLETE
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — TOPOLOGY GRAPH ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/topology.ts
+
+The topology engine is a pure static module with zero runtime dependencies.
+It sits entirely outside the execution stack and never writes to the DB,
+never triggers the scheduler, and never invokes the executor.
+
+Dependency graph:
+  topology.ts → logger.ts   (structured observability events only)
+  topology.ts → (nothing else)
+
+WorkflowTopologyGraph shape:
+  {
+    nodes             TopologyNode[]        all steps as graph nodes
+    edges             TopologyEdge[]        directed labelled edges
+    entryPoints       number[]              stepIndex(es) of entry nodes
+    terminalNodes     number[]              reachable nodes with no outgoing edges
+    branchingNodes    number[]              condition steps with ≥2 distinct targets
+    approvalNodes     number[]              all approval-type steps
+    delayNodes        number[]              all delay-type steps
+    unreachableNodes  number[]              not reachable from entry by any path
+    isolatedSubgraphs number[][]           connected components disconnected from main
+  }
+
+TopologyNode shape:
+  { stepIndex, stepName, stepType, arrayPos }
+
+TopologyEdge shape:
+  { fromIndex, toIndex, label: "linear" | "true_branch" | "false_branch" }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — STRUCTURAL EXTRACTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: extractWorkflowTopology(rawSteps: unknown[]) → WorkflowTopologyGraph
+
+Internal pipeline (all pure, no async):
+
+  Step 1 — parseSteps()
+    Pre-pass: builds stepIndex → arrayPos map for routing resolution.
+    For each element: extracts index, type, name, config.
+    For condition steps: resolves onTrueStepIndex / onFalseStepIndex to array
+    positions — only valid forward references (same semantics as validation engine).
+
+  Step 2 — buildSuccessorMap()
+    For condition step:
+      trueTarget  = onTrueArrayPos  ?? linearNext
+      falseTarget = onFalseArrayPos ?? linearNext
+      successors  = deduplicated [trueTarget, falseTarget] (filtered to valid positions)
+    For non-condition step:
+      successors  = [linearNext] if < length, else []
+
+  Step 3 — buildEdges()
+    Condition step, two distinct targets:
+      true_branch edge  → trueTarget
+      false_branch edge → falseTarget
+    Condition step, both targets same: single true_branch edge only.
+    Non-condition step: linear edge → linearNext (if exists).
+
+  Step 4 — bfsReachable(pos=0, succs)
+    Standard BFS. Returns Set<number> of reachable array positions.
+
+  Step 5 — classify nodes
+    terminalNodes:    reachable AND successors.length === 0
+    branchingNodes:   condition type AND distinct successors ≥ 2
+    approvalNodes:    type === "approval"
+    delayNodes:       type === "delay"
+    unreachableNodes: not in reachable set
+
+  Step 6 — findIsolatedSubgraphs()
+    Builds undirected adjacency (both edge directions).
+    BFS/DFS to find all connected components.
+    Main component = the one containing arrayPos=0.
+    All other components = isolated subgraphs.
+
+Routing model faithfulness:
+  Matches the validation engine's parseSteps + buildSuccessors semantics exactly.
+  Only forward references accepted. Self-loops and backward jumps treated as
+  "no routing target" (fallback to linear advance).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — COMPLEXITY ANALYTICS FORMULAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: computeTopologyAnalytics(graph, rawSteps) → TopologyAnalytics
+
+All metrics use topological sort (Kahn's BFS) + DP. Deterministic on identical input.
+
+  nodeCount
+    parsed.length
+
+  edgeCount
+    edges.length
+
+  maxBranchDepth   [consecutive condition chain depth]
+    DP in topological order:
+      dp[pos] = if type === "condition":
+                  1 + max(dp[pred] for pred where pred.type === "condition")
+                  minimum value: 1 (condition step with no condition predecessors)
+                else: 0
+    Result: max(dp.values())
+    Invariant: resets to 0 at any non-condition step.
+
+  longestPathEstimate   [max nodes on any entry→terminal path]
+    DP in REVERSE topological order:
+      terminal (no successors): dp[pos] = 1
+      else:                     dp[pos] = 1 + max(dp[succ])
+    Result: dp[0]
+
+  terminalPathCount   [distinct execution paths, capped at 1024]
+    DP in REVERSE topological order:
+      terminal: dp[pos] = 1
+      else:     dp[pos] = sum(dp[succ]), cap each accumulation at 1024
+    Result: dp[0]
+    Cap prevents integer overflow on deep branching graphs.
+
+  branchingFactor   [avg outgoing edges per branching node]
+    If branchingNodes.length > 0:
+      sum of distinct successor counts / branchingNodes.length
+    If no branching nodes:
+      1.0 (linear flow)
+    If no nodes:
+      0.0
+
+  approvalDensity   = approvalNodes.length / nodeCount   (0 if nodeCount=0)
+  delayDensity      = delayNodes.length / nodeCount       (0 if nodeCount=0)
+
+  unreachableCount         = unreachableNodes.length
+  isolatedSubgraphCount    = isolatedSubgraphs.length
+
+  conditionallyExecutedCount   [reachable but not on all paths]
+    For each condition step with ≥2 distinct branches B1, B2:
+      reach1 = BFS from B1
+      reach2 = BFS from B2
+      conditionally executed += (reach1 - reach2) ∪ (reach2 - reach1)
+    Result: set.size (deduplication preserves correctness across multiple conditions)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — DEAD STRUCTURE DETECTION BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Two categories of dead structure are detected, each by a different algorithm:
+
+A) Unreachable nodes
+   Definition: steps not reachable from arrayPos=0 by any directed path.
+   Algorithm: BFS from pos=0 → any step not in the visited set.
+   Cause: condition step where both branches skip the same set of intermediate steps,
+          and those steps have no other incoming edges.
+   Reported in: graph.unreachableNodes, analytics.unreachableCount
+   Risk: triggers TOPO-DEAD-MOD (1–2 steps) or TOPO-DEAD-HIGH (3+ steps)
+   Observability: workflow_dead_structure_detected event
+
+B) Isolated subgraphs
+   Definition: connected components in the UNDIRECTED graph that have no
+               undirected path to the main component (the one containing pos=0).
+   Algorithm: undirected BFS → find all components → exclude main component.
+   Cause: theoretically possible when steps have no edges connecting them to
+          the main flow even in the undirected sense.
+   Reported in: graph.isolatedSubgraphs, analytics.isolatedSubgraphCount
+   Risk: triggers TOPO-ISOLATED (high) if count >= 1
+   Observability: workflow_dead_structure_detected event
+
+Structural note:
+   In the current routing model (consecutive array positions with linear advance),
+   purely isolated subgraphs are rare because undirected connectivity is preserved
+   by linear advance edges. Unreachable nodes (in directed sense) are the more
+   common dead-structure case.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — RISK ASSESSMENT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: assessTopologyRisk(graph, analytics) → TopologyRiskAssessment
+
+Output shape:
+  { level: "low"|"moderate"|"high"|"critical", reasons, dominantDrivers }
+
+Thresholds (all tunable constants at top of topology.ts):
+
+  RISK_HIGH_NODE_COUNT          = 20    → TOPO-SIZE-HIGH
+  RISK_CRITICAL_NODE_COUNT      = 40    → TOPO-SIZE-CRITICAL
+  RISK_HIGH_BRANCH_DEPTH        = 4     → TOPO-NEST-HIGH
+  RISK_CRITICAL_BRANCH_DEPTH    = 7     → TOPO-NEST-CRITICAL
+  RISK_HIGH_BRANCHING_PATHS     = 8     → TOPO-PATHS-HIGH
+  RISK_CRITICAL_BRANCHING_PATHS = 32    → TOPO-PATHS-CRITICAL
+  RISK_HIGH_APPROVAL_DENSITY    = 0.5   → TOPO-APPROVAL-OVERLOAD
+  RISK_HIGH_DELAY_DENSITY       = 0.4   → TOPO-DELAY-HIGH
+  MAX_PATH_COUNT_CAP            = 1024
+
+Risk codes emitted:
+  TOPO-SIZE-HIGH / TOPO-SIZE-CRITICAL      excessive step count
+  TOPO-NEST-MOD  / TOPO-NEST-HIGH / TOPO-NEST-CRITICAL   condition chain depth
+  TOPO-PATHS-MOD / TOPO-PATHS-HIGH / TOPO-PATHS-CRITICAL terminal path explosion
+  TOPO-APPROVAL-MOD / TOPO-APPROVAL-OVERLOAD              approval density
+  TOPO-DELAY-MOD / TOPO-DELAY-HIGH                        delay density
+  TOPO-DEAD-MOD / TOPO-DEAD-HIGH                          unreachable steps
+  TOPO-ISOLATED                                            isolated subgraphs
+  TOPO-FANOUT-MOD                                         avg branching factor > 2
+
+Overall level: max(all individual reason levels)
+dominantDrivers: reason codes at the overall maximum level (moderate or above only)
+
+Rule: "low" is the default when zero risk reasons are triggered.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+API endpoint:
+  GET /workflows/:id/topology
+  File: artifacts/api-server/src/routes/workflows.ts
+  Registered BEFORE GET /workflows/:id to prevent "topology" matching as :id param.
+  Permission: requireAuth + requirePermission("workflow.view" | "workflows.<id>.view")
+  Returns WorkflowTopologyResponse:
+    { workflowId, workflowName, stepCount, graph, analytics, risk }
+
+OpenAPI spec:
+  File: lib/api-spec/openapi.yaml
+  New endpoint: /workflows/{id}/topology (GET, operationId: getWorkflowTopology)
+  New schemas (7 total):
+    WorkflowTopologyNode
+    WorkflowTopologyEdge
+    WorkflowTopologyGraph
+    WorkflowTopologyAnalytics
+    WorkflowTopologyRiskReason
+    WorkflowTopologyRiskAssessment
+    WorkflowTopologyResponse
+
+Generated artifacts (after codegen):
+  lib/api-client-react/src/generated/   → getWorkflowTopology React Query hook
+  lib/api-zod/src/generated/api.ts       → Zod validation schemas for all 7 types
+
+Integration points (ready for future phases):
+  - topology data can be surfaced in governance dashboards alongside P7-E history charts
+  - risk.level can be used to annotate workflow list views with complexity badges
+  - unreachableNodes can be cross-referenced with validation warnings (WG-TOPO-01)
+  - analytics.terminalPathCount feeds into simulation complexity estimates
+  - analytics.conditionallyExecutedCount aligns with WG-DEP-01 dependency warnings
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All four events emitted via logger.info (pino structured JSON) inside analyzeTopology().
+No DB writes. Fire-and-forget.
+
+A) workflow_topology_extracted
+   Emitted: always, on every analyzeTopology() call
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            nodeCount, edgeCount, branchDepth, unreachableCount, riskLevel
+
+B) workflow_topology_risk_assessed
+   Emitted: when risk.level >= "moderate"
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            riskLevel, branchDepth, nodeCount, terminalPaths, dominantDrivers
+
+C) workflow_dead_structure_detected
+   Emitted: when unreachableCount > 0 OR isolatedSubgraphCount > 0
+   Fields:  action, workflowId, workspaceId,
+            unreachableCount, isolatedSubgraphCount, nodeCount, riskLevel
+
+D) workflow_branching_pressure_detected
+   Emitted: when maxBranchDepth >= 4 OR terminalPathCount >= 8
+   Fields:  action, workflowId, workspaceId,
+            branchDepth, terminalPathCount, branchingFactor, riskLevel
+
+Route-level event (additional):
+   workflow_topology_requested — emitted via req.log.info in the route handler.
+   Fields: event, workflowId, workspaceId, nodeCount, riskLevel, actorId
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/topology.test.ts
+
+All 45 tests pass. Full suite: 1136 passed (19 test files).
+
+Test coverage by group:
+
+  T1 — Empty workflow (3 tests)
+    ✓ produces empty graph with all arrays empty
+    ✓ produces zero analytics for empty workflow
+    ✓ assesses empty workflow as low risk
+
+  T2 — Linear workflow / no conditions (5 tests)
+    ✓ has 4 nodes and 3 linear edges
+    ✓ entry=[0], terminal=[3], no branching/unreachable/isolated
+    ✓ classifies approval and delay nodes correctly
+    ✓ analytics: maxBranchDepth=0, longestPathEstimate=4, terminalPathCount=1
+    ✓ approvalDensity=0.25, delayDensity=0.25
+
+  T3 — Condition step with explicit true/false routing (6 tests)
+    ✓ produces true_branch and false_branch edges
+    ✓ condition step appears in branchingNodes
+    ✓ terminalPathCount >= 2 due to branching
+    ✓ maxBranchDepth = 1
+    ✓ branchingFactor = 2
+    ✓ conditionallyExecutedCount > 0
+
+  T4 — Unreachable step detection (3 tests)
+    ✓ unreachable step in unreachableNodes
+    ✓ unreachableCount = 1 in analytics
+    ✓ risk level >= moderate (TOPO-DEAD-* code present)
+
+  T5 — Isolated subgraph detection (3 tests)
+    ✓ well-formed linear workflow: no isolated subgraphs
+    ✓ branching with convergence: no isolated subgraphs
+    ✓ skipped middle section: unreachable but NOT isolated (undirected still connected)
+
+  T6 — maxBranchDepth consecutive chain counting (5 tests)
+    ✓ no conditions → depth = 0
+    ✓ single condition → depth = 1
+    ✓ two consecutive conditions → depth = 2
+    ✓ three consecutive conditions → depth = 3
+    ✓ cond → notif → cond → depth = 1 (reset by non-condition step)
+
+  T7 — longestPathEstimate (4 tests)
+    ✓ single step → 1
+    ✓ 3-step linear → 3
+    ✓ branching: longer branch wins (3 not 2)
+    ✓ 5-step linear → 5
+
+  T8 — terminalPathCount (4 tests)
+    ✓ linear → 1 path
+    ✓ single condition with 2 distinct branches → 2 paths
+    ✓ two sequential conditions → ≥2 paths
+    ✓ 11 consecutive conditions → capped at 1024 (theoretical 2^11 = 2048)
+
+  T9 — Risk assessment thresholds (7 tests)
+    ✓ small linear workflow → low
+    ✓ single unreachable step → moderate or above
+    ✓ 22-step workflow → high (TOPO-SIZE-HIGH present)
+    ✓ 42-step workflow → critical (TOPO-SIZE-CRITICAL present)
+    ✓ 50% approval density → moderate or above (TOPO-APPROVAL-* present)
+    ✓ dominantDrivers non-empty for high/critical
+    ✓ depth=4 consecutive conditions → high (TOPO-NEST-HIGH present)
+
+  T10 — analyzeTopology full pipeline (5 tests)
+    ✓ linear workflow: correct counts and low risk
+    ✓ branching workflow: branchingNodes, terminalPathCount, maxBranchDepth
+    ✓ empty steps: no throw, low risk
+    ✓ non-object entries in steps array: no throw (defensive parsing)
+    ✓ result shape: all required keys present on graph, analytics, risk
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — REMAINING TOPOLOGY INTELLIGENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following are intentionally deferred and NOT part of P8-A:
+
+A) Graph visualization UI
+   No visual rendering of the topology graph. The API returns the raw graph
+   data structure — rendering is left to a future frontend phase.
+
+B) Cross-workflow topology comparison
+   No diffing between two workflow versions' topologies. Useful for change
+   auditing but requires historical version fetching logic.
+
+C) Dynamic reachability (runtime-aware)
+   The current engine is purely structural. It does not account for runtime
+   conditions such as field values, user roles, or external data that would
+   affect which branches are actually taken in practice.
+
+D) Topology-based activation gating
+   Currently topology analysis is informational only. A future phase could
+   block activation of critical-risk workflows or require admin override.
+
+E) Topology trends over versions
+   No tracking of how topology metrics change across workflow versions.
+   A future phase could store topology snapshots per version in governance_snapshots.
+
+F) Multi-step condition chain merging (convergence detection)
+   The current model detects which steps are conditionally executed, but does
+   not identify explicit convergence points (where branches re-merge). A future
+   phase could mark convergence nodes explicitly.
+
+G) Circular reference detection in malformed inputs
+   The validator rejects backward/self-loop references before topology runs,
+   but topology.ts does not independently detect cycles. Defensive cycle
+   detection (DFS visited-stack) could be added for belt-and-suspenders safety.
+
+H) Weighted path cost estimation
+   longestPathEstimate counts steps, not wall-clock time. A future phase could
+   combine with delay step config to estimate maximum calendar duration.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before: P8-B — Advanced Workflow Analytics
+
+The following conditions are met:
+
+  ✓ Pure topology engine in place (topology.ts, zero DB deps)
+  ✓ Deterministic DP algorithms for all 11 structural metrics
+  ✓ Risk classification with 10+ named reason codes
+  ✓ 4 structured observability events wired and emitting
+  ✓ OpenAPI contract published (7 schemas, 1 endpoint)
+  ✓ React Query hook generated (getWorkflowTopology)
+  ✓ Zod validation schemas generated for all topology types
+  ✓ 45 pure unit tests, all passing
+  ✓ Full API server test suite: 1136 tests passing (0 failures)
+  ✓ TypeScript: clean (zero errors in api-server)
+  ✓ Endpoint live and workspace-scoped
+
+Ready for:
+  P8-B — could build on topology data to:
+    - add topology summary to workflow list/detail API responses
+    - surface risk badges in the frontend workflow list
+    - integrate with governance snapshot scheduler to capture topology per snapshot
+    - add topology diff between workflow versions
+    - use terminalPathCount to calibrate simulation depth budgets
+
+Blocking items before P8-B: none.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CREATED / MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEW:
+  artifacts/api-server/src/lib/workflows/topology.ts              (topology engine)
+  artifacts/api-server/src/lib/workflows/__tests__/topology.test.ts (45 tests)
+  workflow-phase-8a-report.txt                                     (this file)
+
+MODIFIED:
+  lib/api-spec/openapi.yaml                  (+27 endpoint lines, +130 schema lines)
+  artifacts/api-server/src/routes/workflows.ts   (+1 import, +65 route handler lines)
+
+AUTO-GENERATED (by codegen):
+  lib/api-client-react/src/generated/         (getWorkflowTopology hook)
+  lib/api-zod/src/generated/api.ts            (topology Zod schemas)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT — WORKFLOW PHASE 8-A
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

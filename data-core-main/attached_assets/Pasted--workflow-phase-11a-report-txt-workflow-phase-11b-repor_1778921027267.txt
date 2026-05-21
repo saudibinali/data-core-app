@@ -1,0 +1,381 @@
+راجع:
+- workflow-phase-11a-report.txt
+- workflow-phase-11b-report.txt
+- workflow-phase-11c-report.txt
+- workflow-phase-11d-report.txt
+- workflow-phase-11e-report.txt
+
+خصوصًا:
+- ImmutableAuditChain
+- GovernanceViolation
+- GovernanceWorkflowAction
+- GovernanceAnalyticsProfile
+- GovernanceTopologyProfile
+- GovernanceBoundarySummary
+- GovernanceReadinessProfile
+- evidenceReferences
+- forensic timeline reconstruction
+- retention classifications
+- append-only guarantees
+- read-only analytics boundaries
+- no-enforcement guarantees
+
+ثم نفّذ فقط:
+P11-F — Governance Evidence Packaging & Audit Export Readiness Foundations
+
+ولا تنفّذ:
+- external regulator integrations
+- automatic regulator submission
+- legal automation
+- AI compliance summaries
+- automatic disciplinary workflows
+- policy auto-enforcement
+- blockchain/export notarization
+
+عنوان المهمة:
+WORKFLOW PHASE 11-F — Governance Evidence Packaging & Audit Export Readiness Foundations
+
+المهمة الحالية:
+تحويل:
+governance intelligence architecture
+
+إلى:
+audit-ready evidence packaging and controlled export preparation layer
+
+الهدف:
+تمكين:
+- governance evidence packaging
+- audit bundle preparation
+- forensic evidence export readiness
+- compliance review packet generation
+- governance snapshot serialization
+- controlled evidence access semantics
+
+بطريقة:
+deterministic read-only evidence packaging layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EVIDENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Remaining Governance Gaps"
+
+خصوصًا:
+- no historical topology snapshots
+- no topology diff / change detection
+- no frontend governance intelligence dashboard
+- no structured warning codes
+- no audit-ready export package
+- evidenceReferences موجودة لكنها غير مجمعة كباقة مراجعة
+
+حدّد:
+- أين الأدلة موزعة بين audit chains / violations / workflows / analytics / topology
+- أين auditor يحتاج bundle واحد بدل عدة endpoints
+- أين forensic reconstruction يحتاج package قابل للمراجعة
+- أين export serialization غير موحد
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE EVIDENCE PACKAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceEvidencePackage
+
+ليحتوي:
+- packageId
+- packageScope
+- workspaceId
+- entityId
+- includedSections
+- auditChainSummary
+- violationSummary
+- workflowSummary
+- analyticsSummary
+- topologySummary
+- readinessSummary
+- evidenceReferences
+- generatedBy
+- generatedAt
+- packageIntegrityHash
+
+مع:
+read-only deterministic packaging semantics.
+
+مهم:
+packageIntegrityHash يحسب hash للباقي فقط لإثبات سلامة الباقة،
+ولا يعني blockchain ولا notarization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — PACKAGE SCOPE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceEvidencePackageScope
+
+يحتوي:
+- platform
+- workspace
+- entity
+- violation
+- workflow
+- readiness
+
+مع:
+strict deterministic scope filtering.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EVIDENCE SECTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceEvidenceSection
+
+يحتوي:
+- audit_integrity
+- policy_violations
+- workflow_lifecycle
+- governance_analytics
+- topology_readiness
+- forensic_timeline
+- boundary_summary
+
+بحيث يمكن تضمين sections حسب scope.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — EVIDENCE PACKAGING ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+buildGovernanceEvidencePackage()
+
+بحيث:
+- يجمع summaries من P11-A إلى P11-E
+- لا يعدل أي سجل
+- لا ينشئ violation جديد
+- لا يغير workflow status
+- لا يعيد تقييم policies إلا لو كان read-only ومطلوب
+- يربط evidenceReferences بشكل deterministic
+- يحسب packageIntegrityHash
+- يدعم stable JSON serialization
+
+لكن:
+بدون PDF generation داخل النظام الآن.
+الهدف readiness layer فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PACKAGE INTEGRITY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernancePackageIntegrityStatus
+
+يحتوي:
+- verified
+- warning
+- incomplete
+- compromised
+
+التصنيف يعتمد على:
+- audit integrity status
+- missing evidence references
+- incomplete sections
+- boundary leaks
+- serialization mismatch
+
+مع:
+fail-closed classification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TOPOLOGY SNAPSHOT READINESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+بدون إنشاء جدول جديد الآن، صمّم:
+GovernanceTopologySnapshotPayload
+
+ليحتوي:
+- snapshotId
+- topology
+- boundarySummary
+- readinessProfile
+- generatedAt
+- snapshotHash
+
+لكن:
+لا تحفظه في DB.
+فقط payload جاهز للحفظ مستقبلًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TOPOLOGY DIFF MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+diffGovernanceTopologySnapshots(prev, next)
+
+ليكتشف:
+- boundaryStatus changes
+- coverageScore changes
+- readinessStatus changes
+- layer additions/removals
+- observability coverage changes
+- critical gap changes
+
+لكن:
+بدون persistent snapshots الآن.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — STRUCTURED WARNING CODES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف warning codes مثل:
+- P11A_NO_RUNTIME_DATA
+- P11C_NO_RUNTIME_DATA
+- GOVERNANCE_BOUNDARY_LEAK
+- GOVERNANCE_READINESS_PARTIAL
+- GOVERNANCE_CRITICAL_UNRESOLVED
+- GOVERNANCE_OBSERVABILITY_INCOMPLETE
+- EVIDENCE_REFERENCE_MISSING
+- EVIDENCE_SECTION_INCOMPLETE
+
+بحيث:
+- لا تكسر النصوص الحالية
+- تضيف code بجانب message
+- تساعد الواجهة لاحقًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /platform/governance/evidence-packages
+GET /platform/governance/evidence-packages/readiness
+GET /platform/governance/topology/snapshot
+POST /platform/governance/topology/diff
+
+بحيث:
+- super-admin only
+- read-only
+- deterministic ordering
+- forensic-safe serialization
+- no external export submission
+
+ملاحظة:
+POST /diff مسموح لأنه يقارن payloads مرسلة ولا يكتب DB.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_evidence_package_generated
+
+B)
+governance_package_integrity_verified
+
+C)
+governance_topology_snapshot_built
+
+D)
+governance_topology_diff_computed
+
+كلها تحتوي:
+- packageId
+- packageScope
+- workspaceId
+- integrityStatus
+- readinessStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Evidence packaging layer MUST:
+- remain READ-ONLY
+- never submit externally
+- never mutate audit/governance/workflow records
+- never auto-generate legal conclusions
+- never auto-enforce policies
+- fail closed on missing evidence
+
+أي:
+audit export readiness فقط، بدون تصدير خارجي فعلي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+evidence package generation deterministic
+
+T2:
+package scope filtering stable
+
+T3:
+included sections deterministic
+
+T4:
+packageIntegrityHash stable
+
+T5:
+missing evidence references classified fail-closed
+
+T6:
+topology snapshot payload deterministic
+
+T7:
+topology diff detects boundary/readiness changes
+
+T8:
+structured warning codes preserved
+
+T9:
+super-admin enforcement valid
+
+T10:
+evidence packaging remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- PDF generation inside backend
+- external regulator submission
+- legal case automation
+- AI compliance narrative generation
+- blockchain notarization
+- automatic policy enforcement
+- disciplinary workflows
+
+خلك:
+minimal deterministic audit-ready evidence packaging infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-11f-report.txt
+
+ويحتوي:
+- governance evidence package architecture
+- package scope and section model
+- package integrity semantics
+- topology snapshot payload model
+- topology diff model
+- structured warning code additions
+- governance API integration points
+- observability additions
+- tests results
+- remaining governance export gaps
+- readiness assessment قبل final Phase 11 closure report

@@ -1,0 +1,272 @@
+راجع:
+- workflow-phase-9a-report.txt
+- workflow-phase-9b-report.txt
+- workflow-phase-9c-report.txt
+خصوصًا:
+- TenantGovernanceView
+- workload partitions
+- scheduler fairness semantics
+- noisy tenant detection
+- isolation health
+- governance observability
+
+ثم نفّذ فقط:
+P9-D — Platform Workload Control Plane Foundations
+
+ولا تنفّذ:
+- distributed orchestration
+- realtime streaming infra
+- autoscaling clusters
+- dynamic throttling
+- cross-region federation
+- autonomous mitigation
+
+عنوان المهمة:
+WORKFLOW PHASE 9-D — Platform Workload Control Plane & Super-Admin Operational Visibility Foundations
+
+المهمة الحالية:
+تحويل:
+workspace-scoped governance visibility
+
+إلى:
+platform-wide operational governance control plane
+
+الهدف:
+تمكين:
+- super-admin operational visibility
+- platform workload oversight
+- cross-workspace fairness monitoring
+- noisy-tenant oversight
+- scheduler health governance
+
+بطريقة:
+deterministic operational control-plane layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE SURFACES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- tenant governance APIs
+- workload partitions
+- isolation enforcement
+- comparative intelligence
+- governance signals
+- observability events
+
+حدّد:
+- أين platform-wide visibility ناقصة
+- أين scheduler health غير مرئي
+- أين super-admin oversight محدود
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN PLATFORM GOVERNANCE VIEW MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+PlatformGovernanceOverview
+
+ليحتوي:
+- totalWorkspaces
+- activePartitionCount
+- fairnessHealth
+- noisyTenantCount
+- schedulerPressureSummary
+- containmentDistribution
+- advisoryDistribution
+- topPressureWorkspaces
+
+مع:
+deterministic aggregation semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SUPER-ADMIN CONTROL PLANE APIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /platform/governance/overview
+GET /platform/governance/workloads
+GET /platform/governance/fairness
+GET /platform/governance/noisy-tenants
+
+بحيث:
+- super-admin only
+- audit-safe serialization
+- deterministic ordering
+- stable pagination semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FAIRNESS HEALTH AGGREGATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+PlatformFairnessHealth
+
+يحتوي:
+- healthy
+- stressed
+- degraded
+- critical
+
+اعتمد على:
+- containment distribution
+- saturated partitions
+- starvation-risk concentration
+- scheduler pressure density
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — NOISY TENANT OVERSIGHT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- execution monopolization
+- chronic backlog tenants
+- advisory storms
+- hotspot flood workspaces
+
+لكن:
+بدون automatic throttling.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PLATFORM GOVERNANCE SERIALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+تأكد:
+كل platform responses:
+- deterministic ordering
+- bounded payload size
+- stable timestamps
+- audit-safe formatting
+- no hidden internal fields
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+platform governance visibility
+
+داخل:
+- super-admin dashboards
+- operational consoles
+- scheduler oversight panels
+- governance operations center
+
+لكن:
+بدون orchestration actions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+platform_governance_overview_generated
+
+B)
+platform_fairness_health_evaluated
+
+C)
+platform_noisy_tenant_detected
+
+D)
+platform_scheduler_pressure_evaluated
+
+كلها تحتوي:
+- requestScopeId
+- totalWorkspaces
+- fairnessHealth
+- noisyTenantCount
+- containmentDistribution
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Platform control plane MUST:
+- remain READ-ONLY
+- never throttle tenants
+- never mutate scheduler behavior
+- never expose sensitive tenant internals
+- never bypass audit visibility
+
+أي:
+operational oversight فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+platform overview deterministic
+
+T2:
+fairness health classification stable
+
+T3:
+noisy tenant aggregation correct
+
+T4:
+containment distribution deterministic
+
+T5:
+top pressure workspaces ordered correctly
+
+T6:
+bounded payload serialization stable
+
+T7:
+super-admin access required
+
+T8:
+platform observability events scoped correctly
+
+T9:
+no scheduler mutation occurs
+
+T10:
+control plane remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- autoscaling orchestration
+- tenant throttling engines
+- realtime streaming dashboards
+- distributed control planes
+- autonomous scheduler balancing
+- cross-region federation
+
+خلك:
+minimal deterministic platform governance layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9d-report.txt
+
+ويحتوي:
+- platform governance architecture
+- fairness aggregation semantics
+- noisy tenant oversight model
+- scheduler pressure visibility model
+- platform serialization guarantees
+- governance integration points
+- observability additions
+- tests results
+- remaining control-plane gaps
+- readiness assessment قبل fairness orchestration phase

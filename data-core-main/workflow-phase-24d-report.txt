@@ -1,0 +1,141 @@
+================================================================================
+WORKFLOW PHASE 24-D — Inventory & Warehouse Canonical Architecture Foundation
+Generated: 2026-05-20
+Status: COMPLETE (design-only; no runtime implementation)
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P24-D delivers the canonical Inventory & Warehouse architecture foundation on top
+of the existing ERP core (procurement P24-A–C, finance, workflow, documents,
+reporting, governance). The codebase has NO inventory tables, routes, or UI today;
+procurement PO lines support ordered quantity only (no receiving fields).
+
+This phase produced eleven design documents defining twelve canonical models,
+warehouse and movement strategies, procurement and finance integration boundaries,
+policies, security, reporting, and a readiness matrix. Overall ERP inventory
+readiness is PARTIAL: platform foundations are GO; domain runtime is BLOCKED
+until P25-A.
+
+No inventory posting engine, barcode scanning, MRP, AP, accounting posting, or
+destructive migrations were introduced.
+
+FILES CREATED
+-------------
+1.  p24-d-inventory-audit.md
+2.  p24-d-canonical-inventory-models.md
+3.  p24-d-warehouse-strategy.md
+4.  p24-d-inventory-movement-strategy.md
+5.  p24-d-procurement-inventory-strategy.md
+6.  p24-d-inventory-finance-strategy.md
+7.  p24-d-inventory-policy-strategy.md
+8.  p24-d-inventory-security-governance.md
+9.  p24-d-inventory-reporting-strategy.md
+10. p24-d-inventory-readiness-decision.md
+11. workflow-phase-24d-report.txt (this file)
+
+INVENTORY ARCHITECTURE SUMMARY
+-------------------------------
+- Greenfield domain: no inventory_* schema or APIs in repo.
+- Twelve canonical models (design only): warehouses, locations, items, variants,
+  stock balances (derived), stock movements (immutable ledger), receipts + lines,
+  reservations, adjustments, count sessions + items, inventory policies.
+- Principles: workspaceId on all rows, numeric(19,4) qty, policy snapshots,
+  idempotency keys, audit via activity_logs/events, finance readiness fields
+  without GL posting.
+- Item master required to move from free-text PO lines to receivable stock.
+
+WAREHOUSE STRATEGY
+------------------
+- Multi-warehouse per workspace; types: standard, virtual, project_site,
+  consignment.
+- Parent/child warehouse hierarchy; nested locations (bins, quarantine, damaged,
+  receiving, shipping).
+- Transfers: intra- and inter-warehouse with optional in-transit virtual warehouse;
+  approval above thresholds.
+- Quarantine: on-hand but not available; damaged location for write-down path.
+- Permissions: inventory.warehouse.* ; module dependency inventory → procurement + hr.
+
+MOVEMENT STRATEGY
+-----------------
+- inventory_stock_movements = source of truth; balances updated transactionally.
+- Types: receipt, issue, transfer_out/in, adjustment, reservation_hold/release,
+  count_variance.
+- Immutability: no DELETE/UPDATE of posted rows; void via compensating movements.
+- Corrections linked via correctionOfMovementId; receipt void reverses movements.
+- Reservations decrease available qty; optional auto-reserve on PO approval (policy).
+
+PROCUREMENT INTEGRATION SUMMARY
+-------------------------------
+- Receiving gated on PO statuses: approved, sent, acknowledged.
+- inventory_receipts linked to procurement_purchase_orders and po_items.
+- Partial receiving: multiple receipts; cumulative quantityReceived on PO lines (P25-A).
+- Over-receive: block | warn | allow_with_approval via inventory policy.
+- inventoryReadinessStatus on receipt (READY/WARNING/BLOCKED) — no AP integration.
+- Vendor and document registry linkage for packing slips / GRN.
+
+FINANCE READINESS SUMMARY
+-------------------------
+- Store costCenterId, dimensionJson, unitCost on movements/receipts; no journals.
+- valuationReadinessStatus / glImpactReadiness mirrors procurement glReadinessStatus.
+- Valuation methods: standard, moving_average, fifo (fifo layers deferred).
+- finance_locks block adjustments/counts in closed periods (policy).
+- finance_account_mappings prepared for future inventory asset / COGS — config only.
+- Cost extract report for finance controllers — export gated, no posting.
+
+SECURITY / GOVERNANCE
+---------------------
+- inventory.* permission namespace (view, warehouse, receipt, issue, transfer,
+  adjustment, count, policy, export, confidential, break_glass).
+- Workspace isolation mandatory; optional warehouse-level role segregation.
+- Approval segregation via workflow + inventory_approval_links (P25-A).
+- Exports via generated_reports + export_jobs; platform governance unchanged.
+- Module key inventory depends on procurement and hr.
+
+REPORTING
+---------
+- Fifteen proposed inventory.* report keys registered against generated_reports
+  pattern (balance, movement ledger, receipt register, PO fulfillment, warehouse
+  summary, reservations, variance, valuation readiness, cost extract).
+- Ops center widgets aligned to same metrics (P25-C).
+
+READINESS DECISION (from p24-d-inventory-readiness-decision.md)
+---------------------------------------------------------------
+Warehouse architecture (design):     GO     | runtime: BLOCKED
+Inventory architecture (design):   GO     | runtime: BLOCKED
+Movement model (design):             GO     | runtime: BLOCKED
+Procurement integration:             PARTIAL (PO exists; no receive fields)
+Finance readiness (foundation):      GO     | posting: BLOCKED
+ERP inventory overall:               PARTIAL
+Gate to P25-A:                       GO (when explicitly requested)
+
+RISKS
+-----
+1. Free-text PO lines without itemId — receiving mapping friction until item master enforced.
+2. Balance/ledger drift if balances updated outside movement transaction.
+3. Dual approval paths (ticket vs workflow) — inventory must use workflow links only.
+4. Over-receive and negative stock policy mistakes could corrupt trust — default block/warn.
+5. Finance users expecting auto-GL on receipt — must communicate prepared-only scope.
+
+RECOMMENDED NEXT PHASE
+----------------------
+P25-A — Inventory Canonical DB & Warehouse Runtime Foundation
+
+Scope (expected):
+- Drizzle schema + migration for inventory canonical tables (non-destructive).
+- Module seed inventory with dependencies [procurement, hr].
+- Warehouse/location/item CRUD APIs and basic permissions.
+- quantityReceived / receivingStatus on procurement_po_items (additive columns).
+- NO full movement posting engine, NO barcode, NO GL posting.
+
+CONFIRMATION (P24-D constraints honored)
+----------------------------------------
+[x] No inventory posting engine
+[x] No barcode/mobile scanning
+[x] No manufacturing/MRP
+[x] No AP invoices
+[x] No accounting posting
+[x] No destructive migration
+[x] P25-A NOT started in this phase
+
+END OF REPORT

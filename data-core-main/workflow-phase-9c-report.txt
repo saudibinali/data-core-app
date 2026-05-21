@@ -1,0 +1,251 @@
+WORKFLOW PHASE 9-C REPORT
+Tenant Governance APIs & Operational Visibility Foundations
+===========================================================
+Date:    2026-05-15
+Status:  COMPLETE
+Tests:   1547 passed (27 files) — 0 failures — net +49 assertions over P9-B baseline
+
+────────────────────────────────────────────────────────────────────────────────
+OBJECTIVE
+────────────────────────────────────────────────────────────────────────────────
+
+P9-C delivers the governance API layer that surfaces the P9-A isolation engine
+and P9-B workload partition engine as structured, workspace-scoped REST endpoints.
+The phase introduces a new pure engine (tenant-governance.ts) that composes all
+P8/P9 sub-results into a single TenantGovernanceView model, and wires it into
+four new Express routes.
+
+────────────────────────────────────────────────────────────────────────────────
+ENGINE: artifacts/api-server/src/lib/workflows/tenant-governance.ts
+────────────────────────────────────────────────────────────────────────────────
+
+New file (~430 lines). Pure, deterministic, advisory-only.
+No DB, no async, no cross-tenant leakage.
+
+EXPORTS
+  Types
+    IsolationHealthStatus       "healthy" | "warning" | "elevated" | "critical"
+    FairnessLevel               "fair" | "reduced" | "constrained" | "at_minimum"
+    HotspotLevel                "none" | "low" | "moderate" | "high" | "critical"
+    StarvationRisk              "none" | "low" | "moderate" | "high"
+    SchedulerFairnessStatus     advisory scheduler weight + noisy-tenant summary
+    PartitionPressureSummary    flattened P9-B partition for embedding
+    HotspotSummary              P8-E concentration → classified hotspot level
+    AdvisorySummary             P8-F signals → severity distribution
+    TenantGovernanceView        full composed view (workspaceId-scoped)
+    TenantGovernanceViewInput   input bundle for buildTenantGovernanceView()
+
+  Functions
+    buildTenantGovernanceView(input, context?)
+      Scope guard: partition.workspaceId ≠ isoContext.workspaceId → throws
+      TenantIsolationViolation(CROSS_WORKSPACE_ACCESS).
+      Composes 5 sub-models → emits tenant_governance_view_generated event.
+
+    computePartitionPressureSummary(partition)
+      Pure projection from P9-B TenantWorkloadPartition.
+      Copies pressureComponents (no aliasing).
+
+    computeSchedulerFairnessStatus(partition)
+      schedulerWeight → fairnessLevel (1.00/0.75/0.50/0.25 → fair/reduced/constrained/at_minimum).
+      containmentStatus → starvationRisk (contained→none / at_risk→low / pressured→moderate / saturated→high).
+      noisyBehaviorCodes array is copied (not aliased).
+
+    classifyIsolationHealth(riskLevel)
+      Total mapping of P9-A TenantRiskLevel → IsolationHealthStatus:
+      low→healthy, moderate→warning, high→elevated, critical→critical.
+
+    computeHotspotSummary(hotspot?)
+      Absent input → safe zero defaults (hotspotLevel="none").
+      classifyHotspotLevel() takes max severity across two dimensions:
+        concentration (ratio ≥ 0.70→critical / ≥0.50→high / ≥0.30→moderate / ≥0.10→low)
+        urgency (count ≥ 5→critical / ≥3→high / ≥2→moderate / ≥1→low)
+
+    computeAdvisorySummary(signals?)
+      Absent input → informational defaults, zero counts.
+      Maps GovernanceAdvisoryLevel → AdvisoryPressureLevel:
+        critical→critical / urgent→high / elevated→medium / advisory→low / informational→none
+      Counts critical and high severity signals from the signals array.
+
+    deriveOperationalPriority(hotspot?, supplied?, signals?)
+      Explicit supplied value always wins.
+      Fallback: hotspot urgentOrCriticalCount ≥ 3 → critical, ≥ 1 → urgent, dominant → elevated.
+      Fallback: governance advisory level → OperationalPriority mapping.
+      Final fallback: "informational".
+
+    emitPartitionOverviewEvent(...)    — for workload-partition route
+    emitFairnessVisibilityEvent(...)   — for fairness-status route
+    emitIsolationHealthEvent(...)      — for isolation-health route
+
+OBSERVABILITY EVENTS (4 total)
+  tenant_governance_view_generated    — emitted by buildTenantGovernanceView()
+  tenant_partition_overview_requested — emitted by GET /governance/workload-partition
+  tenant_fairness_visibility_accessed — emitted by GET /governance/fairness-status
+  tenant_isolation_health_evaluated   — emitted by GET /governance/isolation-health
+
+  All events carry: workspaceId, requestScopeId, partitionPressureScore,
+  isolationHealth, fairnessStatus, containmentStatus, action.
+
+SAFETY INVARIANTS
+  READ-ONLY        never mutates input, DB, or scheduler state
+  TENANT-SCOPED    scope guard fails closed on workspaceId mismatch
+  DETERMINISTIC    same inputs → same output (timestamps via context injection)
+  NO CROSS-TENANT  output only contains own workspace data
+  JSON-SAFE        all fields are plain JSON-serializable (no class instances)
+  FAIL-CLOSED      scope ambiguity throws TenantIsolationViolation
+
+────────────────────────────────────────────────────────────────────────────────
+ROUTES: artifacts/api-server/src/routes/workflows.ts
+────────────────────────────────────────────────────────────────────────────────
+
+Four new routes registered AFTER GET /workflows/governance/signals (P8-F)
+and BEFORE GET /workflows/executions/failed.
+
+GET /workflows/governance/tenant-overview
+  Auth:      requireAuth + requirePermission("workflow.view")
+  DB:        COUNT running/waiting_delay executions; SAMPLE last 10 execution IDs
+  Engines:   buildTenantIsolationContext() → evaluateWorkloadContainment()
+             → assessTenantIsolationRisk() → buildTenantGovernanceView()
+  Response:  full TenantGovernanceView (JSON)
+  Event:     tenant_governance_view_generated (from engine)
+
+GET /workflows/governance/workload-partition
+  Auth:      requireAuth + requirePermission("workflow.view")
+  DB:        COUNT running/waiting_delay executions
+  Engines:   buildTenantIsolationContext() → evaluateWorkloadContainment()
+             → computePartitionPressureSummary() + computeSchedulerFairnessStatus()
+  Response:  { workspaceId, partitionId, containmentStatus, pressureSummary, fairnessStatus, evaluatedAt }
+  Event:     tenant_partition_overview_requested
+
+GET /workflows/governance/fairness-status
+  Auth:      requireAuth + requirePermission("workflow.view")
+  DB:        COUNT running/waiting_delay executions
+  Engines:   buildTenantIsolationContext() → evaluateWorkloadContainment()
+             → computeSchedulerFairnessStatus()
+  Response:  { workspaceId, fairnessStatus, containmentStatus, pressureTotal, evaluatedAt }
+  Event:     tenant_fairness_visibility_accessed
+
+GET /workflows/governance/isolation-health
+  Auth:      requireAuth + requirePermission("workflow.view")
+  DB:        SAMPLE last 20 execution IDs for boundary validation
+             COUNT running/waiting_delay executions (for partition/pressure event fields)
+  Engines:   buildTenantIsolationContext() → assessTenantIsolationRisk()
+             → classifyIsolationHealth()
+  Response:  { workspaceId, isolationHealth, overallRisk, per-dimension risks,
+               findings[], sampledExecutions, evaluatedAt }
+  Event:     tenant_isolation_health_evaluated
+
+All 4 routes:
+  • Fail closed: req.workspaceId check + TenantIsolationViolation → 403
+  • Advisory-only: no writes, no scheduler mutation
+  • Workspace-scoped: all DB queries filter by req.workspaceId
+
+────────────────────────────────────────────────────────────────────────────────
+TESTS: tenant-governance.test.ts — T1–T10 (49 assertions)
+────────────────────────────────────────────────────────────────────────────────
+
+T1  tenant overview isolated correctly (5 assertions)
+    workspaceId preserved, tenantBoundaryId derived, requestScopeId present,
+    generatedAt matches injected time, different workspace IDs → different boundaries
+
+T2  partition pressure visibility deterministic (5 assertions)
+    pressureTotal matches partition, activeCount/delayedCount preserved,
+    same input → same output, pressureComponents copied (mutation-safe)
+
+T3  fairness status serialization stable (5 assertions)
+    contained → fair/none, pressured → constrained/moderate,
+    saturated → at_minimum/high, noisyBehaviorCodes independence, JSON round-trip
+
+T4  isolation health classification deterministic (6 assertions)
+    all 4 risk levels mapped, clean workspace → healthy, stable across calls
+
+T5  cross-tenant visibility blocked (4 assertions)
+    partition.workspaceId ≠ isoContext.workspaceId → TenantIsolationViolation,
+    violation.code = CROSS_WORKSPACE_ACCESS, own workspace only in output,
+    independent views for different workspaces
+
+T6  audit serialization stable ordering (5 assertions)
+    JSON round-trip preserves all fields, no undefined values,
+    same inputs + same time → identical JSON, valid ISO 8601 generatedAt,
+    minimal view (no optionals) fully serializable
+
+T7  hotspot summaries tenant-safe (5 assertions)
+    absent hotspot → zero defaults, concentration ≥ 0.70 → critical,
+    urgency ≥ 5 → critical, max-of-two-dimensions, source fields preserved
+
+T8  advisory summaries isolated correctly (4 assertions)
+    absent signals → informational/none/zero, all 5 advisory levels mapped,
+    critical/high counts correct, governance view embeds advisory level
+
+T9  scope ambiguity fails closed (5 assertions)
+    workspaceId mismatch → TenantIsolationViolation (instanceof Error),
+    deriveOperationalPriority defaults to informational, explicit priority wins,
+    classifyIsolationHealth is total (covers all 4 inputs)
+
+T10 governance APIs remain read-only (5 assertions)
+    input not mutated by buildTenantGovernanceView, no async capability,
+    advisory summary does not mutate signals array, hotspot summary immutable,
+    full view with optionals is JSON-serializable
+
+────────────────────────────────────────────────────────────────────────────────
+IMPORTS ADDED TO workflows.ts
+────────────────────────────────────────────────────────────────────────────────
+
+  assessTenantIsolationRisk           — from tenant-isolation (P9-A)
+  evaluateWorkloadContainment         — from workload-partition (P9-B)
+  buildTenantGovernanceView           — from tenant-governance (P9-C)
+  computeSchedulerFairnessStatus      — from tenant-governance (P9-C)
+  computePartitionPressureSummary     — from tenant-governance (P9-C)
+  classifyIsolationHealth             — from tenant-governance (P9-C)
+  emitPartitionOverviewEvent          — from tenant-governance (P9-C)
+  emitFairnessVisibilityEvent         — from tenant-governance (P9-C)
+  emitIsolationHealthEvent            — from tenant-governance (P9-C)
+
+────────────────────────────────────────────────────────────────────────────────
+CUMULATIVE TEST COUNTS
+────────────────────────────────────────────────────────────────────────────────
+
+  Phase 9-A baseline:  1447 tests (25 files)
+  Phase 9-B additions:  +51 tests → 1498 tests (26 files)
+  Phase 9-C additions:  +49 tests → 1547 tests (27 files)
+  Total:               1547 tests, 27 files, 0 failures
+
+────────────────────────────────────────────────────────────────────────────────
+DESIGN DECISIONS
+────────────────────────────────────────────────────────────────────────────────
+
+1. Composite view as pure function
+   TenantGovernanceView is built entirely from pre-fetched engine outputs. The
+   route handler owns the DB queries; the engine is pure and testable in isolation.
+
+2. Optional P8-E/P8-F inputs
+   The governance view gracefully handles absent hotspot/signals data with safe
+   defaults. Lightweight routes (workload-partition, fairness-status) skip the
+   heavier P8-E/P8-F computations for lower latency.
+
+3. Route-level observability events (not engine-level) for endpoint-specific events
+   tenant_governance_view_generated is engine-emitted (all callers benefit).
+   The three endpoint-specific events (partition_overview, fairness_visibility,
+   isolation_health) are emitted from route handlers so they carry HTTP context.
+
+4. Scope guard location
+   The scope guard (partition.workspaceId ≠ isoContext.workspaceId) lives at the
+   entry of buildTenantGovernanceView, not at the route handler. This ensures any
+   caller — including future non-HTTP callers — gets the same safety guarantee.
+
+5. validateAnalyticsScope is throwing (not returning valid:false)
+   Consistent with P9-A patterns: scope violations throw TenantIsolationViolation,
+   not return a `valid: false` union. The P9-C tenant-overview route wraps the call
+   in try/catch and logs the violation without aborting the request, since execution
+   samples from the own workspace will never violate scope in practice.
+
+────────────────────────────────────────────────────────────────────────────────
+FILES MODIFIED / CREATED
+────────────────────────────────────────────────────────────────────────────────
+
+  CREATED  artifacts/api-server/src/lib/workflows/tenant-governance.ts          (~430 lines)
+  CREATED  artifacts/api-server/src/lib/workflows/__tests__/tenant-governance.test.ts (~600 lines)
+  MODIFIED artifacts/api-server/src/routes/workflows.ts
+           — 9 new imports (assessTenantIsolationRisk, evaluateWorkloadContainment,
+             7 from tenant-governance)
+           — 4 new route handlers (~280 lines added)
+  CREATED  workflow-phase-9c-report.txt (this file)

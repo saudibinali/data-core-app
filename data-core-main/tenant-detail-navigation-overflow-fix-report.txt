@@ -1,0 +1,56 @@
+================================================================================
+TENANT DETAIL NAVIGATION OVERFLOW FIX
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE
+
+================================================================================
+PROBLEM
+================================================================================
+Super Admin > Tenant Registry > expanded tenant row showed too many horizontal
+tabs. The bar used overflow-x-auto and the last tabs were hard or impossible to click.
+
+================================================================================
+SOLUTION
+================================================================================
+Split navigation into:
+  - Primary tabs (always visible): Overview, Lifecycle, Subscription, Commercial, Health
+  - More dropdown: Subscription & Entitlements, Entitlements, Usage, Renewal, Evaluation
+  - Future non-primary tabs auto-append to More via partitionVisibleConsoleTabs()
+
+================================================================================
+FILES CHANGED
+================================================================================
+  - lib/tenant-admin-console-config.ts
+      CONSOLE_PRIMARY_TABS, CONSOLE_MORE_TABS, partitionVisibleConsoleTabs(),
+      parseConsoleTabParam(), CONSOLE_TAB_CONTENT_TEST_IDS
+  - components/tenant/TenantConsoleTabBar.tsx (new)
+  - pages/super-admin-tenants.tsx
+      Uses TenantConsoleTabBar; tabpanel a11y; deep-link ?tab= for all ConsoleTab values
+
+================================================================================
+UX / A11Y
+================================================================================
+  - Radix DropdownMenu (keyboard navigable, closes on select)
+  - More trigger shows active state when current tab is in More group
+  - Active item highlighted inside dropdown
+  - collisionPadding + max-height on menu (viewport-safe)
+  - Tab bar: overflow-hidden + flex-wrap (no horizontal scroll trap)
+  - Dark mode: uses popover/accent theme tokens
+
+================================================================================
+BEHAVIOR PRESERVED
+================================================================================
+  - All tab content panels unchanged (same conditional renders)
+  - setActiveTab / effectiveTab / initialTab / deepLinkTab unchanged
+  - Permission filtering via visibleTabs unchanged
+
+================================================================================
+TESTS
+================================================================================
+  - lib/__tests__/tenant-console-tab-navigation.test.ts
+  - Updated partition expectations in tenant-admin-console-config (via new exports)
+
+Run: pnpm exec vitest run src/lib/__tests__/tenant-console-tab-navigation.test.ts
+
+================================================================================

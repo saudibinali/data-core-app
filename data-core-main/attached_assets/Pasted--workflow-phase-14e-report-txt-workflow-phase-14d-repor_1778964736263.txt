@@ -1,0 +1,618 @@
+راجع:
+- workflow-phase-14e-report.txt
+- workflow-phase-14d-report.txt
+- workflow-phase-14c-report.txt
+- workflow-phase-14b-report.txt
+- workflow-phase-14a-report.txt
+- workflow-phase-13j-final-report.txt
+
+خصوصًا:
+- platform roles & permissions
+- requirePlatformPermission
+- platform activity/audit pattern
+- metadata redaction
+- root protection policy
+- tenant registry model
+- workspace/tenant model
+- subscription metadata من Phase 13
+- Tenant Admin Console
+- Super Admin navigation/sidebar
+
+ثم نفّذ فقط:
+P15-A — Commercial Accounts & Billing Contacts
+
+ولا تنفّذ:
+- electronic payment
+- Stripe
+- checkout
+- card storage
+- auto charge
+- payment gateway
+- invoice generation PDF
+- tax/ZATCA/e-invoicing
+- contracts module الكامل
+- PO tracking الكامل
+- manual payment records
+- collection workflow
+- tenant-side billing visibility
+- HR modules
+- tenant users
+- customer users
+- SSO/MFA
+- password reset
+- user deletion
+- custom role builder
+- permission editor
+
+عنوان المهمة:
+WORKFLOW PHASE 15-A — Commercial Accounts & Billing Contacts
+
+المهمة الحالية:
+تأسيس الحساب التجاري وجهات تواصل الفوترة لكل مستأجر/Workspace داخل Platform Administration.
+
+الهدف:
+تمكين موظفي المنصة المصرح لهم من:
+- إنشاء أو تحديث Commercial Account للمستأجر
+- تحديد Billing Contacts
+- تحديد Account Manager
+- تحديد Finance Contact
+- تحديد Contract Owner
+- حفظ Commercial Notes
+- ربط هذه البيانات بالمستأجر الحالي
+- عرضها داخل Tenant Admin Console من جهة المنصة
+
+بدون:
+دفع إلكتروني، فواتير رسمية، عقود كاملة، PO، تحصيل، أو ظهور للعميل داخل Workspace.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TENANT / SUBSCRIPTION FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- tenant/workspace model
+- subscription fields من Phase 13
+- tenant admin console
+- tenant summary APIs
+- current permissions من Phase 14
+- activity logs
+- current route guards
+
+وثق في التقرير:
+- أين سيتم ربط commercial account
+- هل العلاقة one-to-one مع tenant/workspace
+- أي migration impact
+- أي limitations
+
+مهم:
+لا تكسر بيانات Phase 13.
+لا تغير subscription logic.
+لا تضف billing enforcement.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — COMMERCIAL ACCOUNT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف model/table مناسب:
+
+commercial_accounts — الحسابات التجارية
+
+Fields:
+- id — المعرّف
+- tenantId / workspaceId — المستأجر أو مساحة العمل
+- commercialAccountName — اسم الحساب التجاري
+- legalEntityName — الاسم القانوني للجهة
+- accountManagerUserId — مدير الحساب من مستخدمي المنصة
+- financeOwnerUserId — مسؤول المالية الداخلي
+- contractOwnerName — اسم مالك العقد لدى العميل
+- contractOwnerEmail — بريد مالك العقد لدى العميل
+- billingEmail — بريد الفوترة الرئيسي
+- billingPhone — رقم تواصل الفوترة
+- companyTaxNumberPlaceholder — رقم ضريبي مبدئي، اختياري
+- commercialNotes — ملاحظات تجارية
+- status — حالة الحساب التجاري
+- createdBy — من أنشأ السجل
+- updatedBy — آخر من عدّل السجل
+- createdAt
+- updatedAt
+
+CommercialAccountStatus:
+- draft — مسودة
+- active — نشط
+- under_review — تحت المراجعة
+- inactive — غير نشط
+
+Rules:
+- one commercial account per tenant/workspace في P15-A
+- لا يوجد invoice
+- لا يوجد payment
+- لا يوجد contract lifecycle كامل
+- لا يوجد tax calculation
+- companyTaxNumberPlaceholder مجرد حقل نصي اختياري
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — BILLING CONTACTS MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف model/table:
+
+commercial_billing_contacts — جهات تواصل الفوترة
+
+Fields:
+- id — المعرّف
+- commercialAccountId — الحساب التجاري
+- contactName — اسم جهة التواصل
+- contactEmail — بريد جهة التواصل
+- contactPhone — رقم التواصل
+- contactRole — دور جهة التواصل
+- isPrimary — هل هو أساسي
+- notes — ملاحظات
+- createdBy
+- updatedBy
+- createdAt
+- updatedAt
+
+BillingContactRole:
+- finance_contact — جهة مالية
+- procurement_contact — مشتريات
+- contract_owner — مالك العقد
+- executive_sponsor — راعي تنفيذي
+- other — أخرى
+
+Rules:
+- يمكن وجود أكثر من contact
+- contactEmail مطلوب
+- واحد فقط isPrimary=true لكل commercialAccount
+- لا إرسال إيميلات
+- لا tenant-side visibility الآن
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PERMISSIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف permissions في platform-permissions:
+
+- commercial.accounts.read — قراءة الحسابات التجارية
+- commercial.accounts.update — تحديث الحسابات التجارية
+- commercial.contacts.read — قراءة جهات تواصل الفوترة
+- commercial.contacts.update — تحديث جهات تواصل الفوترة
+
+Role matrix:
+- root_platform_owner:
+  - all
+- platform_admin:
+  - all commercial permissions
+- finance_admin:
+  - all commercial permissions
+- sales_admin:
+  - commercial.accounts.read
+  - commercial.accounts.update
+  - commercial.contacts.read
+  - commercial.contacts.update
+- support_admin:
+  - commercial.accounts.read فقط إذا مناسب
+  - commercial.contacts.read لا، إلا إذا تقرر
+- workspace_support:
+  - لا commercial update
+  - ممكن commercial.accounts.read فقط إذا آمن
+- auditor:
+  - commercial.accounts.read
+  - commercial.contacts.read
+- read_only_operator:
+  - commercial.accounts.read فقط أو لا حسب config، الأفضل read فقط بدون contacts
+
+مهم:
+لا تعطي contacts read لكل الأدوار لأن فيها بيانات تواصل مالية.
+خليها للمالية/المبيعات/الأدمن/المدقق.
+
+حدّث frontend config mirror.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف APIs تحت Platform Administration:
+
+GET /platform/tenants/:tenantId/commercial-account
+Permission:
+- commercial.accounts.read
+
+Returns:
+- commercial account
+- contacts فقط إذا user عنده commercial.contacts.read
+- إذا ما فيه account يرجع null أو draft-ready response
+
+PUT /platform/tenants/:tenantId/commercial-account
+Permission:
+- commercial.accounts.update
+
+Creates or updates one commercial account for tenant.
+
+Payload:
+- commercialAccountName
+- legalEntityName
+- accountManagerUserId
+- financeOwnerUserId
+- contractOwnerName
+- contractOwnerEmail
+- billingEmail
+- billingPhone
+- companyTaxNumberPlaceholder
+- commercialNotes
+- status
+
+Rules:
+- validate tenant exists
+- validate accountManagerUserId/financeOwnerUserId are platform users if provided
+- validate emails
+- no payment fields
+- no card fields
+- no invoice fields
+- audit:
+  - commercial_account_created
+  - commercial_account_updated
+
+GET /platform/tenants/:tenantId/commercial-contacts
+Permission:
+- commercial.contacts.read
+
+POST /platform/tenants/:tenantId/commercial-contacts
+Permission:
+- commercial.contacts.update
+
+Creates billing contact.
+
+PATCH /platform/tenants/:tenantId/commercial-contacts/:contactId
+Permission:
+- commercial.contacts.update
+
+Updates billing contact.
+
+PATCH /platform/tenants/:tenantId/commercial-contacts/:contactId/primary
+Permission:
+- commercial.contacts.update
+
+Sets primary contact, ensures only one primary.
+
+مهم:
+لا تضف delete contact في P15-A.
+إذا احتجت إزالة، استخدم status لاحقًا، لكن الأفضل تأجيل.
+لا ترسل email.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — AUDIT EVENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف events:
+- commercial_account_created — إنشاء حساب تجاري
+- commercial_account_updated — تحديث حساب تجاري
+- commercial_billing_contact_created — إنشاء جهة تواصل فوترة
+- commercial_billing_contact_updated — تحديث جهة تواصل فوترة
+- commercial_billing_contact_primary_changed — تغيير جهة التواصل الأساسية
+- commercial_access_denied — رفض وصول تجاري
+
+Fields:
+- actorId
+- tenantId/workspaceId
+- commercialAccountId
+- contactId
+- action
+- result
+- reason
+- changedFields
+- timestamp
+
+مهم:
+لا تحفظ أسرار.
+لا تحفظ payment/card data.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+commercial-config.ts
+
+Includes:
+- COMMERCIAL_ACCOUNT_STATUS_CONFIG
+- BILLING_CONTACT_ROLE_CONFIG
+- COMMERCIAL_PERMISSION_CONFIG
+- COMMERCIAL_SAFETY_CONTRACT
+
+Labels:
+- commercial_account — الحساب التجاري
+- billing_contacts — جهات تواصل الفوترة
+- account_manager — مدير الحساب
+- finance_contact — جهة التواصل المالية
+- contract_owner — مالك العقد
+- billing_email — بريد الفوترة
+- company_tax_number_placeholder — رقم ضريبي مبدئي
+- commercial_notes — ملاحظات تجارية
+
+Safety contract:
+- enterpriseOnly
+- noElectronicPayment
+- noStripe
+- noCheckout
+- noCardStorage
+- noAutoCharge
+- noPaymentGateway
+- noInvoicePdfGeneration
+- noTaxCalculation
+- noZatcaIntegration
+- noTenantSideVisibility
+- noEmailSending
+- noDeleteContact
+- permissionGated
+- auditCommercialChanges
+
+كلها true.
+
+Import-time guard.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantCommercialAccount(tenantId)
+- useUpsertTenantCommercialAccount()
+- useTenantCommercialContacts(tenantId)
+- useCreateTenantCommercialContact()
+- useUpdateTenantCommercialContact()
+- useSetPrimaryCommercialContact()
+
+React Query keys:
+- ["platform", "tenants", tenantId, "commercial-account"]
+- ["platform", "tenants", tenantId, "commercial-contacts"]
+
+No delete mutation.
+No payment mutation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND UI — TENANT CONSOLE COMMERCIAL TAB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف تبويب داخل Tenant Admin Console:
+
+Commercial — التجاري
+
+Visible if:
+- commercial.accounts.read
+
+Sections:
+1. Commercial Account Summary
+- commercialAccountName — اسم الحساب التجاري
+- legalEntityName — الاسم القانوني
+- status — الحالة
+- accountManager — مدير الحساب
+- financeOwner — مسؤول المالية الداخلي
+
+2. Billing Details
+- billingEmail — بريد الفوترة
+- billingPhone — رقم تواصل الفوترة
+- companyTaxNumberPlaceholder — رقم ضريبي مبدئي
+
+3. Contract Ownership Snapshot
+- contractOwnerName — اسم مالك العقد
+- contractOwnerEmail — بريد مالك العقد
+
+4. Commercial Notes
+- ملاحظات تجارية
+
+5. Billing Contacts
+Visible if:
+- commercial.contacts.read
+
+Actions:
+- Edit Commercial Account
+  requires commercial.accounts.update
+- Add Billing Contact
+  requires commercial.contacts.update
+- Edit Billing Contact
+  requires commercial.contacts.update
+- Set Primary
+  requires commercial.contacts.update
+
+No:
+- payment button
+- checkout
+- invoice generation
+- send email
+- delete contact
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — NAVIGATION / ROUTE GUARDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tenant Console tab visibility:
+- Commercial tab visible only with commercial.accounts.read
+
+Action controls:
+- update buttons require commercial.accounts.update
+- contact actions require commercial.contacts.update
+
+Backend remains source of truth.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Validate:
+- emails format
+- phone optional string
+- status enum
+- contactRole enum
+- commercialAccountName length
+- legalEntityName length
+- notes length capped
+- only one primary contact
+- tenant exists
+- platform users exist for accountManagerUserId/financeOwnerUserId
+
+No:
+- card number fields
+- bank account fields
+- payment gateway IDs
+- invoice amount fields
+- tax calculation fields
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+commercial safety contract all true
+
+T2:
+commercial account status config stable
+
+T3:
+billing contact role config stable
+
+T4:
+permissions added to backend matrix
+
+T5:
+permissions mirrored in frontend config
+
+T6:
+finance_admin has commercial read/update permissions
+
+T7:
+sales_admin has commercial read/update permissions
+
+T8:
+auditor has commercial read permissions only
+
+T9:
+support_admin cannot update commercial account
+
+T10:
+GET commercial account requires commercial.accounts.read
+
+T11:
+PUT commercial account requires commercial.accounts.update
+
+T12:
+PUT creates account if missing
+
+T13:
+PUT updates existing account
+
+T14:
+invalid email rejected
+
+T15:
+invalid accountManagerUserId rejected
+
+T16:
+GET contacts requires commercial.contacts.read
+
+T17:
+POST contact requires commercial.contacts.update
+
+T18:
+PATCH contact requires commercial.contacts.update
+
+T19:
+set primary ensures only one primary
+
+T20:
+contacts hidden from account response without commercial.contacts.read
+
+T21:
+audit event created for account create/update
+
+T22:
+audit event created for contact create/update/primary
+
+T23:
+Commercial tab visible only with commercial.accounts.read
+
+T24:
+edit actions visible only with update permissions
+
+T25:
+no payment/Stripe/checkout/card/invoice/tax/ZATCA/email/delete contact implementation exists
+
+T26:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P15-A MUST:
+- be enterprise commercial only
+- avoid electronic payment
+- avoid Stripe/checkout/card storage
+- avoid payment gateway
+- avoid invoice PDF generation
+- avoid tax/ZATCA/e-invoicing
+- avoid contract lifecycle full module
+- avoid PO tracking
+- avoid manual payment tracking
+- avoid tenant-side billing visibility
+- permission-gate all commercial data
+- audit commercial changes
+- hide billing contacts unless permitted
+- keep backend authority
+- preserve Phase 14 access control
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- electronic payment
+- Stripe
+- checkout
+- card storage
+- auto charge
+- payment gateway
+- invoice PDF generation
+- ZATCA
+- tax calculation
+- contract lifecycle كامل
+- PO tracking
+- manual payment records
+- collection workflow
+- tenant-side billing visibility
+- customer portal
+- tenant users
+- HR users
+- SSO/MFA
+- password reset
+- delete user
+- custom roles
+- permission editor
+- delete contact
+- email sending
+
+خلك:
+Commercial Account + Billing Contacts فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-15a-report.txt
+
+ويحتوي:
+- current tenant/subscription review
+- commercial account model
+- billing contacts model
+- permissions added
+- backend APIs
+- audit events
+- frontend config/hooks
+- Tenant Console Commercial tab
+- validation behavior
+- safety guarantees
+- tests results
+- limitations intentionally left for P15-B
+- readiness assessment قبل Contract Terms & Renewal Commitments

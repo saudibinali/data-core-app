@@ -1,0 +1,751 @@
+================================================================================
+WORKFLOW PHASE 13-J
+FINAL PLATFORM TENANT ADMINISTRATION CLOSURE REPORT
+================================================================================
+
+Date:    2026-05-16
+Phase:   P13-J (Documentation-only closure — no new functional changes)
+Status:  COMPLETE
+Covers:  P13-A through P13-I (nine sub-phases)
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+Phase 13 transformed the super-admin layer from a Governance Console into a
+mature, full-stack Platform Tenant Administration system.
+
+Before Phase 13, the super-admin could:
+  - View platform-level stats and recent activity
+  - Create, search, and change the status of workspaces
+  - Reset user passwords
+  - View the Governance Console (audit logs, violations, workflow approvals)
+
+After Phase 13, the super-admin can additionally:
+  - Browse a unified Tenant Registry with live risk signal summaries
+  - Perform controlled, audited workspace lifecycle transitions
+  - View and update subscription metadata and trial/renewal window dates
+  - Inspect module entitlements and apply per-tenant entitlement overrides
+  - Monitor seat, workflow, and capacity usage against plan limits
+  - Read renewal intelligence: urgency signals, grace periods, day counters
+  - View aggregated tenant health across six component dimensions
+  - Access all of the above through a consolidated 8-tab Tenant Admin Console
+  - Review an advisory Lifecycle Evaluation profile with severity, recommended
+    action, and review eligibility flags
+
+Throughout all nine sub-phases:
+  — super-admin only, protected by requireSuperAdmin middleware
+  — read-only intelligence (never mutates outside explicitly controlled areas)
+  — controlled mutations (lifecycle transitions, subscription metadata,
+    entitlement overrides) all require reason + confirmation + audit log
+  — no payment processing, no invoices, no charges, no tax
+  — no automatic suspension or locking
+  — no email or legal notices
+  — no destructive tenant data actions
+  — no external billing provider dependency
+
+================================================================================
+2. PHASE 13 CAPABILITY MATRIX
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+P13-A — Platform Tenant Registry & Workspace Inventory Foundations
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Unified read-only view of all tenants on the platform with live stats,
+  ownership derivation, risk signal summaries, and registry filtering.
+
+Key Outputs:
+  Backend lib:  tenant-registry.ts — pure derivation, fully testable
+  Routes:       GET /platform/tenants, /:tenantId, /:tenantId/summary
+  Frontend:     /super-admin/tenants page + tenant registry table UI
+  UI State:     Loading / error / empty / no-match states all handled
+  Filtering:    status, subscriptionStatus, riskLevel, free-text search
+
+Status Model:
+  TenantStatus (8):        provisioning, pending_activation, trial, active,
+                           grace_period, locked, suspended, archived
+  SubscriptionStatus (8):  trialing, active, renewal_due, grace_period,
+                           expired, suspended, cancelled, unknown
+  RiskLevel (6):           none, low, medium, high, critical, unknown
+
+API:           3 GET endpoints (read-only)
+DB:            No new tables — workspace IS the tenant identity
+Safety:        TENANT_REGISTRY_SAFETY_CONTRACT — all properties true
+
+────────────────────────────────────────────────────────────────────────────────
+P13-B — Workspace Lifecycle Management & Controlled State Transitions
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Controlled, audited state machine for workspace lifecycle — activate,
+  suspend, lock, restore, archive — with mandatory reason + confirmation.
+
+Key Outputs:
+  Backend lib:  workspace-lifecycle.ts — pure state machine
+  Route:        PATCH /platform/tenants/:tenantId/lifecycle (write)
+  Frontend:     LifecycleControlPanel with action buttons + confirmation dialog
+  Config:       workspace-lifecycle-config.ts — LIFECYCLE_ACTION_CONFIG
+  Audit:        All transitions written to activity_logs before response
+
+Lifecycle States (5):
+  pending_activation → active → suspended → locked → archived
+
+Lifecycle Actions (5):
+  activate | suspend | restore | lock | archive
+
+Validation:
+  - Action must be a known action
+  - Transition must be allowed from current state
+  - Reason ≥ 10 characters required
+  - Explicit boolean confirmation required
+
+API:           1 PATCH endpoint (controlled write)
+DB:            No new table — workspaces.status column written (TEXT)
+Safety:        LIFECYCLE_SAFETY_CONTRACT (14 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-C — Subscription Metadata, Trial Windows & Renewal Lifecycle Foundations
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Persistent subscription metadata store with plan codes, status derivation,
+  date fields (billing period, trial, grace), and controlled update with audit.
+
+Key Outputs:
+  DB table:     tenant_subscriptions (new) — planCode, subscriptionStatus,
+                all date fields, reason, updatedBy, metadataJson
+  Backend lib:  subscription-lifecycle.ts — deriveSubscriptionStatus,
+                validateSubscriptionMetadataUpdate, buildSubscriptionAuditPayload
+  Routes:       GET + PATCH /platform/tenants/:tenantId/subscription
+  Frontend:     SubscriptionManagementPanel — read display + edit modal
+
+PlanCode (5):     starter | growth | business | enterprise | custom
+SubscriptionStatus (8): trialing, active, renewal_due, grace_period,
+                         expired, suspended, cancelled, unknown
+
+Validation:
+  - Reason ≥ 10 chars + confirmation required for all updates
+  - Date ordering enforced (billingPeriodStart < billingPeriodEnd, etc.)
+  - Impossible combinations rejected (active + cancelledAt, etc.)
+  - Audit-logged to activity_logs (event: subscription_metadata_updated)
+
+API:           1 GET + 1 PATCH (controlled write)
+DB:            tenant_subscriptions (NEW)
+Safety:        SUBSCRIPTION_SAFETY_CONTRACT (14 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-D — Entitlements, Module Access & Feature Limits
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Per-plan entitlement derivation (20 modules × 10 feature limits) with
+  per-tenant override capability and full audit trail.
+
+Key Outputs:
+  DB table:     tenant_entitlement_overrides (new) — workspaceId, moduleCode,
+                overrideType, limitCode, limitValue, reason, createdBy
+  Backend libs: platform-modules.ts (20 module codes),
+                feature-limits.ts (10 limit codes),
+                plan-entitlements.ts (5 plan → module maps),
+                tenant-entitlements.ts (derive + validate + override)
+  Routes:       GET /entitlements + PATCH /entitlements/overrides
+  Frontend:     EntitlementPanel — enabled modules grid, limits, override dialog
+  Config:       platform-entitlements-config.ts
+
+Platform Module Registry (20 modules):
+  core, users, tickets, departments, workflows, notifications, approvals,
+  reporting, analytics, audit_logs, governance_console, integrations, api_access,
+  storage, documents, hr_module, payroll_module, recruitment_module,
+  attendance_module, lms_module
+
+Feature Limit Registry (10 limits):
+  seats, storage_gb, monthly_api_calls, documents, custom_reports,
+  integrations, ai_actions, workflows, workspaces, audit_retention_days
+
+API:           1 GET + 1 PATCH (controlled write — delete-then-insert per scope)
+DB:            tenant_entitlement_overrides (NEW)
+Safety:        ENTITLEMENT_SAFETY_CONTRACT (16 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-E — Usage Limits, Quotas & Capacity Intelligence
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Read-only usage intelligence: seat, workflow, and capacity metric tracking
+  with approaching/exceeded detection and capacity risk derivation.
+
+Key Outputs:
+  Backend libs: tenant-usage-metrics.ts (10 metric codes, source types),
+                tenant-usage-intelligence.ts (pure derivation — no DB/HTTP)
+  Route:        GET /platform/tenants/:tenantId/usage
+  Frontend:     UsagePanel — 10-metric table, progress bars, status badges
+  Config:       platform-usage-config.ts — USAGE_METRIC_CONFIG, USAGE_STATUS_CONFIG,
+                CAPACITY_RISK_CONFIG
+
+Usage Metric Sources:
+  live_db:    seats (user count), workflows (workflow definition count)
+  configured: audit_retention_days (from entitlement limits)
+  derived:    workspaces (always 1)
+  unavailable: storage_gb, monthly_api_calls, documents, custom_reports,
+               integrations, ai_actions (placeholder for future live tracking)
+
+Thresholds:
+  USAGE_APPROACHING_THRESHOLD = 0.80 (80%)
+  USAGE_EXCEEDED_THRESHOLD    = 1.00 (100%)
+
+CapacityRiskLevel (6): none, low, medium, high, critical, unknown
+
+API:           1 GET (read-only)
+DB:            No new table — live counts from existing DB subqueries
+Safety:        USAGE_SAFETY_CONTRACT (11 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-F — Subscription Expiry, Grace Period & Renewal Intelligence
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Renewal intelligence engine: expiry detection, grace period tracking,
+  renewal urgency signals, and internal operational recommendations.
+
+Key Outputs:
+  Backend lib:  subscription-renewal-intelligence.ts — deriveRenewalSignals,
+                deriveRenewalUrgency, deriveRecommendedPlatformAction,
+                deriveSubscriptionRenewalProfile
+  Route:        GET /platform/tenants/:tenantId/renewal-intelligence
+  Frontend:     RenewalIntelligencePanel — urgency badge, signal badges,
+                day counters (billing/trial/grace/past-due), action description
+  Config:       renewal-intelligence-config.ts
+
+RenewalSignalCode (14):
+  no_subscription_metadata, trial_active, trial_ending_soon, trial_expired,
+  subscription_active, renewal_due_soon, renewal_due_now, billing_period_expired,
+  grace_period_active, grace_period_ending_soon, grace_period_expired,
+  subscription_cancelled, subscription_suspended, invalid_subscription_dates
+
+RenewalUrgency (6):   none, low, medium, high, critical, unknown
+RecommendedPlatformAction (8):
+  none, monitor, contact_customer, prepare_grace_period,
+  review_for_suspension, renew_subscription_metadata,
+  fix_subscription_metadata, manual_review_required
+
+Threshold Constants:
+  RENEWAL_DUE_SOON_DAYS  = 14
+  TRIAL_ENDING_SOON_DAYS = 7
+  GRACE_ENDING_SOON_DAYS = 3
+
+API:           1 GET (read-only)
+DB:            Reads from tenant_subscriptions (no new table)
+Safety:        RENEWAL_INTELLIGENCE_SAFETY_CONTRACT (11 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-G — Tenant Health, Risk Signals & Operational Monitoring
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Aggregated health profile across six operational dimensions (lifecycle,
+  subscription, renewal, usage, entitlements, governance) with risk level
+  and advisory recommended actions.
+
+Key Outputs:
+  Backend lib:  tenant-health-intelligence.ts — deriveTenantHealthProfile
+                (composes all prior P13 intelligence layers)
+  Route:        GET /platform/tenants/:tenantId/health
+  Frontend:     TenantHealthPanel — status badge, risk badge, 6-component grid,
+                signal badges, warnings, safety notice
+  Config:       tenant-health-config.ts
+
+TenantHealthStatus (7):
+  healthy, attention, at_risk, degraded, critical, inactive, unknown
+
+TenantHealthRiskLevel (6):
+  none, low, medium, high, critical, unknown
+
+TenantHealthSignalCode (18):
+  active_and_healthy, workspace_suspended, workspace_locked, workspace_archived,
+  workspace_pending_activation, subscription_active, subscription_unknown,
+  subscription_expired, grace_period_active, usage_approaching_limit,
+  usage_exceeded_limit, renewal_attention, renewal_high_risk,
+  entitlements_customised, governance_warning_present, no_active_users,
+  operational_warnings_present, health_check_unavailable
+
+RecommendedTenantHealthAction (9):
+  none, monitor, review_subscription, review_usage, review_entitlements,
+  review_lifecycle, review_governance, review_renewal_status, manual_review
+
+Component Health Breakdown (6):
+  lifecycle, subscription, renewal, usage, entitlements, governance
+
+API:           1 GET (read-only)
+DB:            Reads from all existing tables (no new table)
+Safety:        TENANT_HEALTH_SAFETY_CONTRACT (12 properties, all true)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-H — Tenant Administration Console Consolidation
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Reorganise the flat, vertically-stacked detail view into a tabbed 7-panel
+  (later 8-panel) Tenant Administration Console with a unified overview.
+
+Key Outputs:
+  Config:    tenant-admin-console-config.ts — CONSOLE_TABS, CONSOLE_TAB_CONFIG,
+             OVERVIEW_CARDS, OVERVIEW_CARD_CONFIG, CONSOLE_EMPTY_STATE,
+             CONSOLE_FORBIDDEN_WORDING, TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT
+  Frontend:  ConsoleOverviewTab — identity summary, 6-card grid, risk/health
+             overview, consolidated recommended action, active risk/warning list
+             TenantAdminConsole — 8-tab bar (overview → evaluation), active state,
+             editable-tab dot indicator, tab content routing
+  Replaced:  TenantDetailPanel (flat stacked) → TenantAdminConsole (tabbed)
+             backward-compatible alias preserved for call site
+
+Console Tabs (8, in order):
+  overview | lifecycle | subscription | entitlements | usage | renewal | health | evaluation
+
+Tab Mutability:
+  read-only:  overview, usage, renewal, health, evaluation
+  controlled: lifecycle, subscription, entitlements
+
+API:           No new API (uses existing P13 endpoints)
+Safety:        TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT (12 props + contractVersion)
+
+────────────────────────────────────────────────────────────────────────────────
+P13-I — Automated Lifecycle Evaluation Engine
+────────────────────────────────────────────────────────────────────────────────
+Objective:
+  Deterministic read-only evaluation engine that aggregates all P13 intelligence
+  layers into a unified advisory Lifecycle Evaluation Profile with signals,
+  severity, recommended action, and review eligibility flags.
+
+Key Outputs:
+  Backend lib:  tenant-lifecycle-evaluation.ts — pure derivation, no DB/HTTP
+                deriveTenantLifecycleEvaluationProfile (top-level entry point)
+  Route:        GET /platform/tenants/:tenantId/lifecycle-evaluation
+  Frontend:     TenantEvaluationPanel — severity, action, eligibility grid,
+                signals, warnings, safety notice (no action buttons anywhere)
+  Config:       lifecycle-evaluation-config.ts
+
+EvaluationSignalCode (17):
+  subscription_metadata_missing, trial_ending_requires_review,
+  renewal_due_requires_review, grace_period_active_requires_monitoring,
+  grace_period_expired_requires_review, subscription_expired_requires_review,
+  workspace_suspended_requires_review, workspace_locked_requires_review,
+  usage_approaching_requires_review, usage_exceeded_requires_review,
+  entitlement_overrides_require_review, custom_plan_requires_review,
+  health_high_risk_requires_review, health_critical_requires_review,
+  governance_warning_requires_review, operational_data_missing_requires_review,
+  manual_review_required
+
+EvaluationSeverity (7):   none, info, low, medium, high, critical, unknown
+EvaluationRecommendedAction (10):
+  none, monitor, review_subscription, review_usage, review_entitlements,
+  review_lifecycle, review_governance, prepare_customer_contact,
+  prepare_restriction_review, manual_review_required
+
+ReviewEligibility (8 flags):
+  renewalReviewEligible, graceReviewEligible, suspensionReviewEligible,
+  usageReviewEligible, entitlementReviewEligible, lifecycleReviewEligible,
+  governanceReviewEligible, manualReviewRequired
+
+Escalation (manual_review_required triggers when):
+  - workspace_locked signal present
+  - health_critical signal present
+  - grace_period_expired signal present
+  - subscription_expired + usage_exceeded both present
+
+API:           1 GET (read-only)
+DB:            No new table
+Safety:        LIFECYCLE_EVALUATION_SAFETY_CONTRACT (13 properties, all true)
+
+================================================================================
+3. FINAL ARCHITECTURE SUMMARY
+================================================================================
+
+                    ┌─────────────────────────────────────┐
+                    │   PLATFORM TENANT ADMINISTRATION     │
+                    │       (super-admin only)             │
+                    └──────────────┬──────────────────────┘
+                                   │
+        ┌──────────────────────────┼──────────────────────────┐
+        │                          │                          │
+        ▼                          ▼                          ▼
+  ┌───────────┐           ┌──────────────────┐       ┌───────────────┐
+  │  TENANT   │           │  INTELLIGENCE    │       │ ADMIN CONSOLE │
+  │ REGISTRY  │           │  STACK           │       │  (P13-H)      │
+  │ (P13-A)   │           │                  │       │  8-tab UI     │
+  └───────────┘           │  P13-C Subscription│     └───────────────┘
+        │                 │  P13-D Entitlements│
+        │                 │  P13-E Usage       │
+        │                 │  P13-F Renewal     │
+        ▼                 │  P13-G Health      │
+  ┌───────────┐           │  P13-I Evaluation  │
+  │ LIFECYCLE │           └──────────┬─────────┘
+  │ CONTROLS  │                      │
+  │ (P13-B)   │                      ▼
+  └───────────┘             ┌────────────────────┐
+                            │  TenantRiskSignal   │
+                            │  Summary (P13-A     │
+                            │  + P13-C through I  │
+                            │  extended fields)   │
+                            └────────────────────┘
+
+Layer relationships:
+  P13-A  — foundation: workspace IS tenant identity; registry + risk summary
+  P13-B  — controlled write layer: lifecycle state machine (audit-logged)
+  P13-C  — data layer: tenant_subscriptions table + subscription metadata write
+  P13-D  — data layer: tenant_entitlement_overrides + per-plan module mapping
+  P13-E  — intelligence: usage capacity read-only derivation
+  P13-F  — intelligence: renewal urgency + grace signal derivation
+  P13-G  — intelligence: health aggregator (consumes P13-C, D, E, F, B)
+  P13-H  — UI consolidation: tabbed console over all P13 panels
+  P13-I  — evaluation engine: aggregates ALL layers → advisory profile
+
+================================================================================
+4. DATA MODEL SUMMARY
+================================================================================
+
+Tenant Identity:
+  workspace (workspaces table) IS the tenant. No separate tenant table.
+  tenantId = String(workspace.id) in all API responses.
+
+DB Tables Added by Phase 13:
+
+  tenant_subscriptions (P13-C)
+  ─────────────────────────────────────────────────────────────────────
+  id                   SERIAL PK
+  workspaceId          FK → workspaces(id) ON DELETE CASCADE (UNIQUE)
+  planCode             TEXT  (starter|growth|business|enterprise|custom|null)
+  subscriptionStatus   TEXT  (trialing|active|...|unknown)
+  billingPeriodStart   TIMESTAMP
+  billingPeriodEnd     TIMESTAMP
+  renewalDueAt         TIMESTAMP
+  trialStartedAt       TIMESTAMP
+  trialEndsAt          TIMESTAMP
+  gracePeriodStartedAt TIMESTAMP
+  gracePeriodEndsAt    TIMESTAMP
+  cancelledAt          TIMESTAMP
+  suspendedAt          TIMESTAMP
+  metadataJson         TEXT (arbitrary JSON blob)
+  reason               TEXT (required for every update)
+  updatedBy            INTEGER FK → users(id)
+  createdAt            TIMESTAMP
+  updatedAt            TIMESTAMP
+
+  tenant_entitlement_overrides (P13-D)
+  ─────────────────────────────────────────────────────────────────────
+  id                   SERIAL PK
+  workspaceId          FK → workspaces(id) ON DELETE CASCADE
+  moduleCode           TEXT (one of 20 module codes)
+  overrideType         TEXT (enable|disable|limit_override)
+  limitCode            TEXT (one of 10 limit codes, nullable)
+  limitValue           INTEGER (nullable = unlimited for limit_override)
+  reason               TEXT (required)
+  createdBy            INTEGER FK → users(id)
+  createdAt            TIMESTAMP
+
+TenantRiskSignalSummary Fields (accumulated across phases):
+
+  P13-A (original):
+    renewalApproaching, subscriptionExpired, gracePeriodActive,
+    usageLimitApproaching, usageLimitExceeded, governanceWarnings,
+    operationalWarnings, riskLevel
+
+  P13-E (added):
+    usageWarningCount, usageExceededCount, capacityRiskLevel
+
+  P13-F (added):
+    renewalDueSoon, renewalDueNow, trialEndingSoon,
+    graceEndingSoon, graceExpired, renewalUrgency,
+    recommendedPlatformAction
+
+  P13-G (added):
+    healthStatus, healthRiskLevel, healthRecommendedAction,
+    healthWarningCount, operationalWarningCount
+
+  P13-I (added):
+    lifecycleEvaluationSeverity, lifecycleEvaluationRecommendedAction,
+    manualReviewRequired, suspensionReviewEligible, renewalReviewEligible,
+    usageReviewEligible, entitlementReviewEligible, lifecycleReviewEligible,
+    governanceReviewEligible
+
+Pure Derivation Models (no DB tables — derived in-memory):
+  PlatformTenantProfile        (P13-A) — assembled from workspace + user + counts
+  TenantUsageProfile           (P13-E) — 10 UsageMetricRow + risk level
+  SubscriptionRenewalProfile   (P13-F) — signals + urgency + day counters
+  TenantHealthProfile          (P13-G) — status + risk + 6 component summaries
+  TenantLifecycleEvaluation    (P13-I) — signals + severity + reviewEligibility
+
+================================================================================
+5. COMPLETE API SURFACE
+================================================================================
+
+All endpoints: requireAuth + requireSuperAdmin. Prefix: /api
+
+Method  Path                                            Phase  R/W     Notes
+──────  ──────────────────────────────────────────────  ─────  ──────  ───────────────────────────
+GET     /platform/tenants                              P13-A  read    Filter: status/sub/risk/search
+GET     /platform/tenants/:tenantId                    P13-A  read    Full tenant profile
+GET     /platform/tenants/:tenantId/summary            P13-A  read    Lightweight summary (no owner)
+PATCH   /platform/tenants/:tenantId/lifecycle          P13-B  write*  Requires reason+confirmation
+GET     /platform/tenants/:tenantId/subscription       P13-C  read    isConfigured flag when absent
+PATCH   /platform/tenants/:tenantId/subscription       P13-C  write*  Upsert; audit-logged
+GET     /platform/tenants/:tenantId/entitlements       P13-D  read    Profile + override list
+PATCH   /platform/tenants/:tenantId/entitlements/overrides  P13-D  write*  Delete+insert; audit-logged
+GET     /platform/tenants/:tenantId/usage              P13-E  read    10 metrics, capacity risk
+GET     /platform/tenants/:tenantId/renewal-intelligence    P13-F  read    Signals, urgency, day counters
+GET     /platform/tenants/:tenantId/health             P13-G  read    Status, risk, 6 components
+GET     /platform/tenants/:tenantId/lifecycle-evaluation    P13-I  read    Advisory evaluation profile
+
+* = controlled write: requires reason (≥10 chars) + confirmation:true + audit log
+
+Safety notes per write endpoint:
+  PATCH lifecycle   — no deletion, no billing, no HR, no auto-actions
+  PATCH subscription — no payment, no invoice, metadata only
+  PATCH entitlements — no enforcement, max 50 overrides, known codes only
+
+================================================================================
+6. FRONTEND SUMMARY
+================================================================================
+
+Route:  /super-admin/tenants  (SuperAdminRoute — non-super-admins blocked)
+File:   artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+
+Page Header:
+  Page title | description | "Read-only intelligence" badge
+
+Registry Stats Bar:
+  Total Workspaces | Active | Suspended | Archived | High Risk | Critical Health
+
+Registry Filter Bar:
+  Full-text search (name/slug/email) | Status filter | Risk filter | Sub filter
+
+Tenant Registry Table (9 columns):
+  Workspace | Owner | Status | Subscription | Plan | Risk | Health | Users | Last Activity
+
+Row expansion → TenantAdminConsole (8-tab tabbed panel):
+
+  Tab 1 — Overview (read-only)
+    Identity summary (3 columns) | 6 summary cards | consolidated risk + recommended action
+    Active risk/warning badges | Safety banner
+
+  Tab 2 — Lifecycle (controlled)
+    Current state badge | Allowed action buttons | Confirmation dialog
+    (reason textarea, optional note, severity checkbox, cancel/confirm)
+    Success banner | Audit trail note
+
+  Tab 3 — Subscription (controlled)
+    Read-only subscription summary | "Edit Metadata" button → modal
+    (plan select, status override, 9 date fields, reason, confirmation)
+
+  Tab 4 — Entitlements (controlled)
+    Enabled module grid | Key feature limits | Custom override list
+    "Add/Edit Override" dialog (module, type, limit code/value, reason, confirmation)
+
+  Tab 5 — Usage (read-only)
+    Capacity risk badge | Approaching/Exceeded/Unknown count chips
+    10-metric table: metric | source type | usage | limit | utilisation bar | status
+    Warning panel | Unavailable metrics footnote
+
+  Tab 6 — Renewal (read-only)
+    Urgency badge | Recommended action badge
+    Active signal badges | Day counters (billing/trial/grace/past-due)
+    Recommended action description | Warnings | Safety notice
+
+  Tab 7 — Health (read-only)
+    Health status badge | Risk level badge | Recommended action badge
+    6-component health cards | Active signal badges | Warnings | Safety notice
+
+  Tab 8 — Evaluation (read-only)
+    Severity badge | Action badge | Manual Review Required flag
+    Review Eligibility grid (8 cells, colour-coded)
+    Active signal badges | Recommended action description
+    Warnings | Safety notice
+
+Nav entry:  Super-Admin sidebar → "Tenant Registry" (Database icon)
+
+================================================================================
+7. SAFETY CONTRACT SUMMARY
+================================================================================
+
+Contract                              Phase  Properties  All True
+────────────────────────────────────  ─────  ──────────  ────────
+TENANT_REGISTRY_SAFETY_CONTRACT       P13-A  varies      ✅
+LIFECYCLE_SAFETY_CONTRACT             P13-B  14          ✅
+SUBSCRIPTION_SAFETY_CONTRACT          P13-C  14          ✅
+ENTITLEMENT_SAFETY_CONTRACT           P13-D  16          ✅
+USAGE_SAFETY_CONTRACT                 P13-E  11          ✅
+RENEWAL_INTELLIGENCE_SAFETY_CONTRACT  P13-F  11          ✅
+TENANT_HEALTH_SAFETY_CONTRACT         P13-G  12          ✅
+TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT  P13-H  12 + ver    ✅
+LIFECYCLE_EVALUATION_SAFETY_CONTRACT  P13-I  13          ✅
+
+FINAL PLATFORM GUARANTEES (enforced across all nine sub-phases):
+
+  ✅ super-admin only — requireSuperAdmin middleware on every route
+  ✅ no payment processing — no payment provider integrated
+  ✅ no invoice generation — no invoice or billing document produced
+  ✅ no charge collection — no deduction or charge logic anywhere
+  ✅ no tax logic — no tax calculation, withholding, or reporting
+  ✅ no automatic workspace suspension — all suspensions operator-initiated
+  ✅ no automatic workspace locking — all locks operator-initiated
+  ✅ no automatic entitlement enforcement at module access time
+  ✅ no destructive tenant actions — no hard workspace or user deletion
+  ✅ no HR module execution — entitlement flags only, no HR logic runs
+  ✅ no email or legal notices sent from any phase 13 layer
+  ✅ no tenant self-service billing portal
+  ✅ no external billing provider dependency
+  ✅ controlled mutations only (lifecycle, subscription metadata, entitlements)
+     — all require reason + confirmation + audit log entry
+
+Import-time safety guards (throw at module load if any property is false):
+  super-admin-tenants.tsx validates LIFECYCLE_SAFETY_CONTRACT,
+  SUBSCRIPTION_SAFETY_CONTRACT, USAGE_SAFETY_CONTRACT,
+  RENEWAL_INTELLIGENCE_SAFETY_CONTRACT, TENANT_HEALTH_SAFETY_CONTRACT,
+  TENANT_ADMIN_CONSOLE_SAFETY_CONTRACT at import time.
+
+================================================================================
+8. TEST RESULTS SUMMARY
+================================================================================
+
+Phase   Backend Tests   Frontend Tests  New Backend  New Frontend
+──────  ─────────────   ─────────────   ───────────  ────────────
+P13-A          2482           656             2482           656
+P13-B          2569           726              +87           +70
+P13-C          2646           777              +77           +51
+P13-D          2713           822              +67           +45
+P13-E          2775           842              +62           +20
+P13-F          2858           889              +83           +47
+P13-G          2939           924              +81           +35
+P13-H           n/a           938              n/a           +14
+P13-I          2960           955              +21           +17
+──────  ─────────────   ─────────────   ───────────  ────────────
+FINAL          2960           955
+
+All 2960 backend tests: PASS (50 test files)
+All  955 frontend tests: PASS (18 test files)
+
+TypeScript:
+  api-server typecheck:  PASS — 0 errors throughout Phase 13
+  ops-platform typecheck: 7 pre-existing errors (governance-audit.tsx TS2322 x4,
+                           governance-violations.tsx TS2503 x1,
+                           workflow-detail.tsx TS2353 x1,
+                           workflows.tsx TS2353 x1) — none introduced by Phase 13
+
+DB Migrations applied:
+  tenant_subscriptions           (P13-C)
+  tenant_entitlement_overrides   (P13-D)
+
+================================================================================
+9. INTENTIONAL NON-SCOPE
+================================================================================
+
+Phase 13 deliberately excluded the following. These are not omissions;
+they are explicit exclusions protected by safety contracts and forbidden-wording
+test assertions.
+
+Billing & Payments:
+  ❌ Payment provider integration (Stripe, Paddle, etc.)
+  ❌ Invoice generation or PDF billing documents
+  ❌ Charge collection or deduction logic
+  ❌ Tax calculation, withholding, or reporting
+  ❌ Customer billing portal or payment method management
+
+Automation & Enforcement:
+  ❌ Automatic workspace suspension based on subscription state
+  ❌ Automatic workspace locking
+  ❌ Entitlement enforcement at module access time
+  ❌ Background lifecycle evaluator jobs
+  ❌ Scheduled suspension or locking tasks
+
+Communications:
+  ❌ Email notifications (grace warning, expiry notice, renewal reminder)
+  ❌ Legal or regulatory notice dispatch
+  ❌ Customer-facing notification system
+
+Tenant Self-Service:
+  ❌ Tenant self-service billing or subscription management
+  ❌ Tenant-scoped admin console for non-super-admin users
+
+HR & Operational Modules (out of scope for all P13):
+  ❌ HR employee management
+  ❌ Payroll calculation or execution
+  ❌ Recruitment pipeline execution
+  ❌ Attendance tracking or shift management
+  ❌ LMS content delivery or course management
+
+Data:
+  ❌ Hard workspace or user deletion from P13 routes
+  ❌ Live storage tracking (storage_gb metric is "unavailable")
+  ❌ Live API call tracking (monthly_api_calls is "unavailable")
+  ❌ Live document count tracking (documents is "unavailable")
+
+================================================================================
+10. REMAINING GAPS & NEXT-PHASE READINESS
+================================================================================
+
+Phase 13 completed all nine planned sub-phases and built a solid foundation.
+The following items were intentionally deferred for future phases:
+
+Future Integration Work:
+  — Billing provider integration (Stripe/Paddle) → connects to P13-C subscription table
+  — Invoice and payment workflow engine → builds on tenant_subscriptions data model
+  — Background lifecycle evaluator → can consume P13-I evaluation engine directly
+  — Automated notification templates → grace warning, expiry, renewal signals ready
+  — Real storage/API/document usage counters → metric slots exist in P13-E registry
+  — Entitlement enforcement gates → entitlement profile shape defined in P13-D
+
+Tenant Experience:
+  — Tenant self-service billing portal → tenant_subscriptions model is ready
+  — Tenant-scoped admin console (non-super-admin operators)
+
+HR / HCM Modules:
+  — HRM, payroll, recruitment, attendance, LMS → module codes already registered
+    in platform-modules.ts; entitlement flags exist; implementations deferred
+
+Foundation readiness:
+  All future phases can build on Phase 13 without breaking changes:
+  — All intelligence layers (P13-C through I) are pure derivation functions
+  — Evaluation engine is composable: any new signal code can be added to
+    EvaluationSignalCode and mapped in tenant-lifecycle-evaluation.ts
+  — TenantRiskSignalSummary is additive — new fields can be appended
+  — tenant_subscriptions and tenant_entitlement_overrides are schema-stable
+  — Safety contracts are import-time enforced and test-verified
+
+================================================================================
+11. FINAL VERDICT
+================================================================================
+
+Phase 13 is complete.
+
+The platform now has a mature super-admin tenant administration layer capable of:
+
+  ✅ Managing workspace lifecycle safely (P13-B)
+     — 5 states, 5 actions, state machine, reason + confirmation + audit
+
+  ✅ Maintaining subscription metadata (P13-C)
+     — Persistent store, plan codes, date fields, controlled updates
+
+  ✅ Deriving and overriding entitlements (P13-D)
+     — 20 modules × 10 limits × 5 plans, per-tenant override support
+
+  ✅ Observing usage and capacity (P13-E)
+     — 10 metrics, live counts (seats/workflows), approaching/exceeded detection
+
+  ✅ Detecting renewal and grace period risks (P13-F)
+     — 14 signals, 6 urgency levels, day counters, operational recommendations
+
+  ✅ Aggregating tenant health (P13-G)
+     — 18 signals, 7 health statuses, 6 component breakdown, advisory actions
+
+  ✅ Presenting a consolidated Tenant Admin Console (P13-H)
+     — 8-tab tabbed UI, overview card grid, clean panel routing
+
+  ✅ Producing advisory lifecycle evaluations (P13-I)
+     — 17 evaluation signals, 7 severity levels, review eligibility matrix
+
+Without:
+  ❌ Payment processing, invoicing, or charge collection
+  ❌ Destructive automation or automatic enforcement
+  ❌ Tenant data mutation outside controlled metadata/lifecycle areas
+  ❌ Email, legal, or external notification systems
+  ❌ HR module execution of any kind
+
+Final test count:  2960 backend | 955 frontend — ALL PASS
+Final typecheck:   0 new errors introduced across all nine sub-phases
+
+================================================================================
+END OF REPORT — PHASE 13 CLOSED
+================================================================================

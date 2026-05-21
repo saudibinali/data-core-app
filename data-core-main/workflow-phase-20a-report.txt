@@ -1,0 +1,151 @@
+================================================================================
+WORKFLOW PHASE 20A — ATTENDANCE INTEGRATION ARCHITECTURE & WORKFORCE EVENT PLATFORM
+================================================================================
+Date: 2026-05-19
+Phase: P20-A
+Status: COMPLETE (architecture & discovery only — no code, no migrations)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+P20-A audited the existing attendance stack (hr_attendance, shifts, calendars,
+import/export in hr.ts, hr-attendance.tsx) and designed a vendor-agnostic
+Workforce Event Platform (WEP) with multi-source ingest, normalization, daily
+summaries, and legacy coexistence. Eleven architecture documents were produced.
+No implementation, GPS, vendor connectors, payroll changes, or destructive
+migration was performed.
+
+--------------------------------------------------------------------------------
+FILES CREATED
+--------------------------------------------------------------------------------
+1.  p20-a-current-attendance-audit.md
+2.  p20-a-workforce-event-platform-architecture.md
+3.  p20-a-canonical-attendance-models.md
+4.  p20-a-attendance-integration-strategy.md
+5.  p20-a-gps-geofence-attendance-strategy.md
+6.  p20-a-attendance-import-strategy.md
+7.  p20-a-attendance-event-normalization.md
+8.  p20-a-attendance-payroll-leave-interaction.md
+9.  p20-a-attendance-security-compliance.md
+10. p20-a-attendance-readiness-decision.md
+11. workflow-phase-20a-report.txt (this file)
+
+--------------------------------------------------------------------------------
+CURRENT AUDIT SUMMARY
+--------------------------------------------------------------------------------
+- Core: hr_attendance (1 row/employee/day), hr_shifts, hr_work_calendars,
+  hr_calendar_holidays; times as HH:MM text; source_type enum without ingest.
+- APIs: ~40 endpoints in hr.ts (CRUD, import preview/confirm, export, OT).
+- UI: hr-attendance.tsx (/admin/hr/attendance); no self-service clock UI.
+- Leave: canonical leave_requests does NOT update attendance; dual leave UI.
+- Payroll: does NOT read attendance; payslip day fields unused.
+- Reports: hr.attendance.period via P19 reporting + Report Center (GO).
+- Import: inline XLSX flow; NOT on import_jobs; confirm drops preview fields.
+- Events: no attendance types on appEventBus (leave only).
+
+--------------------------------------------------------------------------------
+PROPOSED CANONICAL ARCHITECTURE
+--------------------------------------------------------------------------------
+Workforce Event Platform layers:
+  Sources → Connectors → raw_events → attendance_events → daily_summaries
+  → dual-write hr_attendance (transition) → payroll/reports/leave consumers
+
+11 new logical models specified (sources, devices, integrations, raw_events,
+events, daily_summaries, adjustments, geofences, policies, sync_jobs,
+import_batches) — design only, no migrations.
+
+--------------------------------------------------------------------------------
+INTEGRATION STRATEGY
+--------------------------------------------------------------------------------
+Vendor-agnostic AttendanceConnector interface; webhook + poll modes;
+encrypted credentials; idempotency; mapping profiles; DB sync workers
+(no Redis); generic_webhook + vendor adapters as plugins.
+
+--------------------------------------------------------------------------------
+GPS STRATEGY
+--------------------------------------------------------------------------------
+Geofence circle per work location; punch-time-only location capture;
+privacy/retention rules; spoofing flags; offline queue documented.
+Implementation BLOCKED until P20-D+.
+
+--------------------------------------------------------------------------------
+IMPORT STRATEGY
+--------------------------------------------------------------------------------
+Migrate to import_jobs + attendance_import_batches + Document Registry;
+server-side parse; dry-run; mapping profiles; duplicate detection;
+soft revert via adjustment tagging. Legacy importer remains until flag cutover.
+
+--------------------------------------------------------------------------------
+NORMALIZATION
+--------------------------------------------------------------------------------
+Event types (clock_in/out, overlays); source priority; late/early/OT
+calculation from shifts; missing punch rules; timezone/local_date;
+conflict resolution; rebuild-day capability.
+
+--------------------------------------------------------------------------------
+PAYROLL / LEAVE INTERACTION
+--------------------------------------------------------------------------------
+Target: payroll READS summaries; leave generates leave_overlay events;
+holiday overlays; period locks before payroll close. No payroll redesign
+in P20-A. Current coupling: BLOCKED.
+
+--------------------------------------------------------------------------------
+SECURITY / COMPLIANCE
+--------------------------------------------------------------------------------
+Location minimization; no biometric storage in ERP; append-only raw events;
+workspace isolation; audit via adjustments + import_jobs; retention policy;
+anti-tamper via locks and idempotency.
+
+--------------------------------------------------------------------------------
+READINESS VERDICTS
+--------------------------------------------------------------------------------
+| Area                   | Verdict   |
+|------------------------|-----------|
+| Canonical attendance DB| PARTIAL   |
+| Integration connectors | BLOCKED   |
+| GPS / geofence         | BLOCKED   |
+| Excel import           | PARTIAL   |
+| Payroll interaction    | BLOCKED   |
+| Reporting readiness    | GO        |
+| UI readiness           | PARTIAL   |
+
+Overall implementation start: GO for P20-B.
+Production multi-source attendance: BLOCKED until P20-C–E.
+
+--------------------------------------------------------------------------------
+RISKS
+--------------------------------------------------------------------------------
+1. Payroll/attendance divergence continues until read adapter built.
+2. Dual leave models confuse attendance tab until UI cutover completes.
+3. Monolithic hr.ts complicates connector addition without modularization.
+4. Text-based times complicate timezone/event migration.
+5. GPS privacy requires legal review before production enable.
+6. Import confirm drift may cause data quality issues until P20-C.
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P20-B — Canonical Attendance DB & Event Ingestion Foundation
+
+Scope (expected):
+- Migrations for core WEP tables (raw_events, events, daily_summaries, sources)
+- Dual-write to hr_attendance
+- Direct API clock ingest (web)
+- DB sync job skeleton
+- NO vendor SDK, NO mobile app, NO payroll process changes
+
+--------------------------------------------------------------------------------
+CONFIRMED OUT OF SCOPE (NOT STARTED)
+--------------------------------------------------------------------------------
+- Migrations (P20-A)
+- GPS implementation
+- Vendor integration implementation
+- Payroll redesign
+- Destructive attendance changes
+- Mobile app build
+- Biometric implementation
+- P20-B and beyond
+
+================================================================================
+END PHASE 20A REPORT
+================================================================================

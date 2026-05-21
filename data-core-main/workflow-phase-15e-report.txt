@@ -1,0 +1,228 @@
+================================================================================
+WORKFLOW PHASE 15-E — Manual Payment & Collection Tracking
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Platform/Super Admin only — record and verify off-platform manual payments
+against commercial invoices. No electronic payment, no tenant payment actions.
+
+================================================================================
+1) PAYMENT RECORDS MODEL
+================================================================================
+
+Table: commercial_payment_records
+Schema: lib/db/src/schema/commercial-payment-records.ts
+
+Fields:
+  - id, workspaceId, commercialAccountId, invoiceId
+  - paymentReference, paymentDate
+  - receivedAmount, currency
+  - paymentMethod: bank_transfer | cheque | cash | internal_adjustment | other
+  - collectionStatus: pending_verification | verified | rejected | partially_applied | reversed
+  - recordedByUserId, verifiedByUserId (optional), verificationDate (optional)
+  - internalNotes, rejectionReason (optional)
+  - createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - Multiple payment records per invoice allowed.
+  - No payment gateway / card / bank account / IBAN columns.
+  - receivedAmount > 0 enforced on create/update.
+  - currency must match invoice currency (strict reject on mismatch).
+  - invoice must belong to same workspaceId as tenant route param.
+  - commercialAccountId must match invoice account on create.
+  - No hard delete — reversal via collectionStatus=reversed.
+
+Migration: run `pnpm --filter @workspace/db run push` when Postgres is available.
+
+================================================================================
+2) COLLECTION SUMMARY LOGIC (COMPUTED)
+================================================================================
+
+Module: artifacts/api-server/src/lib/invoice-collection-summary.ts
+(also used by GET collection-summary endpoint)
+
+Not stored in DB — computed per request from payment rows.
+
+Fields returned:
+  - invoiceAmount, currency (from invoice)
+  - totalRecordedPayments — sum of pending_verification + verified + partially_applied
+  - totalVerifiedPayments — sum of verified + partially_applied only
+  - outstandingAmount — max(0, invoiceAmount - totalVerifiedPayments)
+  - collectionState:
+      unpaid          — totalVerifiedPayments == 0
+      partially_paid  — 0 < verified < invoiceAmount (and not disputed)
+      paid            — verified >= invoiceAmount (exact)
+      overpaid        — verified > invoiceAmount
+      disputed        — has rejected payment(s) and not fully paid
+  - paymentCount, verifiedPaymentCount, hasRejectedPayments
+
+Rejected and reversed amounts are excluded from verified totals.
+invoiceAmount is never modified by payment records.
+
+================================================================================
+3) PERMISSIONS ADDED
+================================================================================
+
+New codes (total platform permissions: 31):
+  - commercial.payments.read
+  - commercial.payments.record
+  - commercial.payments.verify
+
+Backend: artifacts/api-server/src/lib/platform-permissions.ts
+Frontend: artifacts/ops-platform/src/lib/platform-permissions-config.ts
+         artifacts/ops-platform/src/lib/commercial-config.ts (COMMERCIAL_PERMISSION_CONFIG)
+
+Role matrix (additive — no redesign):
+  root_platform_owner / platform_admin:
+    all 31 (via ALL_PERMISSIONS)
+  finance_admin:
+    read + record + verify (+ existing commercial invoice permissions)
+  sales_admin:
+    commercial.payments.read only
+  auditor:
+    commercial.payments.read only
+  support_admin / read_only_operator:
+    commercial.payments.read (aligned with existing commercial.invoices.read pattern)
+  workspace_support:
+    none
+
+Decision: support_admin and read_only_operator receive payments.read because they
+already have commercial.invoices.read for tenant visibility; they cannot record
+or verify without explicit write permissions.
+
+================================================================================
+4) BACKEND APIs (PLATFORM ONLY)
+================================================================================
+
+Router: artifacts/api-server/src/routes/commercial-payments.ts
+
+GET /platform/tenants/:tenantId/commercial-payments
+  - commercial.payments.read
+  - Filters: invoiceId, collectionStatus, paymentMethod, from, to (paymentDate)
+
+GET /platform/tenants/:tenantId/commercial-invoices/:invoiceId/collection-summary
+  - commercial.payments.read
+  - Returns computed summary object
+
+POST /platform/tenants/:tenantId/commercial-invoices/:invoiceId/payments
+  - commercial.payments.record
+  - Creates pending_verification payment
+
+PATCH /platform/tenants/:tenantId/commercial-payments/:paymentId
+  - commercial.payments.record
+  - Editable only when collectionStatus = pending_verification
+
+PATCH .../payments/:paymentId/verify
+  - commercial.payments.verify — requires reason (min 10 chars)
+
+PATCH .../payments/:paymentId/reject
+  - commercial.payments.verify — sets rejected + rejectionReason
+
+PATCH .../payments/:paymentId/reverse
+  - commercial.payments.verify — sets reversed + reason in internalNotes
+
+Forbidden: DELETE, tenant payment routes, gateway/bank API routes.
+
+Validation:
+  - Rejects cardNumber, bankAccount, iban, stripe*, checkout* in JSON body
+  - Tenant + invoice + account cross-checks
+  - Currency match with invoice
+
+================================================================================
+5) FRONTEND COLLECTION TRACKING UI
+================================================================================
+
+Component: artifacts/ops-platform/src/components/commercial/CollectionTrackingPanel.tsx
+Hooks: artifacts/ops-platform/src/hooks/use-commercial-payments.ts
+
+Wired in: InvoicesSection → "Collection" button per invoice row
+          super-admin-tenants.tsx CommercialPanel (permission props)
+
+Section: Collection Tracking — متابعة التحصيل (inline panel under invoice list)
+
+Displays:
+  - Summary: invoice amount, recorded, verified, outstanding, collection state badge
+  - Payment records table: reference, date, amount, method, status, notes
+  - recordedBy / verifiedBy / verificationDate via API fields
+
+Buttons (permission-gated):
+  - Record Payment — commercial.payments.record
+  - Edit Payment — record, pending_verification only
+  - Verify / Reject / Reverse — commercial.payments.verify + reason dialog
+
+Not shown: Pay Now, Stripe, Checkout, Card, Bank API, customer upload, Delete, Email.
+
+React Query keys:
+  ["platform", "tenants", tenantId, "commercial-payments", filters]
+  ["platform", "tenants", tenantId, "commercial-invoices", invoiceId, "collection-summary"]
+
+================================================================================
+6) AUDIT EVENTS
+================================================================================
+
+  - commercial_payment_recorded
+  - commercial_payment_updated
+  - commercial_payment_verified
+  - commercial_payment_rejected
+  - commercial_payment_reversed
+  - commercial_payment_action_blocked
+
+Metadata: actorId, tenantId/workspaceId, commercialAccountId, invoiceId, paymentId,
+paymentReference, previousStatus, nextStatus, receivedAmount, currency, reason,
+timestamp. No bank/card secrets.
+
+Registered in: artifacts/api-server/src/lib/platform-audit-events.ts
+
+================================================================================
+7) SAFETY GUARANTEES
+================================================================================
+
+COMMERCIAL_SAFETY_CONTRACT updated (P15-E flags, all true):
+  manualPaymentsOnly, noElectronicPayment, noStripe, noCheckout, noCardStorage,
+  noAutoCharge, noPaymentGateway, noCustomerPaymentPortal, noBankApiIntegration,
+  noAccountingLedger, noZatcaIntegration, noTaxCalculation, noInvoiceGenerationEngine,
+  noEmailSending, noTenantPaymentActions, noHardDeletePayment, noSensitiveBankFields,
+  paymentPermissionGated, auditPaymentActions
+
+Removed contradictory pre-P15-E flags:
+  noManualPaymentTracking, noCollectionWorkflow
+(platform now supports manual collection tracking internally only).
+
+================================================================================
+8) TESTS RESULTS
+================================================================================
+
+New tests:
+  - artifacts/api-server/src/lib/__tests__/invoice-collection-summary.test.ts
+  - artifacts/api-server/src/routes/__tests__/commercial-payments.test.ts
+  - artifacts/ops-platform/src/lib/__tests__/commercial-collection-tracking.test.ts
+
+Updated counts: platform permissions 31, audit events 35.
+
+Full suites (2026-05-18):
+  - api-server: 3584 passed
+  - ops-platform: 1263 passed
+
+Coverage includes:
+  - Permission matrix for payment read/record/verify
+  - Summary states unpaid/partial/paid/overpaid/disputed
+  - Rejected/reversed excluded from verified totals
+  - API permission gates, currency/amount validation, sensitive field reject
+  - Verified payment edit blocked, verify reason required
+  - Audit on record, blocked actions
+  - UI gating and forbidden payment terms absent
+  - No DELETE / tenant payment / gateway routes
+
+================================================================================
+9) LIMITATIONS INTENTIONALLY LEFT FOR P15-F
+================================================================================
+
+Next phase: P15-F — Commercial Risk & Renewal Readiness
+  - Risk scoring, renewal readiness signals, commercial health dashboards.
+  - Not in P15-E: automated dunning, bank reconciliation import, accounting sync,
+    payment reminders/email, tenant-facing payment status, invoice auto-status sync
+    from collection state (invoice.status remains manually managed in P15-C).
+
+================================================================================
+END OF REPORT
+================================================================================

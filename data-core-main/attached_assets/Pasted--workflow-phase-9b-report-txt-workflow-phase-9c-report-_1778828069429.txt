@@ -1,0 +1,274 @@
+راجع:
+- workflow-phase-9b-report.txt
+- workflow-phase-9c-report.txt
+- workflow-phase-9d-report.txt
+خصوصًا:
+- schedulerWeight semantics
+- PlatformGovernanceOverview
+- noisy tenant detection
+- fairness health aggregation
+- containmentStatus
+- starvation floor guarantees
+
+ثم نفّذ فقط:
+P9-E — Fairness Orchestration Policy Foundations
+
+ولا تنفّذ:
+- autonomous throttling
+- realtime adaptive balancing
+- distributed schedulers
+- Kubernetes orchestration
+- autoscaling infra
+- self-healing execution balancing
+
+عنوان المهمة:
+WORKFLOW PHASE 9-E — Fairness Orchestration Policy & Controlled Scheduler Governance Foundations
+
+المهمة الحالية:
+تحويل:
+read-only fairness intelligence
+
+إلى:
+controlled fairness governance policy infrastructure
+
+الهدف:
+تمكين:
+- controlled scheduler governance
+- explicit fairness policy management
+- operator-approved scheduler adjustments
+- reversible fairness decisions
+- governance-grade orchestration readiness
+
+بطريقة:
+human-approved deterministic orchestration layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT FAIRNESS STACK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- schedulerWeight calculation
+- workload partitions
+- containment distribution
+- noisy tenant oversight
+- platform governance APIs
+- fairness observability
+
+حدّد:
+- أين fairness remains advisory-only
+- أين orchestration boundaries غير واضحة
+- أين policy persistence مفقودة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN FAIRNESS POLICY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+SchedulerFairnessPolicy
+
+ليحتوي:
+- policyId
+- workspaceId
+- targetSchedulerWeight
+- previousSchedulerWeight
+- adjustmentReason
+- approvedBy
+- approvedAt
+- expiresAt
+- rollbackEligible
+- policyStatus
+
+مع:
+deterministic governance semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — CONTROLLED POLICY ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+applyFairnessPolicy()
+
+بحيث:
+- يتطلب explicit operator approval
+- يمنع unsafe weight values
+- يحترم starvation floor
+- يدعم rollback semantics
+- يسجل audit trail كامل
+
+لكن:
+بدون automatic orchestration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FAIRNESS GOVERNANCE RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+fairness safety constraints:
+
+- minimum scheduler weight floor
+- bounded adjustment ranges
+- expiration-required policies
+- rollback eligibility tracking
+- policy conflict prevention
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — POLICY LIFECYCLE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+FairnessPolicyStatus
+
+يحتوي:
+- pending
+- active
+- expired
+- rolled_back
+- rejected
+
+مع:
+deterministic transitions فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — AUDIT & REVERSIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+كل fairness adjustment يجب:
+- يكون auditable
+- reversible
+- timestamped
+- operator-attributed
+- conflict-safe
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+POST /platform/governance/fairness/policies
+POST /platform/governance/fairness/policies/:id/approve
+POST /platform/governance/fairness/policies/:id/rollback
+GET  /platform/governance/fairness/policies
+
+بحيث:
+- super-admin only
+- deterministic serialization
+- audit-safe payloads
+- policy conflict validation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+scheduler_fairness_policy_created
+
+B)
+scheduler_fairness_policy_approved
+
+C)
+scheduler_fairness_policy_rolled_back
+
+D)
+scheduler_fairness_policy_expired
+
+كلها تحتوي:
+- policyId
+- workspaceId
+- targetSchedulerWeight
+- previousSchedulerWeight
+- approvedBy
+- policyStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Fairness orchestration MUST:
+- require human approval
+- never self-adjust automatically
+- preserve starvation guarantees
+- fail closed on ambiguity
+- reject conflicting policies
+
+أي:
+controlled governance orchestration فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+policy creation deterministic
+
+T2:
+unsafe scheduler weight rejected
+
+T3:
+starvation floor preserved
+
+T4:
+policy approval requires operator
+
+T5:
+rollback semantics valid
+
+T6:
+conflicting policies rejected
+
+T7:
+policy expiration deterministic
+
+T8:
+audit serialization stable
+
+T9:
+super-admin enforcement valid
+
+T10:
+no autonomous orchestration occurs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- autonomous balancing
+- adaptive AI scheduling
+- realtime orchestration loops
+- distributed scheduler federation
+- autoscaling execution clusters
+- self-healing orchestration
+
+خلك:
+minimal controlled orchestration infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9e-report.txt
+
+ويحتوي:
+- fairness policy architecture
+- orchestration governance semantics
+- scheduler adjustment constraints
+- policy lifecycle model
+- rollback guarantees
+- auditability guarantees
+- governance integration points
+- observability additions
+- tests results
+- remaining orchestration gaps
+- readiness assessment قبل adaptive scheduling research

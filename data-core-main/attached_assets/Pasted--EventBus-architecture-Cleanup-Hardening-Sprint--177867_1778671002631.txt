@@ -1,0 +1,87 @@
+راجع الـ EventBus architecture الحالية والتقارير السابقة ثم نفّذ فقط Cleanup + Hardening Sprint بدون أي migrations جديدة أو أي توسع بالـ modules.
+
+المهمة الحالية:
+تنظيف وتثبيت الـ architecture الحالية قبل الدخول في forms migration أو أي workflows معقدة.
+
+المطلوب بالتفصيل:
+
+1- تنظيف legacy scaffolding المرتبط بـ notifications.ts
+
+المطلوب:
+- إزالة أي imports غير مستخدمة
+- إزالة أي side-effect registrations لم تعد مطلوبة
+- إزالة أي comments قديمة أو misleading
+- إذا بقي الملف intentional legacy scaffold:
+وثّق ذلك بوضوح داخل comments
+
+2- أضف Global Error Boundary داخل EventBus.emit()
+
+المطلوب:
+- أي synchronous throw من listener لا يوقف بقية listeners
+- تسجيل الخطأ بشكل واضح عبر logger
+- الحفاظ على Promise.allSettled الحالية
+- عدم تغيير emit API أو behavior الحالي
+
+3- أصلح bug:
+leave.requested duplicate registry entry
+
+المطلوب:
+- إزالة التكرار
+- تحديد canonical owner الصحيح
+- الحفاظ على backward compatibility
+- توثيق سبب المشكلة داخل comments أو التقرير
+
+4- نظّف tickets.ts بعد migrations السابقة.
+
+المطلوب:
+- إزالة dead imports
+- إزالة dispatcher references غير المستخدمة
+- إزالة comments القديمة غير الصحيحة
+- توثيق أي coupling متبقي فقط بدون refactor واسع
+
+5- راجع:
+- activity.ts
+- notifications-bus.ts
+- bridge.ts
+- app-bus.ts
+
+وابحث عن:
+- dead code
+- stale TODOs
+- duplicated comments
+- migration notes قديمة
+- legacy warnings لم تعد صحيحة
+
+وقم بتنظيفها فقط بدون تغيير behavior.
+
+6- لا تبدأ:
+- forms migration
+- comments migration
+- workflow redesign
+- leave lifecycle expansion
+- Redis/DLQ/persistence redesign
+
+7- لا تغيّر:
+- database schema
+- routes behavior
+- existing event payloads
+- workflow engine behavior
+
+8- أضف comments واضحة تشرح:
+- stabilized architecture boundaries
+- canonical runtime layer
+- intentional legacy areas
+- migration completion status
+
+9- في النهاية:
+أنشئ ملف TXT باسم:
+
+architecture-cleanup-hardening-report.txt
+
+ويحتوي:
+- جميع أعمال التنظيف المنفذة
+- الملفات المعدلة
+- أي dead code تمت إزالته
+- أي intentional legacy areas متبقية
+- أي risks متبقية
+- readiness assessment قبل forms migration

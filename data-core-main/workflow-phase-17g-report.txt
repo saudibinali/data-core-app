@@ -1,0 +1,314 @@
+================================================================================
+WORKFLOW PHASE 17-G — Final Platform Users Custom Access Control Closure
+================================================================================
+Date: 2026-05-19
+Scope: End-to-end review, integration QA (static), documentation, regression tests, formal sign-off
+No new features. No Phase 18. No role matrix redesign.
+
+================================================================================
+FINAL STATUS
+================================================================================
+PHASE 17 — PLATFORM USERS CUSTOM ACCESS CONTROL: COMPLETE
+
+All sub-phases P17-A through P17-F verified integrated, safe, documented, and tested.
+Phase 17 is formally closed.
+
+================================================================================
+1) P17-A — Platform User Directory & Lifecycle (COMPLETE)
+================================================================================
+- Platform users: users table with workspaceId IS NULL
+- Lifecycle: invited | active | disabled | suspended | locked
+- APIs: GET/POST/PATCH profile, PATCH status, PATCH role (P14-B)
+- Email normalized via normalizePlatformUserEmail (platform-user-lifecycle.ts)
+- No hard delete; root/protected baseline; full audit
+Reports: workflow-phase-17a-report.txt
+
+================================================================================
+2) P17-B — Custom Permission Assignment (COMPLETE)
+================================================================================
+- Table: platform_user_permission_overrides (grant | deny)
+- Effective resolver: role ∪ grants − denies (deny wins)
+- Root immutable for override mutations by non-root
+- Platform catalog only (PLATFORM_PERMISSION_CODES)
+- Audit: platform_permission_override_*
+Reports: workflow-phase-17b-report.txt
+
+================================================================================
+3) P17-C — Super Admin Protection Policies (COMPLETE)
+================================================================================
+- Config: platform-admin-protection-policy-config.ts
+- Central evaluator: evaluatePlatformAdminProtection()
+- Protected users, last owner, self-disable/demotion blocks
+- Critical permission deny from last owner blocked
+- blockedReason surfaced in UI (formatProtectionBlockedReason)
+Reports: workflow-phase-17c-report.txt
+
+================================================================================
+4) P17-D — Access Review & Audit (COMPLETE)
+================================================================================
+- GET summary, user detail, audit-events (sanitized metadata)
+- POST review records metadata only — no permission/status mutation
+- Risk criteria: critical perms, overrides, stale login, protection
+Reports: workflow-phase-17d-report.txt
+
+================================================================================
+5) P17-E — Platform User Invitation / Activation (COMPLETE)
+================================================================================
+- Table: platform_user_invitations (tokenHash only)
+- One-time activation URL on create/resend (shownOnce)
+- Public verify/accept; no email/SMTP
+- Protection integration on create/revoke
+- Route: /platform/activate (ops public page)
+Reports: workflow-phase-17e-report.txt
+
+================================================================================
+6) P17-F — Platform Users Console Integration (COMPLETE)
+================================================================================
+- Unified console: summary cards, enriched table, 6-tab drawer
+- Read-only: GET /platform/users/console-summary, GET .../:userId/console
+- Navigation: primary + More dropdown (Workspaces, Activity, Event Log, Settings)
+Reports: workflow-phase-17f-report.txt
+
+================================================================================
+7) INTEGRATION QA SCENARIOS (P17-G static verification)
+================================================================================
+Verified via artifacts/ops-platform/src/lib/__tests__/phase-17g-closure.test.ts
+
+Scenario A — Create platform user ........................ PASS
+  POST /platform/users, platform_user_created, no router.delete,
+  normalizePlatformUserEmail in lifecycle module
+
+Scenario B — Invite and activate ........................ PASS
+  hashPlatformInvitationToken, shownOnce, no email in invitations lib,
+  platform_user_invitation_accepted audit
+
+Scenario C — Custom permissions ......................... PASS
+  computeEffectivePermissionsFromRoleAndOverrides, deny wins
+
+Scenario D — Protected/root safety ...................... PASS
+  SELF_DISABLE_BLOCKED, ROOT_OWNER_IMMUTABLE, LAST_ROOT_OWNER_BLOCKED,
+  formatProtectionBlockedReason in ops config
+
+Scenario E — Access review .............................. PASS
+  sanitizeAuditMetadataForReview, buildPlatformAccessReviewSummary,
+  access-review routes do not call platform.permissions.update
+
+Scenario F — Console integration ........................ PASS
+  PlatformUsersSummaryCards, PlatformUserDetailDrawer, nav-more-dropdown
+
+Scenario G — Permission boundaries ...................... PASS
+  isNull(usersTable.workspaceId), no tenant/workspace permission routes
+
+Safety contracts (6 modules) ............................ PASS (all flags true)
+Phase 17 boundary scan (core surfaces, comments stripped) . PASS
+Documentation file exists ............................... PASS
+
+================================================================================
+8) DOCUMENTATION
+================================================================================
+Created/updated:
+  docs/platform-users-custom-access-control.md (NEW — full Phase 17 reference)
+
+Related (unchanged this phase):
+  docs/commercial-administration.md
+  docs/subscription-entitlement-control.md
+
+Prior workflow reports reviewed:
+  workflow-phase-17a-report.txt through workflow-phase-17f-report.txt
+  workflow-phase-16h-report.txt
+
+================================================================================
+9) PERMISSIONS FINAL COUNT
+================================================================================
+PLATFORM_PERMISSION_CODES: 55
+
+Phase 17 additions (net new codes):
+  platform.accessReview.read
+  platform.accessReview.update
+  platform.invitations.read
+  platform.invitations.create
+  platform.invitations.revoke
+
+Role matrix: NOT redesigned
+  root_platform_owner: all 55
+  platform_admin: 53 (excludes platform.permissions.update, platform.accessReview.update)
+
+Frontend permission groups: P17-D/E codes added to Platform Users group in
+  platform-permissions-config.ts (catalog UI completeness only)
+
+================================================================================
+10) API SUMMARY
+================================================================================
+Directory (P17-A):
+  GET/POST /platform/users
+  GET/PATCH /platform/users/:userId
+  PATCH /platform/users/:userId/status
+  PATCH /platform/users/:userId/role
+
+Permissions (P17-B):
+  GET/PUT/PATCH/DELETE /platform/users/:userId/permissions
+
+Protection: integrated in status/role/permission/invitation mutations
+
+Access review (P17-D):
+  GET /platform/access-review/summary
+  GET /platform/access-review/users/:userId
+  GET /platform/access-review/audit-events
+  POST /platform/access-review/users/:userId/review
+
+Invitations (P17-E):
+  GET /platform/invitations/verify?token=
+  POST /platform/invitations/accept
+  GET/POST /platform/users/:userId/invitations
+  POST /platform/users/:userId/invitations/resend
+  POST /platform/invitations/:invitationId/revoke
+
+Console aggregation (P17-F):
+  GET /platform/users/console-summary
+  GET /platform/users/:userId/console
+
+================================================================================
+11) UI SUMMARY
+================================================================================
+Route: /super-admin/platform-users
+Page: super-admin-platform-users.tsx
+Components: artifacts/ops-platform/src/components/platform-users/*
+  - PlatformUsersSummaryCards
+  - PlatformUsersTable (filters: status, type, protected, overrides, risk, invitation)
+  - PlatformUserDetailDrawer (Overview, Permissions, Protection, Invitations, Access Review, Audit)
+Public activation: /platform/activate?token=...
+
+Navigation (super-admin-layout.tsx):
+  Primary: Dashboard, Tenants, Commercial, Platform Users, Access Review
+  More: Workspaces, Platform Activity, Audit / Event Log, Platform Settings
+
+================================================================================
+12) EFFECTIVE PERMISSION SUMMARY
+================================================================================
+Module: platform-effective-permissions.ts
+Formula: effective = (rolePermissions ∪ grantedOverrides) \ deniedOverrides
+Middleware: requirePlatformPermission uses actor effective set
+Console/drawer: effective breakdown shown in Permissions tab
+
+================================================================================
+13) PROTECTION SUMMARY
+================================================================================
+Evaluator: platform-admin-protection-evaluator.ts
+Integration: evaluateAndAuditPlatformProtection on sensitive mutations
+Defaults: minActiveRootOwners=1, minActivePlatformOwners=1,
+  preventSelfDisable, preventSelfDemotion, preventLastOwnerDisable,
+  preventLastOwnerCriticalPermissionDeny, emergencyAccessMode=disabled
+UI: Protection tab + blockedReason in API responses
+
+================================================================================
+14) INVITATION / ACTIVATION SUMMARY
+================================================================================
+Token: crypto random → SHA-256 hash in DB only
+Expiry: 7 days default; expire-on-read
+Accept: sets active + bcrypt password; invitation status accepted (not reusable)
+No email: operator copies activationUrl from UI once
+
+================================================================================
+15) ACCESS REVIEW / AUDIT SUMMARY
+================================================================================
+Summary: high-risk, protected, custom overrides, stale login
+User detail: effective permissions, override list, recent sanitized events
+Mark reviewed: platform_access_review_recorded only
+Audit catalog: 76 platform audit action codes (platform-audit-events.ts)
+Sanitization: no tokenHash/plain tokens in review API payloads
+
+================================================================================
+16) SAFETY BOUNDARY VERIFICATION
+================================================================================
+Confirmed ABSENT from Phase 17 scope (code + safety contracts + boundary scan):
+
+  role matrix redesign          — NOT present (matrix extended by codes only)
+  approval workflow             — NOT present
+  emergency access              — disabled in policy config
+  email sending / SMTP          — NOT present
+  password reset                — NOT present (out-of-scope comments only)
+  MFA / SSO                     — NOT present
+  tenant/workspace user mgmt  — NOT present (workspaceId IS NULL enforced)
+  tenant/workspace invitations  — NOT present (separate workspace invitations)
+  root owner promotion/removal  — NOT present (ROOT_OWNER_IMMUTABLE)
+  hard delete users             — NOT present (no DELETE route)
+  destructive bulk actions      — NOT present
+  tenant/workspace perm assign  — NOT present
+  payment/Stripe/checkout       — NOT present in P17 surfaces
+  subscription enforcement chg  — NOT present (Phase 16 separate)
+
+All six safety contracts report true:
+  PLATFORM_USER_DIRECTORY_SAFETY_CONTRACT
+  PLATFORM_PERMISSION_ASSIGNMENT_SAFETY_CONTRACT
+  SUPER_ADMIN_PROTECTION_SAFETY_CONTRACT
+  ACCESS_REVIEW_SAFETY_CONTRACT
+  PLATFORM_INVITATION_SAFETY_CONTRACT
+  PLATFORM_USERS_CONSOLE_SAFETY_CONTRACT
+
+================================================================================
+17) TEST RESULTS
+================================================================================
+P17 phase tests (ops-platform) — ALL PASS
+  phase-17a-platform-user-directory.test.ts
+  phase-17b-platform-permission-assignment.test.ts
+  phase-17c-super-admin-protection.test.ts
+  phase-17d-access-review.test.ts
+  phase-17e-platform-invitations.test.ts
+  phase-17f-platform-users-console.test.ts
+  phase-17g-closure.test.ts
+  platform-access.test.ts
+  Batch: 8 files, 115 tests PASS
+
+P17 + related regression (ops-platform) — PASS
+  Above + platform-permissions-config.test.ts
+  + platform-users-config.test.ts
+  Batch: 10 files, 178 tests PASS
+
+P17 backend unit tests (api-server) — ALL PASS
+  platform-permissions, platform-effective-permissions,
+  platform-admin-protection-evaluator, platform-permission-override-policy,
+  platform-user-invitation-token, platform-user-invitations-policy,
+  platform-access-review, platform-user-console, platform-user-lifecycle,
+  root-platform-owner-policy, platform-me, platform-audit-events
+  Batch: 11 files, 219 tests PASS
+
+Full test suites:
+  api-server vitest run: 92 files, 3826 tests PASS
+  ops-platform vitest run: 49 files, 1501 PASS, 1 FAIL (pre-existing, unrelated to P17)
+    FAIL: commercial-console-integration.test.ts
+          "registry parses tab=commercial deep link" — tenants page no longer contains
+          tabRaw === "commercial" string (P15 commercial console drift; not Phase 17)
+
+Monorepo-wide test (all packages): NOT run — no root vitest script in this workspace;
+packages tested individually (api-server + ops-platform above).
+
+P17-G closure test fixes (QA only, no product semantics):
+  - phase-17g-closure: normalizePlatformUserEmail check, comment-stripped boundary scan
+  - Stale count assertions synced to 55 permissions / dynamic audit catalog length
+  - platform-permissions-config: P17-D/E codes in Platform Users permission group
+
+================================================================================
+18) ACCEPTED LIMITATIONS
+================================================================================
+- No email delivery for invitations (manual URL copy)
+- No password reset / MFA / SSO for platform users in this phase
+- Console directory enrichment is client-side on loaded page + summary map
+- Access review risk scoring is heuristic, not compliance certification
+- No live-database E2E tests in Phase 17 (unit/static only)
+- ops-platform full suite: 1 unrelated commercial deep-link static test failure
+
+================================================================================
+19) FINAL DECISION
+================================================================================
+PHASE 17 — PLATFORM USERS CUSTOM ACCESS CONTROL: COMPLETE
+
+Phase 18 (Tenant Workspace Administration) is NOT started.
+No new product modules, auth flows, or permission semantics were added in P17-G.
+
+Next work (out of scope for Phase 17): optional email channel, scheduled access
+review campaigns, server-side enriched pagination — documented in
+docs/platform-users-custom-access-control.md under Future phases.
+
+================================================================================
+END OF PHASE 17-G REPORT
+================================================================================

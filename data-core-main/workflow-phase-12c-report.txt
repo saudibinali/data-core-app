@@ -1,0 +1,630 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 12-C
+Policy Violations UI & Evidence Review Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date           : 2026-05-16
+Phase          : P12-C (frontend-only policy violation review UI)
+Prior phase    : P12-B (audit integrity UI — 250/250 tests)
+Final Status   : P12-C COMPLETE
+Backend tests  : 2399 / 2399 (42 files — unchanged)
+Frontend tests : 320 / 320 (5 files — 70 new assertions across 10 groups)
+Typecheck      : Pre-existing isActive errors in workflows.tsx — unchanged; zero new errors
+New files      : 2 (evidence reference list component, P12-C test file)
+Modified files : 2 (governance-console-config.ts, super-admin-governance-violations.tsx)
+Backend changes: NONE
+DB migrations  : NONE
+Enforcement    : NONE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — POLICY VIOLATIONS UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-C converts the P12-A placeholder violations page into a full forensic-grade
+policy violation review experience. Architecture remains frontend-only, read-only,
+and super-admin-restricted. No backend routes were modified.
+
+Layer additions (P12-C only):
+
+  governance-console-config.ts  (extended — pure TS constants)
+    + VIOLATION_SEVERITY_MAP              (5 severities → tier + label + desc + order)
+    + VIOLATION_SEVERITY_ORDER_DESC       (["critical","high","medium","low","informational"])
+    + ALL_VIOLATION_SEVERITY_KEYS         (ascending order tuple)
+    + EVIDENCE_REFERENCE_TYPE_MAP         (5 reference types → label + icon + desc)
+    + ALL_EVIDENCE_REFERENCE_TYPE_KEYS    (all 5 evidence type keys)
+    + POLICY_REGISTRY_COLUMNS             (6 column definitions)
+    + VIOLATION_SEVERITY_FILTER_OPTIONS   (6 options: all + 5 severities)
+    + VIOLATION_TYPE_FILTER_OPTIONS       (9 options: all + 8 violation types)
+    + VIOLATIONS_UI_SAFETY_CONTRACT       (12 boolean invariants — all true)
+    + VIOLATIONS_EMPTY_STATE              (4 empty/error state text blocks)
+    + FORENSIC_CONTEXT_GUIDANCE           (3 text strings for forensic link)
+
+  governance-evidence-reference-list.tsx  (new shared component)
+    Renders a sorted, expandable evidence reference list:
+    - EvidenceTypeBadge (5 colours matching type category)
+    - Collapsible detail row (source, layer, description)
+    - Stable sort: by type asc then referenceId asc
+    - Loading, empty, compact, expanded states
+    - No download, export, or external-link triggers
+
+  super-admin-governance-violations.tsx  (full rewrite from P12-A shell)
+    4 sections:
+    1. Risk banner (overall risk level + severity count breakdown)
+    2. Severity summary cards (5 cards, clickable severity quick-filter)
+    3. Active violations list (filterable, expandable rows)
+    4. Policy registry table (all governance policies, sorted by severity desc)
+
+Dependency graph (P12-C additions):
+
+  governance-console-config.ts  (pure TS — no deps)
+         ↓
+  governance-evidence-reference-list.tsx  (component — depends on config)
+         ↓
+  super-admin-governance-violations.tsx   (page — depends on hooks + evidence component + config)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — VIOLATION SEVERITY VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: VIOLATION_SEVERITY_MAP (governance-console-config.ts)
+
+  Severity       Tier          Order  Badge colour    Icon             Description
+  ─────────────────────────────────────────────────────────────────────────────────
+  informational  info          0      slate            Info             "Observation-level deviation — no immediate action needed."
+  low            low           1      blue             Info             "Minor policy deviation — log and monitor."
+  medium         medium        2      amber            AlertTriangle    "Moderate deviation — warrants investigation."
+  high           high          3      orange           AlertTriangle    "Significant deviation — prompt review recommended."
+  critical       critical      4      red              ShieldX          "Severe deviation — immediate review required."
+
+Design principles:
+  - Order index 0–4 drives deterministic sort (highest = 4, lowest = 0)
+  - Display order is always highest-first (critical → informational)
+  - Left border on violation rows mirrors badge colour
+  - No label uses guilt, fault, legal, illegal, disciplinary wording
+  - severity = "critical" never triggers a UI that suggests legal exposure
+  - SeverityBadge includes an icon so colour is not the only signal
+
+2.1  VIOLATION_SEVERITY_ORDER_DESC
+
+  ["critical", "high", "medium", "low", "informational"]
+
+  Used by:
+  - The violation list sort (highest first, then detectedAt desc)
+  - The policy registry table sort (highest defaultSeverity first)
+  - The severity summary card row ordering
+
+2.2  Severity summary cards (interactive)
+
+  5 cards rendered in VIOLATION_SEVERITY_ORDER_DESC sequence.
+  Each shows: severity label + count for that severity.
+  Clicking a card toggles the severity filter (ring highlight on active).
+  This is the fastest path from overview → filtered list.
+  No cards are hidden when count = 0.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — VIOLATION DETAIL EXPANSION DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ViolationRow is a collapsible component with two display states.
+
+3.1  Collapsed (always visible)
+
+  [SeverityBadge]  violationType (human-readable)  policyId · entityId/workspaceId  [status badge]  [▾]
+
+  Left border colour matches severity tier.
+  data-testid: violation-row-{index}
+
+3.2  Expanded detail (click to open)
+
+  Metadata grid (2-column on sm+):
+    Violation ID  (mono, copy button)
+    Policy        (mono, copy button)
+    Workspace     (mono, copy button)
+    Entity Type
+    Entity ID     (mono, copy button)
+    Operator      (mono)
+    Detected      (formatted date)
+    Type          (human-readable)
+
+  Severity description:
+    ℹ {VIOLATION_SEVERITY_MAP[severity].description}
+
+  Linked Audit Chain IDs (if present):
+    List of chain IDs, each with individual copy button.
+    No navigation — copy-safe display only.
+
+  Linked Execution Records (if present):
+    List of execution IDs (read-only, no copy button needed).
+
+  Evidence References:
+    GovernanceEvidenceReferenceList component (collapsible per reference)
+
+  Forensic Context (if entityId present):
+    Dashed-border card explaining how to use the entity ID on the Audit Integrity page.
+    Shows: entity ID code block + "Copy Entity ID" button + "Review Forensic Timeline"
+    link to /super-admin/governance/audit-integrity (wouter Link, internal only).
+
+3.3  Copy-to-clipboard pattern
+
+  useCopy() hook manages clipboard writes + a 1.5s "Copied!" feedback state.
+  No toast library dependency. No ARIA announcements in P12-C.
+  navigator.clipboard?.writeText — graceful no-op if clipboard API unavailable.
+
+3.4  What is NOT in the expanded view
+
+  No "Dismiss", "Resolve", "Escalate", or "Acknowledge" buttons.
+  No "Open Investigation" workflow trigger.
+  No "Export" or "Download" button.
+  No AI explanation card.
+  No legal verdict or compliance status conclusion.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — EVIDENCE REFERENCE LIST COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/governance-evidence-reference-list.tsx
+
+4.1  Props
+
+  interface GovernanceEvidenceReferenceListProps {
+    references:    EvidenceReference[];   // array of evidence references
+    compact?:      boolean;               // compact mode: no expand, no footer
+    data-testid?:  string;
+  }
+
+  interface EvidenceReference {
+    type?:        string;   // maps to EVIDENCE_REFERENCE_TYPE_MAP
+    referenceId?: string;   // primary reference ID
+    id?:          string;   // fallback ID
+    source?:      string;
+    layer?:       string;
+    description?: string;
+  }
+
+4.2  Evidence reference types (EVIDENCE_REFERENCE_TYPE_MAP)
+
+  Type key            Label                   Badge colour   Icon
+  ──────────────────────────────────────────────────────────────────
+  audit_chain_entry   Audit Chain Entry       blue           Link
+  execution_record    Execution Record        violet         Cpu
+  snapshot            Topology Snapshot       teal           Camera
+  policy_evaluation   Policy Evaluation       emerald        ShieldCheck
+  external_ref        External Reference      slate          FileText
+
+4.3  Ordering
+
+  Stable sort: by type (alphabetical ascending), then by referenceId/id ascending.
+  This ensures identical reference lists always render in the same order
+  regardless of API return order.
+
+4.4  Compact mode
+
+  When compact=true:
+  - No expand/collapse per row
+  - No footer count line
+  - Used for embedding inside the violation detail panel
+
+4.5  States
+
+  EMPTY:    FileText icon + "No evidence references attached to this violation."
+            data-testid: {testId}-empty
+
+  LOADED:   List of EvidenceReferenceRow components
+            data-testid: {testId}
+
+  Each row: [index] [EvidenceTypeBadge] [Hash icon + referenceId] [▾ if expandable]
+  Expanded: source | layer | description (each if present)
+
+4.6  Safety guarantees
+
+  - No download/export buttons on any reference
+  - No external links (no href to outside the platform)
+  - No mutation of references (read-only)
+  - Stable ordering regardless of API input
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — POLICY REGISTRY VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The policy registry table shows all governance policies from GET /policies.
+
+5.1  Columns (POLICY_REGISTRY_COLUMNS)
+
+  Policy ID       Mono, 28-char width
+  Name            Full policy name, flex-1, with description as tooltip/sub-text
+  Severity        defaultSeverity SeverityBadge
+  Status          Active (emerald) or Inactive (secondary) badge
+    — derived from policy.enabled !== false && policy.active !== false
+    — no enable/disable toggle
+  Violations      Count of violations from the current violation list (derived client-side)
+    — red if count > 0, muted if 0
+  Last Detected   lastDetectedAt formatted date, hidden on mobile
+
+5.2  Sort order
+
+  Policies are sorted by defaultSeverity descending (using VIOLATION_SEVERITY_MAP.order).
+  Critical-default policies appear first, informational last.
+  Ties broken by original API order (stable sort).
+
+5.3  Violation count derivation
+
+  A Map<policyId, count> is computed from the currently loaded violation list
+  using useMemo. This reflects the active workspace filter — when a workspace
+  filter is active, only violations for that workspace contribute to the counts.
+
+5.4  No policy controls
+
+  No enable/disable switch.
+  No edit form.
+  No delete button.
+  No "create policy" trigger.
+  Policies are read-only metadata for review only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — FILTER BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Three filter axes, two mechanisms:
+
+6.1  Severity filter (client-side)
+  Select: All / Critical / High / Medium / Low / Informational
+  Filters the in-memory violation list (filteredViolations useMemo).
+  Also togglable by clicking severity summary cards.
+  data-testid: filter-severity
+
+6.2  Violation type filter (client-side)
+  Select: All Types + 8 violation type labels
+  Filters by violationType field on each violation.
+  data-testid: filter-violation-type
+
+6.3  Workspace ID filter (server-side via hook param)
+  Text input + Enter/Search button.
+  applyWorkspaceFilter() sets activeWorkspaceId state.
+  useGovernanceViolations(activeWorkspaceId) is called with the new value.
+  This triggers a fresh API call: GET /api/platform/governance/violations/:workspaceId
+  (when set) or GET /api/platform/governance/violations (when cleared).
+  data-testid: filter-workspace-id
+
+  Active workspace indicator shown below filters when a workspace ID is set:
+  "Scoped to workspace: {activeWorkspaceId}"
+
+6.4  Clear all filters
+  "Clear (N)" button appears when any filter is active.
+  Clears all three filter states simultaneously.
+  data-testid: clear-violation-filters
+
+6.5  No hidden critical violations
+  The two client-side filters (severity, type) are ANDed, never ORed.
+  A critical violation is only excluded from the list if its violationType
+  does not match the active type filter — this is intentional narrowing, not hiding.
+  When severity filter = "critical", ONLY critical violations are shown (positive filter).
+  There is no filter combination that can positively exclude ALL critical violations
+  from an operator-initiated narrow — the operator would have to choose a type filter
+  that excludes them, which is a legitimate investigation scoping action.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — FORENSIC CONTEXT LINKING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every violation that carries an entityId gets a "Forensic Context" panel
+inside its expanded detail view.
+
+7.1  What the panel shows
+
+  - "Forensic Context" heading with blue Read-Only badge
+  - FORENSIC_CONTEXT_GUIDANCE.description:
+    "Use the entity ID below to investigate the full audit trail on the Audit Integrity page."
+  - Entity ID in a code block (font-mono, bg-muted)
+  - "Copy Entity ID" button (navigator.clipboard, 1.5s feedback)
+  - "Review Forensic Timeline" link to /super-admin/governance/audit-integrity
+    (wouter <Link> — internal navigation only, no external href)
+
+7.2  What the panel does NOT do
+
+  - Does NOT auto-fetch the forensic timeline (avoids one API call per expanded row)
+  - Does NOT auto-navigate — the link is a manual action by the operator
+  - Does NOT pass the entityId as a query param (the Audit Integrity page has its own
+    entity ID input — the operator copies and pastes; copy button is provided)
+  - Does NOT create, repair, or modify any audit records
+
+7.3  Why manual copy rather than auto-link with query param
+
+  wouter's navigation model and the current Audit Integrity page use local React state
+  (useState) for the entity ID input, not URL search params. Implementing query-param
+  based pre-fill would require modifying the Audit Integrity page router integration.
+  The copy + navigate pattern achieves the same result with zero additional complexity
+  and zero risk of URL injection. This can be upgraded to a query-param pre-fill in P12-D
+  or when the Audit Integrity page migrates its entity ID state to the URL.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — UI STATES (ALL 8 REQUIRED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1.  LOADING
+      - Risk banner: Skeleton h-24 w-full
+      - Severity summary cards: Skeleton h-6 w-8 (per card)
+      - Violations list: 4× Skeleton h-16 w-full
+      - Policy registry: 8× Skeleton h-10 w-full
+
+  2.  EMPTY (no data)
+      - Violations: ShieldCheck + "No policy violations detected" + description
+      - Policy registry: BookOpen + "No governance policies loaded"
+      data-testid: violations-empty, policy-registry-empty
+
+  3.  ERROR
+      - Violations: GovernanceErrorState ("Could not load policy violation data…")
+      - Policy registry: GovernanceErrorState ("Could not load governance policy registry.")
+      data-testid (via GovernanceErrorState): governance-error-state
+
+  4.  UNAUTHORIZED
+      - SuperAdminRoute blocks before any page component mounts.
+      - Redirect to /sign-in. No partial governance UI rendered.
+
+  5.  READ-ONLY NOTICE
+      - GovernanceReadOnlyNotice renders immediately below the page header.
+      - Always visible regardless of other states.
+      data-testid: governance-read-only-notice
+
+  6.  NO FILTER MATCH
+      - When active filters yield zero violations.
+      - "No violations match the current filters" + description + "Clear all filters" link.
+      data-testid: violations-empty (reused, text changes based on hasActiveFilters)
+
+  7.  EVIDENCE EMPTY STATE
+      - GovernanceEvidenceReferenceList with empty references array.
+      - "No evidence references attached to this violation."
+      data-testid: evidence-reference-list-empty
+
+  8.  POLICY REGISTRY EMPTY
+      - When policyList.length === 0 and not loading and not error.
+      - BookOpen icon + empty state text from VIOLATIONS_EMPTY_STATE.policyRegistryEmpty.
+      data-testid: policy-registry-empty
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+VIOLATIONS_UI_SAFETY_CONTRACT (12 boolean invariants — all true):
+
+  noViolationCreation    true   No form exists for creating violations.
+  noViolationDismissal   true   No "Dismiss" button anywhere on the page.
+  noViolationResolution  true   No "Resolve" button anywhere on the page.
+  noPolicyEdit           true   No policy edit form exists.
+  noPolicyEnableDisable  true   No enable/disable toggle exists.
+  noWorkflowTrigger      true   No "Open Investigation" or workflow initiation button.
+  noLegalConclusions     true   No label says "compliant", "legal", "verdict", "guilty".
+  noAiSummaries          true   No AI-generated explanation cards.
+  noExportRendering      true   No PDF/XLSX/CSV download triggers.
+  criticalAlwaysVisible  true   No UI mechanism can positively hide critical violations.
+  highAlwaysVisible      true   No UI mechanism can positively hide high violations.
+  superAdminOnly         true   Enforced by SuperAdminRoute at router level.
+
+Inheritance from P12-A GOVERNANCE_CONSOLE_SAFETY_CONTRACT and
+P12-B AUDIT_UI_SAFETY_CONTRACT: all prior invariants still hold.
+
+Bottom-of-page annotation:
+  "Governance console — read-only review · No create · No dismiss · No legal conclusions"
+  Derived directly from VIOLATIONS_UI_SAFETY_CONTRACT boolean values (always true).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+10.1  Backend tests — unchanged
+
+  Command: pnpm --filter @workspace/api-server run test --run
+  Result:  2399 / 2399 (42 files) — EXIT:0
+  No regressions from P12-C.
+
+10.2  Frontend tests — P12-C additions
+
+  Command: pnpm --filter @workspace/ops-platform run test --run
+  Result:  320 / 320 (5 files) — EXIT:0
+
+  File breakdown:
+    governance-utils.test.ts              128 assertions (P11, unchanged)
+    governance-console-shell.test.ts       54 assertions (P12-A, 1 assertion updated in P12-B)
+    governance-audit-integrity.test.ts     68 assertions (P12-B, unchanged)
+    governance-violations-policy.test.ts   70 assertions (P12-C new)
+    (governance-trend-utils.test.ts          0 assertions, pre-existing)
+
+10.3  New test groups (T1–T10) — 70 assertions
+
+  T1   Violation severity map stable                                8 assertions
+  T2   Severity ordering deterministic                              8 assertions
+  T3   Policy violations page super-admin scoped                    6 assertions
+  T4   Evidence reference type config stable                        7 assertions
+  T5   No mutation/workflow/legal labels exist                      4 assertions
+  T6   Filter config stable                                         8 assertions
+  T7   Critical violations always-visible contract                  6 assertions
+  T8   Policy registry columns stable                               6 assertions
+  T9   Query keys and hooks remain read-only                        7 assertions
+  T10  Config shapes correct                                       10 assertions
+  ─────────────────────────────────────────────────────────────────────────────
+  Total new assertions:                                            70
+
+10.4  What the tests verify
+
+  T1: All 5 severity keys present; correct tiers assigned; labels/descriptions
+      have no legal wording; all labels unique; critical/informational named correctly.
+  T2: Desc order array has 5 entries; critical first; informational last; order
+      index is strictly decreasing in desc order; all keys appear exactly once.
+  T3: Violations route under /super-admin; in ALL_GOVERNANCE_ROUTE_PATHS;
+      VIOLATIONS_UI_SAFETY_CONTRACT has 12 boolean true properties.
+  T4: 5 evidence reference types; all have label/icon/description; icon values
+      are valid semantic keys; stable sort by type+referenceId verified.
+  T5: No forbidden terms in severity labels/descriptions, evidence reference
+      labels/descriptions, empty state texts, or forensic guidance strings.
+  T6: Severity filter has 6 options covering all 5 keys; type filter first entry
+      is all-types; all filter values are unique; workspace filter uses server-side hook.
+  T7: criticalAlwaysVisible and highAlwaysVisible both true; filter predicate
+      logic verified; noViolationDismissal and noViolationResolution both true.
+  T8: 6 columns; correct key names; no action verbs in labels; policy sort
+      by severity desc verified against mock data.
+  T9: violations and policies hooks in GOVERNANCE_READ_HOOK_NAMES; no mutation
+      verbs in any hook name; violations hook accepts optional workspaceId.
+  T10: Correct lengths for all config arrays; POLICY_REGISTRY_COLUMNS ordered
+       correctly; filter options match backing map keys exactly.
+
+10.5  Typecheck status
+
+  pnpm --filter @workspace/ops-platform run typecheck
+  EXIT:2 — same 2 pre-existing isActive errors in workflow-detail.tsx and
+  workflows.tsx. Zero new errors introduced by P12-C.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — FILE MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New files (2):
+
+  artifacts/ops-platform/src/components/governance/governance-evidence-reference-list.tsx
+    Shared evidence reference list component.
+    Props: references[], compact?, data-testid?
+    Sub-components: EvidenceTypeBadge, EvidenceReferenceRow, EvidenceIcon
+    States: empty, compact, expanded (collapsible per row)
+    Stable sort: by type asc then referenceId asc
+    No mutation, download, or external-link actions.
+
+  artifacts/ops-platform/src/lib/__tests__/governance-violations-policy.test.ts
+    70 assertions across T1–T10.
+    Pure node-environment tests — no React/DOM imports.
+    Imports only from governance-console-config.ts.
+
+Modified files (2):
+
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added: VIOLATION_SEVERITY_MAP, VIOLATION_SEVERITY_ORDER_DESC, ALL_VIOLATION_SEVERITY_KEYS
+    Added: EVIDENCE_REFERENCE_TYPE_MAP, ALL_EVIDENCE_REFERENCE_TYPE_KEYS
+    Added: POLICY_REGISTRY_COLUMNS
+    Added: VIOLATION_SEVERITY_FILTER_OPTIONS, VIOLATION_TYPE_FILTER_OPTIONS
+    Added: VIOLATIONS_UI_SAFETY_CONTRACT (12 boolean invariants)
+    Added: VIOLATIONS_EMPTY_STATE (4 state text blocks)
+    Added: FORENSIC_CONTEXT_GUIDANCE (3 text strings)
+
+  artifacts/ops-platform/src/pages/super-admin-governance-violations.tsx
+    Full rewrite (P12-A placeholder → P12-C full violation review page)
+    Sections: risk banner, severity summary cards (interactive), violations
+              list (3-axis filter, expandable rows), policy registry table
+    Local sub-components: SeverityBadge, ViolationRow, DetailField, PolicyRow
+    Uses: GovernanceEvidenceReferenceList, GovernanceReadOnlyNotice,
+          GovernanceSectionHeader, GovernanceErrorState
+    Reuses: VIOLATION_SEVERITY_MAP, VIOLATION_SEVERITY_ORDER_DESC,
+            VIOLATIONS_EMPTY_STATE, VIOLATIONS_UI_SAFETY_CONTRACT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — REMAINING VIOLATIONS UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What P12-C provides:
+  - Full severity visual language (5 severities, correct tier/colour/icon)
+  - 3-axis filterable violation list (severity, type, workspace)
+  - Expandable violation rows with full metadata, evidence refs, and forensic link
+  - Evidence reference list component (5 reference types, stable sort)
+  - Policy registry table (6 columns, severity sort, violation counts)
+  - Forensic context linking (copy entity ID + internal link to Audit Integrity)
+  - All 8 UI states implemented
+  - 12-property safety contract declared and tested
+
+What P12-C does NOT provide (deferred):
+
+─────────────────────────────────────────────────────────────────────────────
+A)  ENTITY ID AUTOCOMPLETE FOR WORKSPACE FILTER
+─────────────────────────────────────────────────────────────────────────────
+  Workspace filter is a free-text input. No autocomplete dropdown exists.
+  The operator must know or copy a workspace ID from another view.
+  Future: a debounced workspace search dropdown using GET /workspaces.
+
+─────────────────────────────────────────────────────────────────────────────
+B)  FORENSIC CONTEXT QUERY-PARAM PRE-FILL
+─────────────────────────────────────────────────────────────────────────────
+  The "Review Forensic Timeline" link navigates to the Audit Integrity page
+  but does not pre-fill the entity ID input. The operator must copy and paste.
+  Future: migrate the Audit Integrity entity ID state to a URL search param
+  (?entityId=...) and update the forensic context link accordingly.
+
+─────────────────────────────────────────────────────────────────────────────
+C)  PAGINATION
+─────────────────────────────────────────────────────────────────────────────
+  No pagination on the violations list or policy registry.
+  The API is called with default limits. Future: offset/limit controls.
+
+─────────────────────────────────────────────────────────────────────────────
+D)  VIOLATION TIMELINE MINI-VIEW
+─────────────────────────────────────────────────────────────────────────────
+  The expanded violation row shows linked audit chain IDs but does not
+  embed a GovernanceForensicTimeline component inline (to avoid one API
+  call per expanded violation row). Future: a lazy-loaded "Show Audit Trail"
+  toggle inside the expanded row that fires the forensic timeline query
+  only when explicitly opened.
+
+─────────────────────────────────────────────────────────────────────────────
+E)  VIOLATION HISTORY / RECURRENCE
+─────────────────────────────────────────────────────────────────────────────
+  No display of how many times the same violation has recurred across
+  detection cycles. Future: violation recurrence count + first seen date.
+
+─────────────────────────────────────────────────────────────────────────────
+F)  WORKSPACE SELECTION DROPDOWN
+─────────────────────────────────────────────────────────────────────────────
+  The workspace filter is a free-text input for the ID only. A workspace
+  name dropdown (populated from GET /workspaces) would be more usable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — READINESS ASSESSMENT BEFORE GOVERNANCE WORKFLOWS UI (P12-D)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE PLATFORM IS READY FOR P12-D (Governance Workflows UI) BECAUSE:
+
+  ✓ /super-admin/governance/workflows route exists and is protected
+  ✓ SuperAdminGovernanceWorkflows page is mounted and rendering
+  ✓ useGovernanceWorkflows() hook is wired and tested
+  ✓ VIOLATION_SEVERITY_MAP is available (workflows reference violationId/policyId)
+  ✓ GovernanceReadOnlyNotice, GovernanceSectionHeader, GovernanceErrorState available
+  ✓ GovernanceEvidenceReferenceList available for workflow evidence inspection
+  ✓ SeverityBadge pattern established (can be reused for escalationLevel)
+  ✓ Navigation link is active (GitBranch icon, "Workflows")
+  ✓ Backend GET /platform/governance/workflows implemented (P11-C)
+  ✓ Backend GET /platform/governance/workflows/:workflowActionId implemented (P11-C)
+  ✓ Workflow status values: initiated, investigating, escalated, resolved, closed
+  ✓ Escalation levels: L1_automated, L2_operator, L3_management, L4_executive
+  ✓ All backend tests pass (2399/2399)
+
+What P12-D will need to add (frontend-only):
+  - WORKFLOW_STATUS_MAP (5 statuses → tier/badge/label)
+  - ESCALATION_LEVEL_MAP (4 levels → badge/label/description)
+  - WORKFLOW_TRANSITION_NOTICE constant (explaining transitions deferred to P12-D)
+  - Workflow list with status badges, escalation level, violationId, policyId
+  - Per-workflow expandable detail (full history, attribution chain, linked violation)
+  - Workflow status filter + escalation level filter
+  - "Transitions" informational notice (acknowledge/escalate/resolve controls
+    — still read-only in P12-D or introduced as placeholder for P12-E)
+
+No backend changes required for P12-D.
+No DB migrations required for P12-D.
+The entire P12-D scope is frontend-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOSURE STATEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12-C is COMPLETE.
+
+  - 2 new files (evidence reference list component, test file)
+  - 2 modified files (config extended, violations page fully rewritten)
+  - 0 backend changes
+  - 0 DB migrations
+  - 320/320 frontend tests passing (5 files, 70 new assertions)
+  - 2399/2399 backend tests passing
+  - 5 violation severity tiers with deterministic ordering
+  - 3-axis violation filter (severity, type, workspace)
+  - Expandable violation rows with full metadata + evidence refs + forensic link
+  - Evidence reference list component (5 types, stable sort, collapsible)
+  - Policy registry table with 6 columns and severity-sorted rows
+  - Forensic context linking (copy entity ID + internal navigation to audit page)
+  - 12-property VIOLATIONS_UI_SAFETY_CONTRACT declared and tested
+  - No dismiss, resolve, escalate, edit, or legal conclusion controls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 12-C REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -1,0 +1,470 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 8-B — Advanced Workflow Analytics & Dependency Intelligence
+FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: workflow-phase-8b-report.txt
+Phase: P8-B
+Status: COMPLETE
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — DEPENDENCY GRAPH ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/dependency.ts
+
+Dependency chain (strictly acyclic):
+  dependency.ts → topology.ts    (extractWorkflowTopology, computeTopologyAnalytics)
+  dependency.ts → logger.ts      (structured observability events only)
+  dependency.ts → (nothing else)
+
+The engine builds on the P8-A topology graph without re-implementing step
+parsing. All structural information is derived from the already-built
+WorkflowTopologyGraph (nodes, edges, approvalNodes, delayNodes,
+branchingNodes, entryPoints, terminalNodes).
+
+WorkflowDependencyGraph shape:
+  {
+    nodeSummaries             WorkflowNodeDependencySummary[]   per-node in/out degrees + reachability counts
+    convergenceNodes          WorkflowConvergenceNode[]          in-degree ≥ 2 (branch-merge points)
+    divergenceNodes           number[]                           stepIndex(es) with out-degree ≥ 2
+    bottleneckNodes           WorkflowBottleneckNode[]           scored, sorted descending
+    conditionalNodes          number[]                           all condition step indexes
+    synchronizationCandidates number[]                           convergence nodes with blocking predecessors
+  }
+
+WorkflowNodeDependencySummary shape:
+  { stepIndex, stepName, stepType,
+    inDegree, outDegree, upstreamCount, downstreamCount }
+
+WorkflowConvergenceNode shape:
+  { stepIndex, stepName, stepType, inDegree }
+
+WorkflowBottleneckNode shape:
+  { stepIndex, stepName, stepType, score, reasons[] }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — CONVERGENCE DETECTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: internal detectConvergenceNodes (via extractDependencyGraph)
+
+Definition: a node is a convergence node if it has in-degree ≥ 2 in the
+directed graph — i.e., ≥ 2 distinct predecessor nodes exist in the edge list.
+
+Algorithm:
+  1. buildMapsFromGraph(graph) — reconstruct succs/preds Maps from graph.edges
+     by iterating all TopologyEdge objects (fromIndex → toIndex, by stepIndex).
+  2. For each node: convergence = preds.get(si).length >= 2
+
+Routing model accuracy:
+  In the current workflow routing model, convergence arises naturally when:
+  a) A condition step's false_branch skips to a node that the true_branch
+     eventually reaches via linear advance. The "skip target" then has both
+     the branch edge and the preceding linear edge as predecessors.
+  b) Two or more condition branches independently route to the same step index.
+  This matches the simulation engine's behavior exactly, because both topology
+  and dependency engines use the same edge construction rules (inherited from
+  extractWorkflowTopology → buildEdges).
+
+Convergence vs. unreachableNodes (topology):
+  Unreachable nodes (P8-A): not reachable from entry via directed BFS.
+  Convergence nodes (P8-B): reachable from ≥2 paths — opposite of unreachable.
+  The two sets are mutually exclusive by definition.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — BOTTLENECK SCORING FORMULAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Constants (all tunable at top of dependency.ts):
+  FAN_IN_WEIGHT       = 2.5    weight per direct predecessor
+  APPROVAL_BONUS      = 5.0    approval steps require human action
+  DELAY_BONUS         = 3.0    delay steps add wall-clock accumulation
+  DOWNSTREAM_WEIGHT   = 0.4    weight per downstream-reachable node
+  CONVERGENCE_BONUS   = 2.0    extra weight if node is also a convergence point
+  BOTTLENECK_THRESHOLD= 6.0    minimum score to be classified as a bottleneck
+
+Score formula:
+  score(node) =
+    (inDegree >= 2 ? inDegree * FAN_IN_WEIGHT : 0)   // fan-in contribution
+    + (isApproval   ? APPROVAL_BONUS              : 0)
+    + (isDelay      ? DELAY_BONUS                 : 0)
+    + (downstreamCount >= 3 ? downstreamCount * DOWNSTREAM_WEIGHT : 0)
+    + (isConvergence? CONVERGENCE_BONUS           : 0)
+
+Examples:
+  Approval step with 2 predecessors and 3+ downstream:
+    score = 2*2.5 + 5 + 0.4*3 + 2 = 5 + 5 + 1.2 + 2 = 13.2  → bottleneck ✓
+
+  Single approval step (no convergence, no downstream hub):
+    score = 0 + 5 + 0 + 0 + 0 = 5.0  → below threshold, NOT a bottleneck ✓
+
+  Convergence point (non-approval, 3 predecessors, 5 downstream):
+    score = 3*2.5 + 0 + 0 + 5*0.4 + 2 = 7.5 + 2 + 2 = 11.5  → bottleneck ✓
+
+Reasons list: each contributing factor emits a human-readable reason string
+stored on the bottleneck node. Reasons are used by governance dashboards.
+
+Sort: bottleneckNodes are sorted by score descending so callers always see
+the highest-risk bottleneck first.
+
+upstreamCount / downstreamCount computation:
+  BFS from each node following the preds map (upstream) or succs map (downstream).
+  Capped at MAX_BFS_CAP = 100 nodes to bound runtime on large workflows.
+  The start node is excluded from its own count (counts only other nodes).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EXECUTION PRESSURE ESTIMATION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: computeExecutionPressure(graph, depGraph, analytics) → ExecutionPressureEstimate
+
+All five metrics are deterministic for identical inputs. All four normalized
+metrics are in [0.0, 1.0]. The composite score is in [0, 100] (integer).
+
+A) estimatedFanoutPressure
+   Definition: how close is the workflow to terminal-path explosion?
+   Formula:    min(analytics.terminalPathCount / FANOUT_PRESSURE_MAX, 1.0)
+   FANOUT_PRESSURE_MAX = 32 (the "critical" threshold from topology analytics)
+   Interpretation: 1.0 means ≥32 distinct terminal paths (exponential branching risk)
+
+B) approvalWaitPressure
+   Definition: how much human-gating overhead is concentrated in this workflow?
+   Formula:    min(approvalWeightedSum / (nodeCount * 3), 1.0)
+     where: approvalWeightedSum = Σ (1 + inDegree[si]) for each approval node si
+   Normalizer: nodeCount * 3  (approximates max possible weighted approval load)
+   Interpretation: 1.0 means every node is an approval with maximum fan-in
+
+C) delayAccumulationPressure
+   Definition: what fraction of the longest path consists of delay steps?
+   Algorithm:  DP in reverse topological order:
+     dp[si] = (isDelay ? 1 : 0) + max(dp[succ] for succ in successors[si])
+   Formula:    min(delaysOnLongestPath / longestPathEstimate, 1.0)
+   Interpretation: 1.0 means every step on the longest path is a delay
+
+D) dependencyCriticality
+   Definition: what fraction of nodes are convergence points?
+   Formula:    min(convergenceNodes.length / nodeCount, 1.0)
+   Interpretation: high values mean many branch-merge points relative to total steps
+
+E) operationalComplexityScore  [0–100, integer]
+   Definition: weighted composite of the four metrics above
+   Formula:    round(A*30 + B*25 + C*20 + D*25), capped at 100
+   Weights reflect relative operational impact:
+     Fanout pressure      → 30 (path explosion dominates runtime complexity)
+     Approval wait        → 25 (human latency is a primary SLA risk)
+     Delay accumulation   → 20 (calendar time impact)
+     Dependency criticality → 25 (convergence points increase execution state complexity)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — DEPENDENCY RISK ASSESSMENT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Function: assessDependencyRisk(graph, depGraph, pressure) → DependencyRiskAssessment
+
+Output shape:
+  {
+    level:                        "low" | "moderate" | "high" | "critical"
+    bottleneckRisk:               "none" | "low" | "moderate" | "high"
+    convergenceComplexity:        "none" | "low" | "moderate" | "high"
+    operationalFragilityIndicators: string[]
+    reasons:                      { code, message }[]
+  }
+
+Rule table (all constants are tunable):
+
+  Risk code               Trigger                                 Level
+  ──────────────────────────────────────────────────────────────────────
+  DEP-BOTTLENECK-HIGH     bottleneckNodes.length ≥ 3             high
+  DEP-BOTTLENECK-MOD      bottleneckNodes.length ≥ 1             moderate
+  DEP-CONVERGENCE-HIGH    convergenceNodes.length ≥ 5            high
+  DEP-CONVERGENCE-MOD     convergenceNodes.length ≥ 2            moderate
+  DEP-FANOUT-CRITICAL     fanoutPressure >= 1.0                   critical
+  DEP-FANOUT-HIGH         fanoutPressure >= 0.5                   high
+  DEP-FANOUT-MOD          fanoutPressure >= 0.25                  moderate
+  DEP-APPROVAL-WAIT-HIGH  approvalWaitPressure >= 0.5             high
+  DEP-APPROVAL-WAIT-MOD   approvalWaitPressure >= 0.2             moderate
+  DEP-DELAY-ACCUM-HIGH    delayAccumulationPressure >= 0.5        high
+  DEP-DELAY-ACCUM-MOD     delayAccumulationPressure >= 0.25       moderate
+  DEP-COMPLEXITY-CRITICAL operationalComplexityScore >= 75        critical
+  DEP-COMPLEXITY-HIGH     operationalComplexityScore >= 50        high
+  DEP-COMPLEXITY-MOD      operationalComplexityScore >= 25        moderate
+  DEP-SYNC-PRESSURE       synchronizationCandidates.length ≥ 2   moderate
+
+Overall level: max of all individual reason levels (rank: low < moderate < high < critical)
+
+dependencyCyclesRisk:
+  Always "none" in this model — the topology engine only accepts DAGs. The
+  validation engine rejects backward references and self-loops before topology
+  is computed, so the dependency engine never receives a cyclic graph.
+
+Operational Frailty Indicators (named strings, each emitted when triggered):
+  "approval_choke_point"      any approval node has in-degree ≥ 2
+  "delay_critical_path"       ≥2 delay steps on the longest path
+  "convergence_pressure"      convergenceNodes.length ≥ 3
+  "fanout_explosion"          fanoutPressure ≥ 0.25
+  "bottleneck_concentration"  bottleneckNodes.length ≥ 2
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+API endpoint:
+  GET /workflows/:id/dependency
+  File: artifacts/api-server/src/routes/workflows.ts
+  Registered BEFORE GET /workflows/:id/topology (which is before GET /workflows/:id)
+    to prevent "dependency" matching as the :id parameter.
+  Permission: requireAuth + requirePermission("workflow.view" | "workflows.<id>.view")
+  Returns WorkflowDependencyResponse:
+    { workflowId, workflowName, stepCount, dependencyGraph, pressure, risk }
+
+OpenAPI spec:
+  File: lib/api-spec/openapi.yaml
+  New endpoint: /workflows/{id}/dependency (GET, operationId: getWorkflowDependency)
+  New schemas (8 total):
+    WorkflowNodeDependencySummary
+    WorkflowConvergenceNode
+    WorkflowBottleneckNode
+    WorkflowDependencyGraph
+    ExecutionPressureEstimate
+    DependencyRiskReason
+    DependencyRiskAssessment
+    WorkflowDependencyResponse
+
+Generated artifacts (after codegen):
+  lib/api-client-react/src/generated/   → getWorkflowDependency React Query hook
+  lib/api-zod/src/generated/api.ts       → Zod validation schemas for all 8 types
+
+Integration with P8-A topology:
+  The dependency endpoint internally calls extractWorkflowTopology() and
+  computeTopologyAnalytics() to obtain the base graph before adding dependency
+  intelligence. The two endpoints are independent but share the same underlying
+  engine — clients can call either or both depending on their need.
+
+Future integration points:
+  - operationalComplexityScore → workflow list view complexity badge
+  - bottleneckNodes → governance alert "DEP-BOTTLENECK" warning codes
+  - convergenceNodes → simulation traversal context annotations
+  - synchronizationCandidates → SLA risk overlay in governance dashboards
+  - risk.level → workflow activation gating (future phase)
+  - dependencyGraph → capture per-version in governance_snapshots (future phase)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All four events emitted via logger.info (pino structured JSON) inside
+analyzeDependencies(). No DB writes. Fire-and-forget.
+
+A) workflow_dependency_graph_extracted
+   Emitted: always, on every analyzeDependencies() call
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            nodeCount, convergenceCount, bottleneckCount, divergenceCount,
+            complexityScore, riskLevel
+
+B) workflow_convergence_detected
+   Emitted: when convergenceNodes.length > 0
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            convergenceCount, branchDepth (from topology analytics),
+            nodeCount, complexityScore, riskLevel
+
+C) workflow_bottleneck_detected
+   Emitted: when bottleneckNodes.length > 0
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            bottleneckCount, topBottleneck (name of highest-score node),
+            topScore, complexityScore, riskLevel
+
+D) workflow_execution_pressure_estimated
+   Emitted: always, on every analyzeDependencies() call
+   Fields:  action, workflowId, workflowVersion, workspaceId,
+            estimatedFanoutPressure, approvalWaitPressure,
+            delayAccumulationPressure, dependencyCriticality,
+            complexityScore, riskLevel
+
+Route-level event (additional, via req.log.info):
+   workflow_dependency_requested
+   Fields:  event, workflowId, workspaceId, convergenceCount,
+            bottleneckCount, complexityScore, riskLevel, actorId
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/dependency.test.ts
+
+All 50 tests pass. Full suite: 1186 passed (20 test files), 0 failed.
+(Prior baseline P8-A: 1136 tests / 19 files — P8-B added 50 tests / 1 file)
+
+Test coverage by group:
+
+  T1 — Convergence node detection (4 tests)
+    ✓ linear workflow has no convergence nodes
+    ✓ diamond workflow: step C (index=2) is a convergence node
+    ✓ convergence node inDegree reflects actual predecessor count
+    ✓ convergence nodes have required shape fields
+
+  T2 — Divergence node detection (4 tests)
+    ✓ linear workflow has no divergence nodes
+    ✓ diamond workflow: cond (index=0) is a divergence node
+    ✓ conditionalNodes includes all condition steps
+    ✓ divergence and conditional node sets overlap on condition steps
+
+  T3 — Bottleneck scoring stability (4 tests)
+    ✓ same input produces identical bottleneck scores on every call
+    ✓ linear workflow with no branching produces no bottlenecks
+    ✓ bottleneck nodes are sorted by score descending
+    ✓ bottleneck node scores are non-negative
+
+  T4 — Approval bottleneck classification (4 tests)
+    ✓ approval step at convergence point is classified as bottleneck
+    ✓ approval bottleneck reasons mention human action
+    ✓ approval-heavy workflow has non-zero approval wait pressure
+    ✓ approval wait pressure is between 0 and 1
+
+  T5 — Delay accumulation pressure calculation (4 tests)
+    ✓ workflow with no delays has zero delay accumulation pressure
+    ✓ delay chain workflow has non-zero delay accumulation pressure
+    ✓ delay accumulation pressure is between 0 and 1
+    ✓ more delays on longest path → higher pressure than fewer delays
+
+  T6 — Execution pressure deterministic behavior (8 tests)
+    ✓ same input produces identical pressure (5 × fixture parametrize)
+    ✓ operationalComplexityScore is integer in [0, 100]
+    ✓ all pressure metrics are in [0, 1]
+    ✓ empty steps produce zero pressure across all metrics
+
+  T7 — Dependency graph serialization stable (5 tests)
+    ✓ result is JSON-serializable without circular references
+    ✓ serialized and re-parsed result is deep-equal to original
+    ✓ dependency graph has all required top-level keys
+    ✓ pressure has all required keys
+    ✓ risk has all required keys
+
+  T8 — Risk classification deterministic (6 tests)
+    ✓ same input always produces the same risk level (4 fixtures)
+    ✓ risk level is one of the four valid values
+    ✓ linear workflow with no complexity markers is low risk
+    ✓ empty workflow is low risk
+    ✓ workflow with many bottlenecks has bottleneckRisk >= moderate
+    ✓ reasons array contains objects with code and message
+
+  T9 — No runtime dependencies required (5 tests)
+    ✓ dependency engine completes without any async operations
+    ✓ extractDependencyGraph is a pure synchronous function
+    ✓ computeExecutionPressure is a pure synchronous function
+    ✓ assessDependencyRisk is a pure synchronous function
+    ✓ handles malformed/non-object steps without throwing
+
+  T10 — Dependency engine remains read-only (6 tests)
+    ✓ analyzeDependencies does not mutate the input steps array
+    ✓ calling analyzeDependencies multiple times produces stable results
+    ✓ nodeSummaries count equals step count for valid steps
+    ✓ upstreamCount and downstreamCount are non-negative for all nodes
+    ✓ inDegree=0 for entry node of linear workflow
+    ✓ outDegree=0 for terminal node of linear workflow
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — REMAINING DEPENDENCY INTELLIGENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following are intentionally deferred and NOT part of P8-B:
+
+A) Cross-workflow dependency analysis
+   No detection of dependencies between different workflow definitions (e.g.,
+   workflow A triggering workflow B). Requires modeling inter-workflow edges
+   which is outside the current single-workflow scope.
+
+B) Runtime-weighted bottleneck scoring
+   Current scoring is structural only. A future phase could combine bottleneck
+   node scores with historical execution data (avg step duration, failure rate,
+   approval wait time) from governance_snapshots to produce runtime-weighted
+   scores. Would require joining with the DB — incompatible with pure-static
+   design.
+
+C) Dependency diff between versions
+   No tracking of how the dependency graph changes across workflow versions.
+   A future phase could store dependency snapshots per version and compute
+   diffs (new convergence nodes, removed bottlenecks, pressure delta).
+
+D) Synchronization candidate validation
+   synchronizationCandidates are identified but not yet validated against
+   the simulation engine's context-passing semantics. A future phase could
+   detect cases where branch-path context is lost at merge points.
+
+E) Critical path identification (with weights)
+   The current delayAccumulationPressure tracks delay count on the longest
+   structural path. A future phase could model time-weighted critical paths
+   by reading delay step durations from step config.
+
+F) Bottleneck remediation suggestions
+   No automatic suggestions for reorganizing steps to reduce bottleneck scores.
+   This was explicitly excluded from P8-B scope (no auto-remediation).
+
+G) Dependency-aware simulation budgeting
+   The simulation engine does not yet consult dependency intelligence to set
+   traversal depth budgets. A future phase could use operationalComplexityScore
+   to adaptively limit simulation depth for complex workflows.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before: Advanced Operational Intelligence (P8-C or equivalent)
+
+The following conditions are met:
+
+  ✓ Pure dependency engine in place (dependency.ts, zero DB deps)
+  ✓ Builds cleanly on P8-A topology engine (no code duplication of parsing logic)
+  ✓ Convergence detection: in-degree ≥ 2, correctly derived from edge list
+  ✓ Divergence detection: reuses branchingNodes from topology
+  ✓ Bottleneck scoring: 5-factor formula with named reasons
+  ✓ Synchronization candidates: convergence + blocking predecessor detection
+  ✓ Execution pressure: 5 deterministic normalized metrics + 0–100 composite
+  ✓ Dependency risk: 14 named risk codes across 4 levels + frailty indicators
+  ✓ 4 structured observability events wired and emitting
+  ✓ OpenAPI contract published (8 schemas, 1 endpoint)
+  ✓ React Query hook generated (getWorkflowDependency)
+  ✓ Zod validation schemas generated for all dependency types
+  ✓ 50 pure unit tests, all passing (zero failures)
+  ✓ Full API server test suite: 1186 tests passing (20 test files, 0 failures)
+  ✓ TypeScript: clean (zero errors in api-server)
+  ✓ Endpoint live, workspace-scoped, auth-gated
+
+Ready for:
+  - Frontend: surface risk.level badge and bottleneckNodes in workflow detail view
+  - Governance: add operationalComplexityScore to snapshot metrics
+  - P8-C: runtime-weighted bottleneck scoring using governance_snapshots data
+  - P8-C: dependency diff across workflow versions
+
+Blocking items before P8-C: none.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CREATED / MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEW:
+  artifacts/api-server/src/lib/workflows/dependency.ts              (dependency engine, ~400 lines)
+  artifacts/api-server/src/lib/workflows/__tests__/dependency.test.ts (50 tests)
+  workflow-phase-8b-report.txt                                       (this file)
+
+MODIFIED:
+  lib/api-spec/openapi.yaml                    (+32 endpoint lines, +84 schema lines)
+  artifacts/api-server/src/routes/workflows.ts (+1 import line, +68 route handler lines)
+
+AUTO-GENERATED (by codegen):
+  lib/api-client-react/src/generated/          (getWorkflowDependency hook)
+  lib/api-zod/src/generated/api.ts             (dependency Zod schemas)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF REPORT — WORKFLOW PHASE 8-B
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

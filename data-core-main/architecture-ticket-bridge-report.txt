@@ -1,0 +1,223 @@
+================================================================================
+ARCHITECTURE TICKET — BRIDGE LAYER REPORT
+Date: 2026-05-13
+Status: COMPLETE
+================================================================================
+
+## Objective
+Create a one-way Bridge Layer making appEventBus the official event entry point,
+with a unidirectional bridge to the legacy eventDispatcher for backward compat.
+
+## What Was Built
+
+### 1. bridge.ts (NEW FILE)
+Path: artifacts/api-server/src/lib/events/bridge.ts
+
+The Bridge Layer:
+  - Subscribes to ALL appEventBus events via appEventBus.subscribeToAll()
+  - Translates TypedEvent → EventPayload (field mapping below)
+  - Awaits eventDispatcher.dispatch() — writing to workspace_event_logs and
+    triggering the WorkflowEngine and legacy notifications.ts listener
+  - Errors are caught and logged — never propagate back to appEventBus callers
+  - Guards: idempotent (calling registerBridge() twice is a no-op with warning)
+
+Field mapping (TypedEvent → EventPayload):
+  event.type                      → payload.event
+  event.module                    → payload.module
+  event.workspace.workspaceId     → payload.workspaceId
+  event.actor.userId (if number)  → payload.triggeredBy
+  event.data + _busEventId        → payload.data (with tracing fields injected)
+    + _busCorrelationId
+
+Tracing fields injected into EventPayload.data:
+  _busEventId:        UUID from appEventBus.emit() — links workspace_event_logs
+                      row back to the originating bus event
+  _busCorrelationId:  correlationId for distributed tracing chains
+
+Exported:
+  registerBridge()      — registers the subscribeToAll() wildcard listener
+  isBridgeRegistered()  — diagnostic helper for health checks and test setup
+
+### 2. index.ts (UPDATED)
+Path: artifacts/api-server/src/lib/events/index.ts
+
+Registration order (side-effect imports):
+  1. listeners/notifications (legacy eventDispatcher listeners)
+  2. registerActivityListeners()     — 6 listeners on appEventBus (Ticket 04)
+  3. registerNotificationBusListeners() — 6 listeners on appEventBus (Ticket 05)
+  4. registerBridge()                — wildcard appEventBus → eventDispatcher
+
+Rationale for order: domain listeners (2, 3) run in parallel with the bridge (4)
+because appEventBus uses Promise.allSettled fan-out. Registering them before the
+bridge means no ordering dependency — all run concurrently on each emit.
+
+Updated exports: added registerBridge, isBridgeRegistered, EVENT_TYPES,
+LEGACY_EVENT_NAMES to the barrel.
+
+### 3. app-bus.ts (UPDATED)
+Path: artifacts/api-server/src/lib/events/app-bus.ts
+
+Updated documentation to reflect the bridge architecture:
+  - Replaced TODO(Ticket 05 bridge evaluation) with the actual bridge design
+  - Updated concern table to show "via bridge" for legacy system concerns
+  - Added architecture boundaries (NEW CODE → bus, OLD CODE → dispatcher, NEVER reverse)
+
+### 4. TODO warnings added to legacy direct-caller files:
+  - artifacts/api-server/src/routes/tickets.ts: 3 ARCH-TODO comments
+      (TICKET_CREATED, TICKET_CLOSED, TICKET_UPDATED)
+  - artifacts/api-server/src/routes/admin.ts: 1 ARCH-TODO comment
+      (EMPLOYEE_CREATED)
+  - artifacts/api-server/src/routes/forms.ts: 1 ARCH-TODO comment
+      (dynamic form event — marked COMPLEX CASE)
+
+Each TODO includes:
+  - Current behavior (what goes where)
+  - Migration action (step-by-step replacement instructions)
+  - Impact of migration (which listeners will activate)
+  - Risks (forms.ts has dynamic event name risk)
+
+================================================================================
+
+## Architecture Post-Bridge
+
+                     ┌──────────────────────────────────────────────────┐
+                     │           CANONICAL RUNTIME LAYER                │
+                     │                                                  │
+  Route / Service    │   appEventBus.emit(TypedEvent<K, Payload>)      │
+  (new code)  ───────▶   Typed, schema-versioned, idempotent          │
+                     │   Listeners: activity.ts, notifications-bus.ts  │
+                     └──────────────┬───────────────────────────────────┘
+                                    │
+                        ┌───────────▼─────────────────┐
+                        │  BRIDGE LAYER (bridge.ts)   │
+                        │  subscribeToAll → translate  │
+                        │  TypedEvent → EventPayload  │
+                        └───────────┬─────────────────┘
+                                    │  (one-way — no reverse path)
+                     ┌─────────────▼────────────────────────────────────┐
+                     │         LEGACY COMPATIBILITY LAYER               │
+                     │                                                  │
+                     │   eventDispatcher.dispatch(EventPayload)        │
+                     │   • Writes to workspace_event_logs (DB)         │
+                     │   • Triggers WorkflowEngine ("*" listener)      │
+                     │   • Triggers notifications.ts listener           │
+                     └──────────────────────────────────────────────────┘
+
+  Route / Service                   ─────────────────────────────────────
+  (old code, still using           │  eventDispatcher.dispatch() direct │
+  eventDispatcher directly) ───────▶  Reaches DB + WorkflowEngine      │
+                                   │  Does NOT touch appEventBus        │
+                                   │  (known gap — tracked by TODOs)    │
+                                   ─────────────────────────────────────
+
+================================================================================
+
+## Current Event Flow — Which Paths Are Active
+
+  Event                    │ Route emitter         │ Bus listeners │ Bridge │ DB log
+  ─────────────────────────┼───────────────────────┼───────────────┼────────┼───────
+  approval.created         │ appEventBus.emit() ✅  │ activity ✅   │ ✅     │ ✅
+                           │                       │ notif-bus ✅  │        │
+  approval.completed       │ appEventBus.emit() ✅  │ activity ✅   │ ✅     │ ✅
+                           │                       │ notif-bus ✅  │        │
+  ticket.created           │ dispatcher.dispatch() ⚠│ INACTIVE ⏳   │ n/a    │ ✅
+  ticket.updated           │ dispatcher.dispatch() ⚠│ INACTIVE ⏳   │ n/a    │ ✅
+  ticket.closed            │ dispatcher.dispatch() ⚠│ INACTIVE ⏳   │ n/a    │ ✅
+  employee.created         │ dispatcher.dispatch() ⚠│ INACTIVE ⏳   │ n/a    │ ✅
+  form.submitted           │ dispatcher.dispatch() ⚠│ INACTIVE ⏳   │ n/a    │ ✅
+
+  Legend:
+    ✅  Active and working
+    ⚠   Legacy path (direct eventDispatcher, no bus listeners)
+    ⏳  Listener code exists but awaiting route emitter migration
+
+================================================================================
+
+## No-Loop Guarantee
+
+  appEventBus → bridge → eventDispatcher
+                                 │
+                   notifications.ts (DB insert only — no emit)
+                   engine.ts (DB read/write only — no emit)
+
+  eventDispatcher has NO reference to appEventBus.
+  Legacy listeners (notifications.ts, engine.ts) do NOT emit to appEventBus.
+  Therefore: no circular event cycles are possible.
+
+================================================================================
+
+## Bridge Benefit — approval events now fully wired
+
+Before the bridge:
+  - approval.created / approval.completed went ONLY to appEventBus
+  - workspace_event_logs had NO record of these events
+  - WorkflowEngine could NOT trigger on approval events
+
+After the bridge:
+  - approval.created / approval.completed go to appEventBus (typed listeners)
+  - THEN bridge forwards to eventDispatcher → workspace_event_logs ✅
+  - THEN WorkflowEngine evaluates any workflows triggered by "approval.created" ✅
+  - Legacy notifications.ts listener receives them too (no-op: no approval handlers)
+
+This is the primary new capability unlocked by the bridge.
+
+================================================================================
+
+## Known Debt
+
+DEBT-BRIDGE-01: 4 route files still use eventDispatcher.dispatch() directly.
+  Their events DO NOT reach appEventBus listeners.
+  Each has an ARCH-TODO comment with exact migration steps.
+  Priority: tickets.ts (HIGH) > admin.ts (MEDIUM) > forms.ts (LOW/complex)
+
+DEBT-T05-01 (from Ticket 05, inherited):
+  Legacy notifications.ts passes titleAr/messageAr/link fields that don't exist
+  in the notifications table schema. Drizzle silently ignores extra fields.
+  Impact: No functional breakage, but data is lost.
+  Fix: Remove those fields or add columns before the next migration.
+
+DEBT-BRIDGE-02: Bridge handler awaits eventDispatcher.dispatch() (includes DB write).
+  At current scale this is acceptable (route uses void appEventBus.emit()).
+  At high volume: make bridge dispatch fire-and-forget to reduce fanOut latency.
+
+================================================================================
+
+## Typecheck Result
+
+  pnpm --filter @workspace/api-server run typecheck → 0 errors
+
+================================================================================
+
+## Files Changed
+
+  CREATED:
+    artifacts/api-server/src/lib/events/bridge.ts
+
+  MODIFIED:
+    artifacts/api-server/src/lib/events/index.ts        (registration + documentation)
+    artifacts/api-server/src/lib/events/app-bus.ts      (documentation update)
+    artifacts/api-server/src/routes/tickets.ts           (3 ARCH-TODO warnings)
+    artifacts/api-server/src/routes/admin.ts             (1 ARCH-TODO warning)
+    artifacts/api-server/src/routes/forms.ts             (1 ARCH-TODO warning)
+
+================================================================================
+
+## Next Ticket Recommendation
+
+Priority 1 — Migrate tickets.ts to appEventBus.emit()
+  • Replace TICKET_CREATED, TICKET_CLOSED, TICKET_UPDATED dispatcher calls
+  • Map to EVENT_TYPES.TICKET_CREATED, TICKET_UPDATED, TICKET_STATUS_CHANGED
+  • This activates 4 existing listeners (activity + notifications-bus)
+  • SSE push to assignee on ticket create/update becomes live
+  • Remove eventDispatcher import from tickets.ts
+
+Priority 2 — Migrate admin.ts to appEventBus.emit()
+  • Replace EMPLOYEE_CREATED dispatcher call
+  • Activates employee.created activity + notification listeners
+  • Admins receive SSE notification when new employee is created
+
+Priority 3 (optional, complex) — Migrate forms.ts
+  • Decision needed: dynamic event name strategy (see ARCH-TODO in forms.ts)
+  • Recommend: evaluate Option A (always emit FORM_SUBMITTED canonical type)
+
+================================================================================

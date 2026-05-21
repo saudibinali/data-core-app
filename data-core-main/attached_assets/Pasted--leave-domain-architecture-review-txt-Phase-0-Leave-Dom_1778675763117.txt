@@ -1,0 +1,119 @@
+راجع leave-domain-architecture-review.txt ثم نفّذ فقط Phase 0 التحضيرية الخاصة بالـ Leave Domain بدون بدء implementation الكامل للـ domain حتى الآن.
+
+عنوان المهمة:
+LEAVE DOMAIN PHASE 0 — Event Taxonomy & Registry Stabilization
+
+المهمة الحالية:
+تجهيز الـ Event Architecture الخاصة بالـ Leave Domain قبل بناء:
+- leave_requests
+- leave approval lifecycle
+- leave routes
+
+الهدف:
+تنظيف وتثبيت الـ leave event layer حتى تصبح جاهزة للـ domain implementation الحقيقي.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- lib/core-events/src/events.ts
+- lib/core-events/src/constants.ts
+- registry.ts
+- LEGACY_EVENT_NAMES
+- leave-domain-architecture-review.txt
+- أي leave-related listeners أو workflow references
+
+2- أصلح:
+BUG-001
+
+المشكلة:
+leave.requested
+مسجل مرتين داخل registry.ts:
+- مرة تحت forms
+- مرة تحت hr
+بـ schemas مختلفة.
+
+المطلوب:
+- اعتماد canonical owner واحد فقط
+- إزالة duplicate registration
+- توثيق السبب داخل comments والتقرير
+- الحفاظ على backward compatibility إذا لزم
+
+3- أضف canonical leave events التالية إلى:
+- EVENT_TYPES
+- EventTypeMap
+- AnyTypedEvent
+- contracts exports
+
+الأحداث المطلوبة:
+- leave.approved
+- leave.rejected
+- leave.cancelled
+- leave.withdrawn
+- leave.balance_adjusted
+
+4- أنشئ payload contracts واضحة لكل event.
+
+المطلوب:
+- typed payloads
+- naming consistent
+- ownership boundaries واضحة
+- no workflow-specific fields
+- no UI-specific fields
+
+5- حدّث:
+events.ts
+بـ JSDoc/comments واضحة تشرح:
+- الفرق بين leave domain events و generic form events
+- ownership boundaries
+- lifecycle semantics
+- synchronous vs async responsibilities
+
+6- لا تضف:
+- routes
+- tables
+- DB migrations
+- business logic
+- leave approval implementation
+
+7- لا تغيّر:
+- forms.ts behavior
+- hr.ts routes
+- WorkflowEngine behavior
+- approvals module
+- notification behavior
+
+8- راجع:
+LEGACY_EVENT_NAMES
+
+وابحث هل:
+- leave.requested
+أو أي leave events القديمة تحتاج aliasing أو migration notes.
+
+إذا نعم:
+- وثّق فقط
+- لا تنفذ migration runtime behavior
+
+9- تأكد من:
+- TypeScript clean
+- no duplicate event registrations
+- no naming conflicts
+- no semantic overlap
+
+10- أضف comments واضحة تشرح:
+- leave domain roadmap
+- why forms are transitional only
+- why leave domain owns its lifecycle
+- why approvals module is intentionally excluded
+
+11- في النهاية:
+أنشئ ملف TXT باسم:
+
+leave-domain-phase-0-report.txt
+
+ويحتوي:
+- جميع التعديلات المنفذة
+- canonical leave events النهائية
+- payload contracts
+- registry cleanup details
+- أي legacy concerns
+- readiness assessment قبل Phase 1

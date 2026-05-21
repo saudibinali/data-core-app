@@ -1,0 +1,102 @@
+================================================================================
+WORKFLOW PHASE 25-B — Inventory Movement Ledger & Stock Runtime Engine
+Generated: 2026-05-20
+Status: COMPLETE
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P25-B delivers the immutable inventory movement ledger and stock runtime engine on
+top of P25-A. Receipt post now creates receipt movements and updates balances
+transactionally. Issue, transfer, reservation, adjustment, and count variance
+runtimes post movements through InventoryStockRuntimeService. Compensating
+reversals support receipt/issue void. No GL posting, barcode, or MRP introduced.
+P25-C NOT started.
+
+MIGRATION
+---------
+0019_inventory_stock_movements.sql:
+  - inventory_stock_movements (required)
+  - inventory_transfers (operational header)
+  - inventory_issues (operational header)
+
+SERVICES ADDED / EXTENDED
+-------------------------
+NEW:
+  inventory-stock-runtime-service.ts
+  inventory-movement-types.ts
+  inventory-issue-service.ts
+  inventory-transfer-service.ts
+  inventory-reservation-service.ts
+  inventory-adjustment-runtime-service.ts
+  inventory-count-runtime-service.ts
+
+EXTENDED:
+  inventory-receipt-service.ts (movement posting + void reversals)
+  inventory-finance-readiness-service.ts (movement/issue/transfer/adjustment/count)
+  inventory-monitoring-service.ts (stock, negative, reservations, transfers, etc.)
+  inventory-reports.ts (+ 5 report keys)
+  routes/inventory.ts (issues, transfers, reservations, adjustments, counts, metrics)
+
+READINESS DECISION MATRIX
+-------------------------
+inventory movement ledger:     GO
+stock runtime engine:            GO
+reservation runtime:             GO
+transfer runtime:                GO
+adjustment/count runtime:        GO
+inventory operational readiness: PARTIAL (no UI; APIs complete)
+ERP inventory readiness:         PARTIAL
+
+MOVEMENT LEDGER STATUS: GO
+- Immutable posted rows, void + correctionOfMovementId, idempotency, full type catalog
+
+STOCK RUNTIME STATUS: GO
+- Transactional balance updates, optimistic locking, available = onHand - reserved
+- Direct balance mutation blocked (service-only)
+
+RESERVATION RUNTIME: GO
+- Hold/release movements, expiry, hard allocation at location
+
+TRANSFER RUNTIME: GO
+- Draft, approval gate, transfer_out/in pairs, optional in-transit legs
+
+ADJUSTMENT/COUNT RUNTIME: GO
+- Adjustment post with finance lock validation
+- Count variance posting with blind count support
+
+REPORTING STATUS: GO (definitions)
+- 5 new inventory.* report keys registered + generator cases
+
+SECURITY STATUS: GO (foundation)
+- New permissions: inventory.issue.create, inventory.transfer.*
+- Movement audit via activity_logs
+- Export still gated by inventory.export
+
+SMOKE TEST RESULTS
+------------------
+p25a-inventory.smoke.test.ts:        7 passed
+p25b-inventory-movement.smoke.test.ts: 10 passed
+Total: 17 passed
+
+REMAINING BLOCKERS
+------------------
+- No workspace UI (P25-C)
+- Workflow approval links not auto-wired for transfers/adjustments (manual approve API partial)
+- No automated PO reservation on procurement.po.approved event
+- No FIFO cost layers
+- Integration tests against live DB optional (unit smoke only)
+
+RECOMMENDED NEXT PHASE
+----------------------
+P25-C — Inventory Workspace UI & Operations Center
+
+CONFIRMATION
+------------
+[x] No barcode/mobile scanning
+[x] No manufacturing/MRP
+[x] No accounting posting
+[x] No destructive migration
+[x] P25-C NOT started
+
+END OF REPORT

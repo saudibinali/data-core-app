@@ -1,0 +1,256 @@
+راجع event-observability-architecture-review.txt ثم نفّذ فقط:
+Phase 0 + الجزء الآمن من Phase 1
+بدون أي overengineering أو أدوات خارجية.
+
+عنوان المهمة:
+EVENT OBSERVABILITY PHASE 0/1 — Core Traceability Stabilization
+
+المهمة الحالية:
+إصلاح broken traceability داخل الـ Event Platform الحالية
+وبناء الحد الأدنى الصحيح من observability قبل أي diagnostics UI أو tracing متقدم.
+
+الهدف:
+ربط:
+HTTP request
+→ Event
+→ Workflow
+→ Activity
+→ Notifications
+
+بطريقة قابلة للتتبع queryable داخل النظام نفسه.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — FIX BS-01 (HIGHEST PRIORITY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المشكلة:
+workflow_executions.triggerEventLogId
+موجود بالschema لكنه دائمًا NULL.
+
+المطلوب:
+ربط كل workflow execution بالـ workspace_event_logs row الذي شغله.
+
+راجع:
+- dispatcher.ts
+- engine.ts
+- EventListener signature
+- wildcard listeners
+- workspace_event_logs insertion flow
+
+نفّذ أقل تعديل ممكن معماريًا.
+
+المطلوب:
+- WorkflowEngine يحصل على logId الحقيقي
+- triggerEventLogId يتم حفظه دائمًا
+- no behavior regression
+- no workflow logic changes
+
+أضف comments واضحة تشرح:
+- event trace linkage
+- why triggerEventLogId مهم للـ diagnostics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — FIX BS-05
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المشكلة:
+req.id غير مربوط بالـ events.
+
+المطلوب:
+تمرير requestId من:
+pino-http req.id
+
+إلى:
+event.metadata.requestId
+
+في جميع canonical emits الجديدة قدر الإمكان بدون refactor واسع.
+
+المطلوب:
+- appEventBus emits تحمل requestId
+- bridge يحافظ عليه
+- workspace_event_logs.payload يحتوي _requestId
+- no breaking changes
+
+لا تحاول تعديل كل route legacy دفعة واحدة.
+فقط:
+- canonical leave routes
+- approvals routes
+- forms routes
+- أي routes migrated حديثًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — REMOVE DEAD CODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+احذف:
+listeners/notifications.ts
+
+إذا كان:
+- scaffold فقط
+- غير مستخدم
+- لا يحتوي listeners فعليين
+
+وأزل import المرتبط به.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PHASE 1-A
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+workspaceId
+
+إلى:
+activity_logs
+
+المطلوب:
+- migration
+- schema update
+- listener population
+- indexes منطقية
+
+المطلوب:
+كل activity row الجديدة تحمل workspaceId مباشرة
+بدون الحاجة لـ joins مع users/tickets.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — PHASE 1-B
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+busEventId
+
+إلى:
+activity_logs
+
+المطلوب:
+- UUID column
+- populated من event.id
+- indexed
+- nullable للـ legacy rows
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — PHASE 1-C
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+busEventId
+
+إلى:
+notifications
+
+المطلوب:
+- UUID column
+- populated من event.id
+- indexed
+- nullable legacy-safe
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — PHASE 1-D
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف lightweight listener timing logs.
+
+المطلوب:
+داخل:
+- activity.ts
+- notifications-bus.ts
+- bridge.ts
+
+سجّل:
+- listener name
+- eventId
+- duration_ms
+- success/failure
+
+المطلوب:
+- structured pino logs
+- debug level فقط
+- no noisy info logs
+- no DB timing tables
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — PHASE 1-E
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن:
+workspace_event_logs.result
+
+بحيث يحتوي:
+listener names
+بدل anonymous result arrays.
+
+لا تنشئ table جديدة.
+
+المطلوب:
+JSONB structured result فقط.
+
+مثال:
+{
+  listeners: [
+    {
+      name: "activity.leave.requested",
+      success: true,
+      durationMs: 4
+    }
+  ]
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- OpenTelemetry
+- Grafana
+- Prometheus
+- replay systems
+- metrics databases
+- tracing vendors
+- queues
+- new event buses
+- listener_execution_log tables
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — PRESERVE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تغيّر:
+- appEventBus architecture
+- bridge direction
+- Promise.allSettled behavior
+- IdempotencyGuard design
+- workflow runtime behavior
+- leave domain behavior
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- event trace chain
+- الفرق بين:
+  runtime logs
+  audit logs
+  activity logs
+- why busEventId exists
+- why triggerEventLogId مهم
+- observability ownership boundaries
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+event-observability-phase-0-1-report.txt
+
+ويحتوي:
+- جميع التعديلات المنفذة
+- أي schema changes
+- traceability flow النهائي
+- كيف أصبح event correlation يعمل
+- workflow linkage behavior
+- requestId propagation coverage
+- listener timing behavior
+- أي legacy gaps متبقية
+- readiness assessment قبل diagnostics APIs

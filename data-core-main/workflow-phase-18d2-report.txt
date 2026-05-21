@@ -1,0 +1,137 @@
+================================================================================
+WORKFLOW PHASE 18D2 — CANONICAL LEAVE API & FRONTEND BRIDGE PREPARATION
+================================================================================
+Report file: workflow-phase-18d2-report.txt
+Date: 2026-05-19
+Status: COMPLETE
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-D2 introduced a canonical-first READ bridge for leave while keeping all
+WRITE paths on legacy hr_employee_leaves. Backend list/detail APIs were tightened
+for self-service and HR scopes. Frontend pages hr-me-leave, hr-attendance, and
+employee detail now load canonical data (with legacy merge/fallback). New
+GET /hr/me/leave-policies fixes self-service policy visibility. Bridge smoke
+tests added. No dual-write, no legacy removal, no schema changes.
+
+================================================================================
+FILES MODIFIED
+================================================================================
+Backend:
+  artifacts/api-server/src/routes/leave.ts
+
+Frontend:
+  artifacts/ops-platform/src/lib/leave-bridge.ts          (NEW)
+  artifacts/ops-platform/src/pages/hr-me-leave.tsx
+  artifacts/ops-platform/src/pages/hr-attendance.tsx
+  artifacts/ops-platform/src/pages/hr-employee-detail.tsx
+
+Tests:
+  artifacts/api-server/src/routes/__tests__/leave-bridge.smoke.test.ts (NEW)
+
+Documentation:
+  p18-d2-bridge-behavior-documentation.md
+  workflow-phase-18d2-report.txt
+
+================================================================================
+CANONICAL APIs STATUS
+================================================================================
+GET /hr/leave-requests:
+  - Employee self-scope (by employees.user_id)     OK
+  - HR/admin scope (role + hr.manage/hr.view)    OK
+  - Workspace filter on all queries                OK
+  - Status filter pending → pending_approval       OK
+  - Employee name join for admin list              OK
+  - Limit 200, ordered by created_at desc          OK
+
+GET /hr/leave-requests/:id:
+  - Returns leaveRequest + approvalSteps           OK
+  - Cross-employee access blocked (403)            OK
+
+GET /hr/me/leave-policies (NEW):
+  - Active policies for workspace, auth only       OK
+
+================================================================================
+FRONTEND BRIDGE STATUS
+================================================================================
+hr-me-leave.tsx:
+  - List: canonical GET /hr/leave-requests        DONE
+  - Submit: legacy POST /hr/me/leave-requests      UNCHANGED
+  - Policies: GET /hr/me/leave-policies           DONE
+  - Statuses: pending_approval, withdrawn           DONE
+
+hr-attendance.tsx:
+  - List: canonical + legacy merge                  DONE
+  - Approve/reject: legacy PATCH only (legacy rows) DONE
+
+hr-employee-detail.tsx (Leaves tab):
+  - Read: canonical + legacy merge                  DONE
+  - Add: legacy POST unchanged                      DONE
+
+================================================================================
+LEGACY COMPATIBILITY STATUS
+================================================================================
+hr_employee_leaves table:        UNCHANGED
+POST /hr/me/leave-requests:      WORKING
+PATCH /hr/attendance/leaves/:id: WORKING (legacy ids only in UI)
+POST /hr/employees/:id/leaves:   WORKING
+No dual-write verified in smoke test
+
+================================================================================
+PERMISSION FIXES APPLIED (MINIMAL)
+================================================================================
+- GET /hr/leave-requests: employees no longer need hr.manage (self-scope)
+- GET /hr/me/leave-policies: replaces hr.view-only foundation path for ESS
+- GET /hr/attendance/leaves: unchanged (still hr.manage; not used by ESS list)
+
+================================================================================
+SMOKE TEST RESULTS
+================================================================================
+leave-canonical.smoke.test.ts (P18-D1):     8/8 PASS
+leave-bridge.smoke.test.ts (P18-D2):      6/6 PASS
+Combined (DATABASE_URL):                  14/14 PASS
+
+  - employee own list
+  - cross-employee 403 on GET :id
+  - HR list all
+  - GET /hr/me/leave-policies
+  - legacy POST does not increment leave_requests (no dual-write)
+  - workspace isolation on list
+
+================================================================================
+RISKS REMAINING
+================================================================================
+- Duplicate rows in UI (canonical + legacy) until data migration
+- Canonical pending_approval not approvable from attendance UI
+- Admin may see two pending badges for same period
+- 200-row list cap without pagination UI
+
+================================================================================
+READINESS VERDICT (GO / PARTIAL / BLOCKED)
+================================================================================
+canonical read path:        GO
+canonical write path:       BLOCKED (intentionally legacy — P18-D3+)
+frontend bridge:            PARTIAL (read bridged; write/actions legacy)
+full cutover readiness:     BLOCKED
+data migration readiness:   PARTIAL (read path ready; backfill not run)
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P18-D3 — Canonical Leave UI Cutover & Legacy Freeze Planning
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No dual-write implemented
+[x] No legacy removal
+[x] No canonical-only cutover (submit still legacy)
+[x] No data migration performed
+[x] No payroll / attendance redesign
+[x] No hr.ts split/refactor
+[x] P18-D3 not started
+
+================================================================================
+END OF workflow-phase-18d2-report.txt
+================================================================================

@@ -1,0 +1,120 @@
+================================================================================
+WORKFLOW PHASE 24A REPORT
+Procurement & Vendor Management Foundation (Design Only)
+Generated: 2026-05-20
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P24-A defines the canonical Procurement & Vendor Management foundation as a set
+of architecture and strategy documents, designed to sit on top of the existing
+ERP core: Finance foundations, Workflow Engine, Reporting infrastructure,
+Document Registry, Platform Governance, and Workspace architecture.
+
+This phase intentionally delivers **NO migrations** and **NO runtime procurement
+implementation**. It prepares P24-B (canonical DB + vendor lifecycle) by
+specifying models, lifecycles, approvals, finance readiness integration points,
+documents, and security boundaries.
+
+FILES CREATED
+-------------
+1) p24-a-procurement-audit.md
+2) p24-a-canonical-procurement-models.md
+3) p24-a-vendor-management-strategy.md
+4) p24-a-procurement-workflow-strategy.md
+5) p24-a-procurement-finance-strategy.md
+6) p24-a-procurement-policy-strategy.md
+7) p24-a-procurement-document-strategy.md
+8) p24-a-procurement-security-governance.md
+9) p24-a-procurement-readiness-decision.md
+10) workflow-phase-24a-report.txt (this file)
+
+PROCUREMENT ARCHITECTURE SUMMARY
+-------------------------------
+As-found audit:
+- No canonical procurement tables/routes found (vendors/PR/RFQ/PO absent).
+- Existing platform building blocks suitable for procurement:
+  - Finance canonical foundations (cost centers/dimensions/mappings, prepared-only
+    batches, readiness checks, governance approvals).
+  - Workflow Engine approvals + delay scheduler + guarded transitions and
+    immutable approval records.
+  - Document Registry with workspace-scoped attachments to arbitrary entity
+    types + access logs.
+  - Reporting infrastructure (export_jobs + generated_reports) with explicit
+    export authorization model.
+  - Platform governance / module governance control plane (P23-A).
+
+VENDOR MANAGEMENT SUMMARY
+-------------------------
+Designed vendor lifecycle:
+- draft → active → suspended/blocked → archived
+
+Core design points:
+- Workspace-isolated canonical vendor master
+- Contacts per vendor
+- Vendor document linking via Document Registry with procurement-side expiry
+  tracking and compliance status
+- Preferred vendor and risk flags as policy-driven governance controls
+
+WORKFLOW SUMMARY
+----------------
+Defined canonical procurement lifecycles:
+- Purchase Request: draft → submitted → approved/rejected → converted → closed
+- RFQ: draft → sent → closed → awarded
+- Purchase Order: draft → submitted → approved/rejected → sent → acknowledged → closed
+
+Approvals:
+- Use Workflow Engine approval capabilities and normalize linkage via
+  procurement_approval_links to avoid ticket-only coupling.
+
+Corrections:
+- Non-destructive revision strategy; avoid mutating approved/sent artifacts in-place.
+
+FINANCE INTEGRATION SUMMARY (READINESS ONLY)
+--------------------------------------------
+Procurement ↔ finance integration is defined as readiness/coding only:
+- Use finance cost centers and dimensions for PR/PO coding
+- Store PO “GL readiness” signals without posting
+- Define commitment tracking foundation semantics (encumbrance-lite) without
+  ledger mutation
+
+SECURITY / GOVERNANCE
+---------------------
+Defined proposed procurement permission set and confidentiality boundaries:
+- Confidential vendor contracts/quotes must not rely on HR permissions
+- Finance visibility should be limited to PO totals/coding/readiness/approval status
+- Separation-of-duties for approvals and overrides
+- Audit requirements: lifecycle transitions, overrides, document expiry, exports
+
+READINESS (GO / PARTIAL / BLOCKED)
+----------------------------------
+vendor management              : PARTIAL
+procurement workflows (PR)     : PARTIAL
+RFQ architecture               : PARTIAL
+PO readiness                   : PARTIAL
+finance integration readiness  : GO (foundation) / BLOCKED (posting/AP by design)
+ERP procurement readiness      : PARTIAL
+
+RISKS
+-----
+- Approval subsystem split (legacy /approvals vs workflow approvals). Procurement
+  must anchor approvals to workflow engine and keep domain linkage normalized.
+- Document confidentiality rules are currently HR-leaning; procurement requires a
+  dedicated permission boundary to protect quotes/contracts.
+- Procurement module key is not seeded today; module governance dependency design
+  must be added in a future implementation phase.
+
+RECOMMENDED NEXT PHASE
+----------------------
+P24-B — Procurement Canonical DB & Vendor Lifecycle Foundation
+Do NOT start P24-B in this delivery.
+
+CONFIRMATIONS
+-------------
+- No inventory rollout.
+- No AP invoice engine.
+- No payment execution.
+- No supplier portal.
+- No destructive migration.
+- No ERP redesign.
+

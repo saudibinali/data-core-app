@@ -1,0 +1,205 @@
+راجع:
+- workflow-phase-5a-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- workflow versioning section
+- immutable snapshots
+- activation lifecycle
+- governance roadmap
+
+ثم نفّذ فقط:
+P5-B — Workflow Definition Versioning Review & Architecture
+
+بدون implementation فعلي الآن.
+
+عنوان المهمة:
+WORKFLOW PHASE 5-B — Immutable Workflow Versioning Architecture Review
+
+المهمة الحالية:
+تصميم:
+workflow definition versioning system
+
+فوق:
+execution snapshots الحالية
+
+بدون كسر:
+- active workflows
+- execution snapshots
+- diagnostics
+- activation lifecycle
+- existing APIs
+
+الهدف:
+الانتقال من:
+mutable workflow definitions
+
+إلى:
+immutable publish versions
+
+بطريقة:
+enterprise-safe governance model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workflow_definitions schema
+- activation flow
+- draft/active lifecycle
+- workflow edits
+- snapshot behavior
+- execution linkage
+- diagnostics APIs
+- current publish semantics
+
+ثم حدّد:
+ما الذي ما يزال mutable بشكل خطير.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — VERSIONING PROBLEM ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+- why mutable active definitions dangerous
+- why snapshots alone are insufficient
+- why rollback impossible حاليًا
+- why historical audit weak بدون versions
+- schema evolution risks
+- approval/history interpretation risks
+- drift between execution + definition metadata
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — DESIGN IMMUTABLE VERSION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+workflow_definition_versions
+
+كمفهوم معماري كامل.
+
+المطلوب تحليل:
+- immutable version rows
+- active version pointer
+- publish creates new version
+- draft editing model
+- activation model
+- deprecation model
+- rollback model
+- version numbering strategy
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — EXECUTION LINKAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف execution ترتبط بالنسخة الصحيحة.
+
+صمّم:
+- workflowVersion semantics
+- execution → version linkage
+- snapshot + version coexistence
+- future replay compatibility
+- audit interpretation guarantees
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — PUBLISH GOVERNANCE REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف publish يجب أن يعمل مستقبلًا:
+- validate before publish
+- immutable publish artifact
+- publish metadata
+- publishedBy
+- publishedAt
+- publish notes
+- approval-to-publish مستقبلًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ROLLBACK MODEL REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+rollback semantics.
+
+المطلوب:
+- rollback does NOT mutate old versions
+- rollback activates previous immutable version
+- execution continuity guarantees
+- old executions remain valid
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — VERSION COMPATIBILITY REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف:
+- diagnostics
+- approvals
+- execution history
+- notifications
+- audit logs
+
+تفسّر:
+أي نسخة كانت فعالة وقت التنفيذ.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — SCHEMA EVOLUTION REVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حلّل:
+كيف future schema changes تؤثر على:
+- old snapshots
+- old versions
+- old executions
+
+وصمّم:
+compatibility strategy.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — WHAT NOT TO DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تدخل:
+- git-like branching
+- multi-user collaborative editing
+- distributed version control
+- Temporal-style replay
+- DAG execution
+- scheduler systems
+
+خلك:
+pragmatic immutable version governance.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — IMPLEMENTATION ROADMAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قسّم التنفيذ المستقبلي إلى مراحل:
+- schema foundations
+- publish pipeline
+- immutable activation
+- rollback support
+- diagnostics integration
+- UI governance
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-5b-versioning-review.txt
+
+ويحتوي:
+- current mutability risks
+- immutable versioning model
+- execution linkage strategy
+- rollback architecture
+- publish governance design
+- schema evolution strategy
+- compatibility guarantees
+- implementation roadmap
+- catastrophic risks إذا لم يتم تطبيق versioning
+- recommendation النهائية قبل implementation

@@ -1,0 +1,333 @@
+راجع:
+- workflow-phase-12b-report.txt
+- workflow-phase-12a-report.txt
+- workflow-phase-11b-report.txt
+- workflow-phase-11g-final-report.txt
+
+خصوصًا:
+- SuperAdminGovernanceViolations page
+- useGovernanceViolations()
+- useGovernancePolicies()
+- GovernanceViolation
+- GovernancePolicy
+- evidenceReferences
+- violation severity ordering
+- INTEGRITY_STATUS_MAP
+- RETENTION_CLASSIFICATION_MAP
+- GovernanceForensicTimeline
+- GovernanceReadOnlyNotice
+- GovernanceSectionHeader
+- GovernanceErrorState
+- super-admin route guard
+- read-only UX guarantees
+
+ثم نفّذ فقط:
+P12-C — Policy Violations UI & Evidence Review Foundations
+
+ولا تنفّذ:
+- backend changes
+- DB migrations
+- violation creation UI
+- violation dismissal controls
+- policy edit screens
+- workflow mutation controls
+- acknowledge/escalate/resolve buttons
+- export rendering
+- AI summaries
+- regulator submission
+- legal conclusions
+
+عنوان المهمة:
+WORKFLOW PHASE 12-C — Policy Violations UI & Evidence Review Foundations
+
+المهمة الحالية:
+تحويل:
+Policy Violations placeholder page
+
+إلى:
+frontend policy violation review and evidence inspection experience
+
+الهدف:
+تمكين:
+- policy violation review
+- severity-based visibility
+- evidence reference inspection
+- policy registry visibility
+- workspace-scoped filtering
+- violation detail expansion
+- forensic context linking
+
+بطريقة:
+frontend-only read-only violation review layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT P12-A/P12-B VIOLATIONS PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- super-admin-governance-violations.tsx
+- governance-console-hooks.ts
+- governance-console-config.ts
+- governance-forensic-timeline.tsx
+- shared governance components
+
+حدّد:
+- كيف تُعرض violations حاليًا
+- كيف تُعرض policies حاليًا
+- أين تضيف detail expansion
+- كيف تربط evidenceReferences بدون mutation
+- كيف تستفيد من status/retention maps من P12-B
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — VIOLATION SEVERITY VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config:
+VIOLATION_SEVERITY_MAP
+
+يدعم:
+- informational
+- low
+- medium
+- high
+- critical
+
+مع:
+- tier
+- label
+- description
+- icon name أو semantic key
+- deterministic ordering
+
+الهدف:
+عرض severity بوضوح بدون مبالغة قانونية.
+
+ممنوع:
+- legal verdict labels
+- disciplinary wording
+- guilt/fault conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — POLICY VIOLATION REVIEW PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن صفحة:
+SuperAdminGovernanceViolations
+
+لتحتوي:
+- overview risk banner
+- severity summary cards
+- active violations list/table
+- policy registry table
+- evidence review section
+- workspace filter input/select
+- policy filter select
+- severity filter select
+
+كلها:
+read-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — VIOLATION DETAIL EXPANSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لكل violation row/card:
+أضف expandable detail view يعرض:
+- violationId
+- policyId
+- policyName إذا متاح
+- workspaceId
+- entityType/entityId إذا متاح
+- severity
+- violationType
+- detectedAt
+- evidenceReferences
+- related audit chain IDs إذا متاحة
+- related execution IDs إذا متاحة
+- status/classification إن وجدت
+
+مع:
+- copy-safe display فقط
+- بدون resolve/dismiss/escalate buttons
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — EVIDENCE REFERENCES INSPECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ component:
+GovernanceEvidenceReferenceList
+
+يعرض:
+- reference type
+- reference id
+- source/layer إن وجدت
+- short description إن وجدت
+- stable ordering
+
+مع states:
+- empty
+- compact
+- expanded
+
+بدون:
+- download
+- export
+- external links إلا إذا داخل النظام وموجودة route آمنة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — POLICY REGISTRY VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حسّن policy registry table:
+- policyId
+- policyName
+- severity/defaultSeverity
+- enabled/active status
+- description مختصر
+- violation count مرتبط
+- lastDetectedAt إذا متاح
+
+مع:
+- sort deterministic
+- no policy edit buttons
+- no enable/disable controls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — WORKSPACE / POLICY / SEVERITY FILTERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- workspaceId filter input
+- policyId filter select
+- severity filter select
+- clear filters
+
+السلوك:
+- workspaceId يمكن يمرر لـ useGovernanceViolations(workspaceId)
+- policy/severity filters client-side إذا backend ما يدعمها
+- لا تضف backend params جديدة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FORENSIC CONTEXT LINKING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا violation يحتوي entityId:
+- اعرض "Forensic Context" read-only panel
+- يمكن إظهار entityId
+- يمكن إضافة زر/رابط داخلي إلى Audit Integrity page مع entityId query param إذا routing يدعم
+- أو اعرض guidance copy entityId to audit page
+
+ممنوع:
+- auto-fetch timeline داخل كل row إذا يسبب ضغط كبير
+- mutation
+- repair
+- legal conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Policy Violations page لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized من SuperAdminRoute
+- read-only notice
+- no filters result
+- evidence empty state
+- policy registry empty state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Policy Violations UI MUST:
+- remain frontend-only
+- remain read-only
+- never create/dismiss/resolve violations
+- never edit policies
+- never trigger workflows
+- never expose legal conclusions
+- never hide critical violations
+- never expose data outside super-admin
+
+أي:
+policy violation review UX فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+violation severity map stable
+
+T2:
+severity ordering deterministic
+
+T3:
+policy violation page remains super-admin scoped
+
+T4:
+evidence reference list config stable
+
+T5:
+no mutation/workflow/legal action labels exist
+
+T6:
+filters config stable
+
+T7:
+critical violations always visible contract true
+
+T8:
+policy registry columns stable
+
+T9:
+query keys/hooks remain read-only
+
+T10:
+frontend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend routes
+- DB migrations
+- violation create/dismiss/resolve controls
+- policy edit/enable/disable controls
+- workflow initiation controls
+- acknowledge/escalate/resolve buttons
+- PDF/XLSX export
+- AI explanation cards
+- regulator submission
+- legal verdicts
+
+خلك:
+minimal frontend policy violation evidence review UI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12c-report.txt
+
+ويحتوي:
+- policy violations UI architecture
+- severity visual model
+- violation detail expansion design
+- evidence reference list component
+- policy registry visibility
+- filter behavior
+- forensic context linking
+- read-only safety guarantees
+- tests results
+- remaining violations UI gaps
+- readiness assessment قبل Governance Workflows UI

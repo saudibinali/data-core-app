@@ -1,0 +1,203 @@
+================================================================================
+  تشغيل المشروع محلياً على Windows — الخطوات الناجحة
+  Internal Operations Platform (data-core)
+================================================================================
+
+المتطلبات:
+  - Node.js 24
+  - pnpm (عبر corepack)
+  - PostgreSQL يعمل على localhost:5432
+  - ملف .env في جذر المشروع
+
+================================================================================
+الخطوة 1 — الانتقال لجذر المشروع
+================================================================================
+
+cd "C:\Users\salgh\Downloads\Compressed\data-core-main\data-core-main"
+
+تحقق:
+  Get-ChildItem package.json, pnpm-workspace.yaml, .env.example
+
+================================================================================
+الخطوة 2 — التحقق من Node.js
+================================================================================
+
+node -v
+  (المطلوب: v24.x.x)
+
+================================================================================
+الخطوة 3 — التحقق من pnpm
+================================================================================
+
+pnpm -v
+
+إن لم يكن مثبتاً:
+  corepack enable
+  corepack prepare pnpm@latest --activate
+  pnpm -v
+
+================================================================================
+الخطوة 4 — تثبيت التبعيات
+================================================================================
+
+pnpm install
+
+================================================================================
+الخطوة 5 — ملف البيئة .env
+================================================================================
+
+تحقق:
+  Test-Path .env
+
+إن كان False:
+  Copy-Item .env.example .env
+
+ثم عدّل .env يدوياً (محرر نصوص) على الأقل:
+  - DATABASE_URL
+  - JWT_SECRET
+  - SESSION_SECRET
+  - NODE_ENV=development  (للتطوير المحلي)
+  - APP_URL=http://localhost:3000
+
+مثال DATABASE_URL:
+  postgresql://opsuser:changeme@localhost:5432/opsplatform
+
+================================================================================
+الخطوة 6 — PostgreSQL و DATABASE_URL
+================================================================================
+
+عرض القيمة من .env:
+  Select-String -Path .env -Pattern "^DATABASE_URL="
+
+تحميل المتغير في PowerShell:
+  $env:DATABASE_URL = (Select-String -Path .env -Pattern "^DATABASE_URL=").Line.Split("=",2)[1]
+
+تحقق:
+  echo $env:DATABASE_URL
+
+تحقق أن المنفذ 5432 يعمل:
+  Test-NetConnection -ComputerName localhost -Port 5432
+  (المطلوب: TcpTestSucceeded : True)
+
+ملاحظة: أمر psql قد لا يعمل إن لم تُثبَّت أدوات PostgreSQL على PATH — هذا طبيعي.
+
+================================================================================
+الخطوة 7 — تطبيق مخطط قاعدة البيانات (db push)
+================================================================================
+
+--- 7أ) الأمر الرسمي (قد يفشل بسبب drizzle.config.ts) ---
+
+  pnpm --filter @workspace/db run push
+
+  خطأ متوقع:
+    No schema files found for path ... lib\db\src\schema\index.ts
+  السبب: index.ts يعيد التصدير فقط ولا يحتوي pgTable.
+
+--- 7ب) الحل الناجح (إعداد مؤقت خارج المشروع — بدون تعديل ملفات المشروع) ---
+
+  cd "C:\Users\salgh\Downloads\Compressed\data-core-main\data-core-main\lib\db"
+
+  @'
+  import { defineConfig } from "drizzle-kit";
+
+  export default defineConfig({
+    schema: "./src/schema",
+    dialect: "postgresql",
+    dbCredentials: {
+      url: process.env.DATABASE_URL,
+    },
+  });
+  '@ | Set-Content -Path "$env:TEMP\drizzle-temp.config.ts" -Encoding utf8
+
+  pnpm exec drizzle-kit push --config "$env:TEMP\drizzle-temp.config.ts"
+
+  النتيجة المتوقعة:
+    [✓] Pulling schema from database...
+    [✓] Changes applied
+
+  ارجع لجذر المشروع:
+  cd "C:\Users\salgh\Downloads\Compressed\data-core-main\data-core-main"
+
+================================================================================
+الخطوة 8 — إنشاء حساب المدير (setup-owner)
+================================================================================
+
+  $env:DATABASE_URL = (Select-String -Path .env -Pattern "^DATABASE_URL=").Line.Split("=",2)[1]
+
+  pnpm --filter @workspace/scripts run setup-owner
+
+  أدخل تفاعلياً (أو عيّن OWNER_* في .env مسبقاً):
+    - Employee Number  (مثال: admin)
+    - Full name
+    - Email            (Enter للتخطي)
+    - Password         (8 أحرف على الأقل)
+
+  النتيجة المتوقعة:
+    ✅ Platform owner account ready!
+    Role: super_admin
+
+================================================================================
+الخطوة 9 — تشغيل API (نافذة PowerShell — تبقى مفتوحة)
+================================================================================
+
+  cd "C:\Users\salgh\Downloads\Compressed\data-core-main\data-core-main"
+
+  $env:NODE_ENV = "development"
+
+  pnpm --filter @workspace/api-server run build
+  pnpm --filter @workspace/api-server run start
+
+  النتيجة المتوقعة:
+    Server listening على المنفذ 8080
+
+  ملاحظة: لا تستخدم "pnpm --filter @workspace/api-server run dev" على PowerShell
+  لأن السكربت يستخدم export (Unix) ويفشل على Windows.
+
+================================================================================
+الخطوة 10 — تشغيل الواجهة (نافذة PowerShell جديدة)
+================================================================================
+
+  cd "C:\Users\salgh\Downloads\Compressed\data-core-main\data-core-main"
+
+  pnpm --filter @workspace/ops-platform run dev
+
+  افتح الرابط الذي يظهر (غالباً):
+    http://localhost:3000/
+
+================================================================================
+الخطوة 11 — تسجيل الدخول
+================================================================================
+
+  http://localhost:3000/sign-in
+
+  Employee Number: القيمة التي أدخلتها في setup-owner (مثال: admin)
+  Password:        كلمة المرور التي اخترتها في setup-owner
+
+  super_admin يُوجَّه إلى لوحة /super-admin
+
+================================================================================
+ملخص سريع (للمراجعة)
+================================================================================
+
+  1. cd جذر المشروع
+  2. node -v  (24)  +  pnpm -v
+  3. pnpm install
+  4. .env موجود ومعدّ
+  5. $env:DATABASE_URL + Test-NetConnection :5432
+  6. drizzle push (إعداد مؤقت في %TEMP%)
+  7. setup-owner
+  8. API: build + start  (نافذة 1 — منفذ 8080)
+  9. Web: ops-platform dev (نافذة 2 — منفذ 3000)
+  10. تسجيل دخول /sign-in
+
+================================================================================
+بديل: تشغيل الاثنين معاً (قد يفشل API على PowerShell)
+================================================================================
+
+  pnpm dev
+
+  على Windows يُفضَّل تشغيل API والواجهة في نافذتين كما أعلاه.
+
+================================================================================
+تاريخ الإعداد: مايو 2026
+================================================================================

@@ -1,0 +1,274 @@
+راجع:
+- workflow-phase-9e-report.txt
+- workflow-phase-10f-report.txt
+- workflow-phase-11a-report.txt
+خصوصًا:
+- immutable audit chains
+- retention classifications
+- orchestration governance
+- remediation analytics
+- compliance integrity reports
+- forensic timelines
+
+ثم نفّذ فقط:
+P11-B — Policy Governance Foundations & Compliance Rule Intelligence Architecture
+
+ولا تنفّذ:
+- automatic disciplinary enforcement
+- AI legal interpretation
+- autonomous compliance remediation
+- external regulator integrations
+- legal document automation
+- policy auto-enforcement
+
+عنوان المهمة:
+WORKFLOW PHASE 11-B — Policy Governance Foundations & Compliance Rule Intelligence Architecture
+
+المهمة الحالية:
+تحويل:
+immutable audit governance
+
+إلى:
+enterprise policy-governance intelligence infrastructure
+
+الهدف:
+تمكين:
+- policy-rule modeling
+- governance policy lifecycle tracking
+- compliance rule evaluation
+- policy violation intelligence
+- governance readiness foundations
+
+بطريقة:
+deterministic read-only policy-governance layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT POLICY GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Remaining Compliance Gaps"
+
+خصوصًا:
+- no policy-governance modeling
+- no rule evaluation engine
+- no violation intelligence
+- no governance policy lifecycle
+
+حدّد:
+- أين governance rules غير موحدة
+- أين compliance expectations implicit
+- أين violations غير قابلة للتصنيف
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE POLICY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernancePolicy
+
+ليحتوي:
+- policyId
+- policyName
+- policyCategory
+- policySeverity
+- policyScope
+- evaluationMode
+- policyStatus
+- createdBy
+- createdAt
+- lastReviewedAt
+
+مع:
+append-only governance semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — POLICY RULE ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+evaluateGovernancePolicies()
+
+بحيث:
+- يقرأ audit chains
+- يحلل remediation executions
+- يقيّم retention classifications
+- يربط orchestration history مع policy rules
+- يكتشف governance-policy violations
+
+لكن:
+بدون أي enforcement.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — POLICY VIOLATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceViolation
+
+ليحتوي:
+- violationId
+- policyId
+- workspaceId
+- entityId
+- violationType
+- severity
+- detectedAt
+- evidenceReferences
+- violationStatus
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — VIOLATION CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+GovernanceViolationType
+
+يحتوي:
+- missing_audit_chain
+- orphaned_integrity_chain
+- rollback_without_confirmation
+- execution_without_orchestration
+- retention_misclassification
+- unresolved_critical_incident
+- compliance_gap_detected
+- governance_policy_breach
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — POLICY EVALUATION SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+- deterministic rule evaluation
+- append-only violation history
+- evidence-reference linking
+- audit-safe serialization
+- fail-closed classification semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /platform/governance/policies
+GET /platform/governance/violations
+GET /platform/governance/violations/:workspaceId
+
+بحيث:
+- super-admin only
+- deterministic ordering
+- append-only governance visibility
+- forensic-safe serialization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_policy_evaluated
+
+B)
+governance_violation_detected
+
+C)
+compliance_gap_classified
+
+D)
+policy_review_required
+
+كلها تحتوي:
+- policyId
+- workspaceId
+- violationType
+- severity
+- evidenceReferences
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Policy-governance layer MUST:
+- remain READ-ONLY
+- never auto-enforce policies
+- never mutate compliance records
+- never auto-trigger disciplinary actions
+- fail closed on ambiguity
+
+أي:
+governance intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+policy evaluation deterministic
+
+T2:
+missing audit chains detected correctly
+
+T3:
+rollback-without-confirmation detected
+
+T4:
+retention misclassification detection valid
+
+T5:
+violation serialization stable
+
+T6:
+append-only violation history preserved
+
+T7:
+evidence linking deterministic
+
+T8:
+super-admin enforcement valid
+
+T9:
+observability events scoped correctly
+
+T10:
+policy engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- automatic punishment systems
+- AI compliance enforcement
+- legal automation engines
+- policy auto-remediation
+- autonomous governance actions
+- regulator synchronization systems
+
+خلك:
+minimal deterministic governance-policy intelligence infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-11b-report.txt
+
+ويحتوي:
+- governance policy architecture
+- policy evaluation semantics
+- violation intelligence model
+- governance integration points
+- observability additions
+- tests results
+- remaining compliance gaps
+- readiness assessment قبل compliance workflow orchestration

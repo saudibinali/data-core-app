@@ -1,0 +1,128 @@
+================================================================================
+WORKFLOW PHASE 22D REPORT
+Finance Operations Center & Posting Governance
+Generated: 2026-05-19
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P22-D delivers the Finance Operations Center UI, posting governance workflow
+(submit / approve / reject without posted transition), batch review APIs,
+reversal planning foundation, finance exception center with notifications,
+expanded observability metrics, five operational audit reports, and four new
+governance permissions — building on P22-C without accounting posting, bank
+integrations, or ERP APIs.
+
+Recommended next: P23-A — ERP Platform Administration & Multi-Tenant Governance.
+Do not start P23-A in this delivery.
+
+MIGRATION
+---------
+0015_finance_governance_ops.sql
+  - governance_status, review metadata on finance_posting_batches
+  - finance_exceptions
+  - finance_reversal_plans
+
+FINANCE OPERATIONS CENTER — GO
+------------------------------
+[GO] GET /finance/ops/center/overview
+[GO] GET /finance/ops/center/batches (filters)
+[GO] UI /admin/finance/ops (tabs: overview, batches, review, exceptions, reconciliation, audit)
+[GO] Prepared / blocked / warning badges
+[GO] Trial balance summary, mapping gaps, locks, alerts
+[GO] Workspace isolation
+
+POSTING GOVERNANCE — GO
+------------------------
+[GO] FinancePostingGovernanceService
+[GO] submitForReview / approve / reject
+[GO] Separation of duties (preparer ≠ approver)
+[GO] Readiness checks on submit and approve
+[GO] No posted transition
+[GO] Permissions: finance.batch.review, finance.governance.approve
+
+BATCH REVIEW OPERATIONS — GO
+----------------------------
+[GO] GET /finance/ops/batches/:id/review
+[GO] POST governance submit / approve / reject
+[GO] POST /finance/ops/batches/:id/void
+[GO] Inspect entries + readiness in review payload
+
+REVERSAL GOVERNANCE — GO (simulation only)
+------------------------------------------
+[GO] FinanceReversalService.planReversal
+[GO] validatePlan / getPlan
+[GO] finance_reversal_plans table
+[GO] No ledger mutation
+[GO] Permission: finance.reversal.plan
+
+EXCEPTION CENTER — GO
+---------------------
+[GO] FinanceExceptionService
+[GO] syncFromReconciliation
+[GO] acknowledge / resolve
+[GO] dispatchUserNotification (finance_exception)
+[GO] finance_exceptions table
+
+OBSERVABILITY — GO
+------------------
+[GO] Extended finance metrics (governance, readiness distribution, open exceptions)
+[GO] GET /finance/ops/governance/metrics
+[GO] Operational alerts in center overview
+
+AUDIT OPERATIONS — GO
+---------------------
+[GO] FinanceAuditOpsService
+[GO] GET /finance/ops/audit/operations
+[GO] Governance decisions, void history, break-glass, export history
+
+REPORTING — GO
+--------------
+[GO] finance.readiness.audit
+[GO] finance.blocked.batches
+[GO] finance.reconciliation.audit
+[GO] finance.prepare.activity
+[GO] finance.governance.actions
+[GO] Registry + export authorization + POST /finance/ops/center/reports/generate
+
+SECURITY — GO
+-------------
+[GO] 13 finance permissions (4 new governance keys)
+[GO] SoD on approve/reject
+[GO] Governance audit logging
+[GO] Export audit hook
+[GO] Immutable prepared entries (no update API)
+
+SMOKE TEST RESULTS
+------------------
+finance-governance.smoke.test.ts — governance surfaces, permissions, no posting
+finance-foundation.smoke.test.ts — updated permission check
+Run: pnpm --filter @workspace/api-server run test
+
+GATE DECISIONS
+--------------
+Finance operations center:        GO
+Posting governance:               GO
+Reconciliation governance:        GO (sync + exception linkage)
+Finance operational readiness:    PARTIAL (no dedicated finance module nav seed)
+ERP finance governance readiness: PARTIAL (no posting, no bank/ERP APIs)
+
+REMAINING BLOCKERS
+------------------
+- No accounting posting transition (by design)
+- Reversal plans are metadata/simulation only
+- Finance module not in platform modules catalog
+- Role assignment UI for finance_controller template manual
+- Bank, invoicing, procurement, tax — out of scope
+
+CONFIRMATION
+------------
+No accounting posting implemented.
+No bank integrations.
+No invoicing rollout.
+No procurement rollout.
+No tax engine.
+No destructive migration.
+P23-A not started.
+
+================================================================================

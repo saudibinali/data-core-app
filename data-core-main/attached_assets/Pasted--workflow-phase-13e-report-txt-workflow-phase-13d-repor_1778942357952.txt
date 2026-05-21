@@ -1,0 +1,463 @@
+راجع:
+- workflow-phase-13e-report.txt
+- workflow-phase-13d-report.txt
+- workflow-phase-13c-report.txt
+- workflow-phase-13b-report.txt
+- workflow-phase-13a-report.txt
+
+خصوصًا:
+- tenant_subscriptions table
+- subscription-lifecycle.ts
+- tenant-usage-intelligence.ts
+- tenant-entitlements.ts
+- tenant-registry.ts
+- tenants.ts routes
+- super-admin-tenants.tsx
+- subscription-lifecycle-config.ts
+- platform-usage-config.ts
+- platform-entitlements-config.ts
+- activity_logs audit pattern
+- requireSuperAdmin middleware
+- SuperAdminRoute
+
+ثم نفّذ فقط:
+P13-F — Subscription Expiry, Grace Period & Renewal Intelligence
+
+ولا تنفّذ:
+- payment provider integration
+- invoice generation
+- charge collection
+- tax logic
+- automatic suspension
+- automatic workspace locking
+- entitlement enforcement
+- module access enforcement
+- email/legal notices
+- tenant self-service billing portal
+- background suspension jobs
+- HR module implementation
+
+عنوان المهمة:
+WORKFLOW PHASE 13-F — Subscription Expiry, Grace Period & Renewal Intelligence
+
+المهمة الحالية:
+إضافة طبقة ذكاء قراءة وتحليل حول انتهاء الاشتراك، التجديد، وفترة السماح.
+
+الهدف:
+تمكين السوبر أدمن من رؤية:
+- renewal approaching
+- trial ending soon
+- billing period ending soon
+- subscription expired
+- grace period active
+- grace period ending soon
+- grace period expired
+- renewal urgency
+- recommended next platform action
+
+بطريقة:
+read-only renewal intelligence foundation
+بدون دفع أو إيقاف تلقائي أو إشعارات خارجية
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT SUBSCRIPTION LIFECYCLE FOUNDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- SubscriptionStatus
+- PlanCode
+- tenant_subscriptions fields
+- deriveSubscriptionStatus()
+- isRenewalApproaching()
+- isGracePeriodActive()
+- isSubscriptionExpired()
+- calculateDaysUntilEnd()
+- calculateDaysPastDue()
+- TenantRiskSignalSummary
+- Subscription Management UI
+- Tenant Registry risk badges
+
+حدّد:
+- هل renewalDueAt مستخدم فعليًا؟
+- هل trialStartedAt/trialEndsAt مدعومة؟
+- هل gracePeriodStartedAt/gracePeriodEndsAt مدعومة؟
+- كيف يتم حساب subscriptionStatus الحالي؟
+- كيف نضيف renewal intelligence بدون تغيير workspace.status
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — RENEWAL INTELLIGENCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ pure lib:
+
+subscription-renewal-intelligence.ts
+
+RenewalSignalCode:
+- no_subscription_metadata
+- trial_active
+- trial_ending_soon
+- trial_expired
+- subscription_active
+- renewal_due_soon
+- renewal_due_now
+- billing_period_expired
+- grace_period_active
+- grace_period_ending_soon
+- grace_period_expired
+- subscription_cancelled
+- subscription_suspended
+- invalid_subscription_dates
+
+RenewalUrgency:
+- none
+- low
+- medium
+- high
+- critical
+- unknown
+
+RecommendedPlatformAction:
+- none
+- monitor
+- contact_customer
+- prepare_grace_period
+- review_for_suspension
+- renew_subscription_metadata
+- fix_subscription_metadata
+- manual_review_required
+
+مهم:
+هذه توصيات تشغيلية داخلية فقط، ليست تنفيذ تلقائي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — THRESHOLDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+عرّف constants:
+
+RENEWAL_DUE_SOON_DAYS = 14
+TRIAL_ENDING_SOON_DAYS = 7
+GRACE_ENDING_SOON_DAYS = 3
+
+Rules:
+- إذا billingPeriodEnd خلال 14 يوم → renewal_due_soon
+- إذا renewalDueAt <= now → renewal_due_now
+- إذا trialEndsAt خلال 7 أيام → trial_ending_soon
+- إذا gracePeriodEndsAt خلال 3 أيام → grace_period_ending_soon
+
+مهم:
+كل الحسابات deterministic وتقبل now كـ parameter للاختبارات.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RENEWAL INTELLIGENCE DERIVATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Exports:
+- deriveRenewalSignals(subscription, now)
+- deriveRenewalUrgency(signals)
+- deriveRecommendedPlatformAction(signals, urgency)
+- deriveSubscriptionRenewalProfile(subscription, now)
+- validateRenewalDateConsistency(subscription)
+- buildRenewalWarningMessages(profile)
+
+SubscriptionRenewalProfile:
+- subscriptionId
+- workspaceId
+- planCode
+- subscriptionStatus
+- signals[]
+- urgency
+- recommendedAction
+- daysUntilBillingEnd
+- daysUntilTrialEnd
+- daysUntilGraceEnd
+- daysPastDue
+- warnings[]
+- derivedAt
+
+Urgency mapping:
+- invalid_subscription_dates → critical
+- grace_period_expired → critical
+- subscription_suspended → high
+- subscription_cancelled → high
+- billing_period_expired + no grace active → high
+- grace_period_ending_soon → high
+- renewal_due_now → medium/high
+- renewal_due_soon → medium
+- trial_ending_soon → low/medium
+- subscription_active → none
+- no_subscription_metadata → unknown
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — BACKEND API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+GET /platform/tenants/:tenantId/renewal-intelligence
+
+Behavior:
+- requireAuth
+- requireSuperAdmin
+- validate tenant exists
+- read tenant subscription
+- derive renewal profile
+- return:
+  - renewalProfile
+  - subscriptionSummary
+  - warnings
+  - safetyNotice
+
+إذا لا يوجد subscription:
+- return no_subscription_metadata signal
+- urgency unknown
+- recommendedAction manual_review_required أو monitor حسب التصميم
+
+مهم:
+- read-only
+- no mutation
+- no auto status change
+- no suspension
+- no billing action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — UPDATE TENANT REGISTRY PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+حدّث TenantRiskSignalSummary:
+
+أضف:
+- renewalDueSoon
+- renewalDueNow
+- trialEndingSoon
+- graceEndingSoon
+- graceExpired
+- renewalUrgency
+- recommendedPlatformAction
+
+واجعل riskLevel يأخذ renewal urgency بالحسبان:
+- critical urgency → critical
+- high urgency → high
+- medium urgency → medium
+- low urgency → low
+لكن لا ينقص riskLevel لو governance/usage أعلى.
+
+مهم:
+لا تغير workspace.status تلقائيًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- RENEWAL_SIGNAL_CONFIG
+- RENEWAL_URGENCY_CONFIG
+- RECOMMENDED_PLATFORM_ACTION_CONFIG
+- RENEWAL_INTELLIGENCE_SAFETY_CONTRACT
+
+Safety contract:
+- superAdminOnly
+- readOnly
+- noPaymentProcessing
+- noInvoiceGeneration
+- noChargeCollection
+- noAutoWorkspaceSuspension
+- noWorkspaceLocking
+- noEntitlementEnforcement
+- noEmailOrLegalNotices
+- recommendationsOnly
+- failsClosedOnInvalidDates
+
+كلها true.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — FRONTEND HOOK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- useTenantRenewalIntelligence(tenantId)
+
+GET hook فقط.
+
+مع:
+- loading/error/empty states
+- staleTime مناسب
+- no mutation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — FRONTEND UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في TenantDetailPanel أضف قسم:
+
+Renewal & Grace Intelligence
+
+يعرض:
+- urgency badge
+- recommended action badge
+- signal badges
+- days until billing end
+- days until trial end
+- days until grace end
+- days past due
+- warnings panel
+- safety notice: informational only, no automatic enforcement
+
+في Tenant Registry table:
+اعرض مختصر:
+- renewal urgency
+- recommended action
+- billing end / grace end indicator
+
+مهم:
+- لا أزرار suspend/charge/send notice
+- لا payment wording
+- لا legal notice wording
+- لا automatic enforcement wording
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured log:
+- tenant_renewal_intelligence_read
+
+Fields:
+- actorId
+- tenantId
+- workspaceId
+- urgency
+- recommendedAction
+- signalCount
+
+بدون بيانات مالية حساسة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Renewal Intelligence MUST:
+- remain super-admin only
+- remain read-only
+- never process payments
+- never generate invoices
+- never charge customers
+- never auto-suspend workspace
+- never auto-lock workspace
+- never enforce entitlements
+- never send email/legal notices
+- recommendations only
+- fail closed on invalid dates
+
+أي:
+subscription renewal visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+renewal signal config stable
+
+T2:
+threshold constants stable
+
+T3:
+no subscription metadata signal
+
+T4:
+trial active / trial ending soon / trial expired
+
+T5:
+subscription active / renewal due soon / renewal due now
+
+T6:
+billing period expired
+
+T7:
+grace active / grace ending soon / grace expired
+
+T8:
+cancelled/suspended signals precedence
+
+T9:
+invalid dates produce critical signal
+
+T10:
+urgency derivation stable
+
+T11:
+recommended action derivation stable
+
+T12:
+warning messages stable
+
+T13:
+renewal intelligence API super-admin only
+
+T14:
+renewal intelligence API read-only no mutation
+
+T15:
+tenant registry risk summary reflects renewal urgency
+
+T16:
+frontend config stable
+
+T17:
+frontend hook read-only
+
+T18:
+renewal panel renders all major states
+
+T19:
+no payment/invoice/charge/suspend/lock/legal/email/enforcement wording exists
+
+T20:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- payment provider
+- invoice generation
+- charge collection
+- tax
+- automatic suspension
+- automatic workspace lock
+- entitlement enforcement
+- module access enforcement
+- email notifications
+- legal notices
+- background renewal jobs
+- customer billing portal
+- tenant self-service renewal
+- HR module logic
+
+خلك:
+read-only renewal intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-13f-report.txt
+
+ويحتوي:
+- renewal intelligence model
+- thresholds
+- derivation library
+- backend API surface
+- tenant registry risk summary updates
+- frontend renewal intelligence UI
+- observability behavior
+- safety guarantees
+- tests results
+- remaining renewal automation gaps
+- readiness assessment قبل Tenant Health & Operational Monitoring

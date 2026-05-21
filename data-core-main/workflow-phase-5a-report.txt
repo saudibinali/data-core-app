@@ -1,0 +1,394 @@
+══════════════════════════════════════════════════════════════════════════════════
+  WORKFLOW PHASE 5-A — Immutable Execution Steps Snapshot
+  Internal Operations Platform · May 2026
+══════════════════════════════════════════════════════════════════════════════════
+
+Phase:       P5-A (Execution Safety Hardening)
+Risk closed: H-01 / WG-05 — Definition drift corruption on approval resume
+Tests:       325 passed (38 new), 0 failed
+Typecheck:   Clean (0 errors)
+DB push:     ✓ Applied (2 new columns on workflow_executions)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — SCHEMA CHANGES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: lib/db/src/schema/workflows.ts
+Table: workflow_executions
+
+Two nullable columns added — both backward compatible (no NOT NULL, no DEFAULT):
+
+  steps_snapshot    JSONB     NULL
+    Frozen copy of workflow_definitions.steps at execution trigger time.
+    Written once by engine.ts at INSERT.  Never updated after creation.
+    Source of truth for all approval resume operations (P4-E + P5-A).
+
+  workflow_version  INTEGER   NULL
+    Denormalized version number from the workflow definition at trigger time.
+    NULL until P7-A introduces workflow_definition_versions and the version
+    column on workflow_definitions.  Column is present now for forward
+    compatibility — no code will need to add it again in P7-A.
+
+Migration behavior:
+  All pre-P5-A rows: steps_snapshot = NULL, workflow_version = NULL.
+  executor.ts detects NULL and falls back to the legacy behavior with a
+  structured WARNING log.  Zero data migration required.  Zero downtime risk.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — SNAPSHOT CAPTURE FLOW (engine.ts)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/engine.ts
+
+When a workflow is triggered and a new execution row is created:
+
+  1. structuredClone(steps)
+     The WorkflowStep[] parsed from workflow_definitions.steps JSONB is deep-
+     cloned before storage.  structuredClone() is native to Node.js 17+ (Node
+     24 is used here) — no external dependency.
+
+     WHY DEEP CLONE (not the raw reference):
+       The `steps` variable is shared across the for-loop iteration over all
+       matching definitions.  Without a clone, step handlers in concurrent
+       executions that mutate nested config objects (e.g., config.recipientIds)
+       could corrupt the shared reference.  The clone makes each execution's
+       snapshot fully independent.
+
+  2. stepsSnapshot stored in the INSERT
+     The cloned array is stored in the steps_snapshot column as JSONB at the
+     same time as the execution row is created.  Atomic with the INSERT — no
+     window where the execution exists without a snapshot.
+
+  3. workflowVersion = null
+     Stored explicitly as null until P7-A.  Future code in P7-A will replace
+     `null` with `def.version` once the version column exists on definitions.
+
+  4. Observability log — action='execution_snapshot_created'
+     Emitted as INFO immediately after the INSERT returns:
+     {
+       executionId, workflowId, workflowKey, event, triggerEventLogId,
+       timeoutAt, ttlHours,
+       snapshotPresent: true,
+       snapshotStepCount: N,   ← confirms snapshot is non-empty
+       workflowVersion: null,
+       action: "execution_snapshot_created"
+     }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — RESUME SNAPSHOT BEHAVIOR (executor.ts)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/executor.ts
+Function: resumeExecution()
+
+The SELECT from workflowExecutionsTable now includes:
+  stepsSnapshot:   workflowExecutionsTable.stepsSnapshot
+  workflowVersion: workflowExecutionsTable.workflowVersion
+
+After all pre-conditions pass (status='waiting_approval', cancelRequested=false),
+the source-of-truth selection logic runs:
+
+  PATH A — Snapshot present (execution.stepsSnapshot != null):
+    ─────────────────────────────────────────────────────────
+    steps = execution.stepsSnapshot as WorkflowStep[]
+
+    • No DB round-trip to workflow_definitions.
+    • No dependency on live definition state.
+    • Definition edits, deprecations, or soft-deletes have ZERO effect.
+    • Emits: action='execution_resume_using_snapshot' (INFO)
+      {
+        executionId, workflowId, workspaceId,
+        workflowVersion, snapshotPresent: true,
+        stepCount: N, resumedBy,
+        action: "execution_resume_using_snapshot"
+      }
+
+  PATH B — Legacy fallback (execution.stepsSnapshot == null):
+    ─────────────────────────────────────────────────────────
+    Fetches live workflow_definitions.steps exactly as before.
+    Returns WORKFLOW_NOT_FOUND if the definition no longer exists.
+
+    • Applies only to executions created before P5-A deployment.
+    • Emits: action='legacy_resume_live_definition' (WARN)
+      {
+        executionId, workflowId, workspaceId,
+        workflowVersion: null, snapshotPresent: false,
+        resumedBy,
+        action: "legacy_resume_live_definition"
+      }
+    • The WARN is visible in production logs and signals to operators that
+      this specific execution may be subject to definition drift.
+
+After step resolution (either path), execution continues identically:
+  • Context reconstruction from step outputs (unchanged — P4-E logic).
+  • Guarded waiting_approval → running UPDATE (unchanged — P4-D model).
+  • Approval record INSERT (unchanged — P4-E model).
+  • runStepLoop() from currentStepIndex + 1 (unchanged — P4-E model).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — LEGACY FALLBACK BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Executions created before P5-A:
+  steps_snapshot = NULL  →  legacy path (live definition fetch).
+  workflowVersion = NULL →  no version info available.
+
+These executions maintain exactly the same behavior as before — no regression.
+The only change is the WARN log that surfaces the potential drift risk.
+
+The null vs. empty-array distinction is correct and intentional:
+  NULL []       — absent, legacy execution → use live definition
+  []            — present, snapshot has 0 steps → use snapshot (0-step workflow)
+
+This is a semantic difference enforced by the resolveResumeSteps logic.
+
+Operator guidance for legacy executions:
+  When the WARN log fires for a high-stakes paused execution (e.g., an HR
+  approval workflow waiting since before P5-A deployment), the operator should
+  verify that the workflow definition has NOT been edited since the execution
+  was triggered before granting approval.
+
+  Once all pre-P5-A executions have completed (or timed out), the legacy path
+  will never fire again — every new execution has a snapshot.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Three new structured log entries added:
+
+  A) action='execution_snapshot_created'  (INFO, engine.ts)
+     Emitted: once per new execution, at creation time.
+     Fields: executionId, workflowId, workflowKey, event,
+             triggerEventLogId, timeoutAt, ttlHours,
+             snapshotPresent=true, snapshotStepCount, workflowVersion=null.
+     Purpose: confirms snapshot was captured; snapshotStepCount verifies
+              the snapshot is non-empty for the expected workflow.
+
+  B) action='execution_resume_using_snapshot'  (INFO, executor.ts)
+     Emitted: when resumeExecution() uses the stored snapshot.
+     Fields: executionId, workflowId, workspaceId,
+             workflowVersion, snapshotPresent=true, stepCount, resumedBy.
+     Purpose: confirms drift-safe resume path was taken for this approval.
+
+  C) action='legacy_resume_live_definition'  (WARN, executor.ts)
+     Emitted: when resumeExecution() falls back to live definition
+              (stepsSnapshot == null, pre-P5-A execution).
+     Fields: executionId, workflowId, workspaceId,
+             workflowVersion=null, snapshotPresent=false, resumedBy.
+     Purpose: alerts operators that this resume is definition-drift susceptible.
+              Visible at WARN level — appears in any production log aggregator
+              configured to surface WARN+ events.
+
+Search queries for production diagnostics:
+  All new executions:       action:"execution_snapshot_created"
+  All safe resumes:         action:"execution_resume_using_snapshot"
+  All legacy resumes:       action:"legacy_resume_live_definition"
+  Legacy resume count:      GROUP BY workflowId WHERE action="legacy_resume_live_definition"
+  (When count reaches 0: all pre-P5-A executions have been resolved.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — DIAGNOSTICS INTEGRATION (routes/workflows.ts)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint: GET /api/workflows/executions/:id
+
+Two new fields added to the execution detail response:
+
+  workflowVersion  INTEGER | null
+    The version of the workflow definition that was active when this execution
+    was triggered.  NULL until P7-A adds versioning to definitions.
+    Allows the question: "Which version of workflow W does this execution use?"
+
+  snapshotPresent  BOOLEAN
+    true  → execution has an immutable steps snapshot (P5-A path).
+            Resume will use snapshot — drift-safe.
+    false → execution was created before P5-A (legacy path).
+            Resume will use live definition — drift possible.
+    Computed by PostgreSQL: steps_snapshot IS NOT NULL.
+
+IMPORTANT: steps_snapshot itself is NOT returned in the response.
+  The raw snapshot JSONB can be multiple KB depending on workflow complexity.
+  Returning it in every execution detail response would make payloads
+  unpredictable in size.  The presence indicator (snapshotPresent) is
+  sufficient for diagnostics.  Admins needing the raw snapshot can query:
+    SELECT steps_snapshot FROM workflow_executions WHERE id = N;
+
+Example response shape (addition only):
+  {
+    "execution": {
+      "id": 42,
+      "status": "waiting_approval",
+      ...
+      "workflowVersion": null,      ← null until P7-A
+      "snapshotPresent": true,      ← true for all post-P5-A executions
+      ...
+    },
+    "steps": [...]
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/snapshot.test.ts
+
+Total new tests: 38
+Test suite result: 6 files passed / 325 tests passed / 0 failed
+(287 previous + 38 new = 325 total)
+
+  T1 — Snapshot captures all steps at trigger time
+  ─────────────────────────────────────────────────
+  ✓  snapshot contains the same number of steps as the original
+  ✓  snapshot step indices match original
+  ✓  snapshot step types match original
+  ✓  snapshot step names match original
+  ✓  snapshot of empty workflow is an empty array (not null)
+  ✓  snapshot of single-step workflow captures the one step
+  ✓  nested config fields are captured in the snapshot
+
+  T2 — Resume uses snapshot when present
+  ───────────────────────────────────────
+  ✓  resolveResumeSteps returns snapshot steps when snapshot is present
+  ✓  resolveResumeSteps does NOT use liveSteps when snapshot is present
+  ✓  source='snapshot' is always returned when snapshot != null
+  ✓  an empty array snapshot (not null) still selects the snapshot path
+
+  T3 — Live definition edits do not affect snapshot (drift isolation)
+  ───────────────────────────────────────────────────────────────────
+  ✓  mutating the live definition after snapshot capture does not change snapshot
+  ✓  nested config mutation in live steps does not affect snapshot
+  ✓  snapshot returns correct steps even when live definition is replaced entirely
+  ✓  definition-drift scenario: resume uses correct post-approval step [CRITICAL]
+
+  T4 — Legacy fallback when snapshot is NULL
+  ──────────────────────────────────────────
+  ✓  resolveResumeSteps returns liveSteps when snapshot is null
+  ✓  null snapshot selects live_definition path regardless of live step count
+  ✓  legacy path does NOT crash — returns live steps without error
+  ✓  null vs empty array snapshot are distinguishable
+  ✓  legacy fallback behavior matches pre-P5-A behavior exactly
+
+  T5 — Snapshot is a deep clone — no shared references
+  ─────────────────────────────────────────────────────
+  ✓  snapshot array is a different reference than original steps
+  ✓  snapshot step objects are different references than original step objects
+  ✓  snapshot config objects are different references than original config objects
+  ✓  mutating snapshot does not affect original steps
+  ✓  mutating original steps does not affect snapshot
+  ✓  recipientIds array in notification step is deeply cloned
+
+  T6 — workflowVersion is persisted correctly
+  ────────────────────────────────────────────
+  ✓  returns NULL when definition has no version column (pre-P7-A state)
+  ✓  returns NULL when definition.version is explicitly null
+  ✓  returns NULL when definition.version is undefined
+  ✓  returns the version number when definition has a version (post-P7-A)
+  ✓  returns version 1 for the first published version
+  ✓  version numbers are always positive integers (post-P7-A model)
+  ✓  NULL workflowVersion does not affect snapshot correctness
+
+  T7 — Resume preserves exact-once behavior after snapshot introduction
+  ─────────────────────────────────────────────────────────────────────
+  ✓  snapshot path does not add new race conditions to resumeExecution
+  ✓  snapshot is resolved BEFORE the guarded UPDATE — does not block the guard
+  ✓  resume from index is unchanged by snapshot introduction
+  ✓  snapshot resolves steps idempotently — same result on every call
+  ✓  approval record is inserted by the guarded UPDATE winner — unaffected by snapshot
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — STORAGE IMPACT ESTIMATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Steps snapshot size per execution:
+  Small workflow (1-3 steps):       ~0.3 – 1.0 KB
+  Medium workflow (4-8 steps):      ~1.0 – 4.0 KB
+  Large workflow (9-25 steps):      ~3.5 – 15.0 KB
+
+Estimated storage overhead:
+  100 executions/day × 2 KB avg   =  200 KB/day   =   73 MB/year
+  500 executions/day × 2 KB avg   =  1.0 MB/day   =  365 MB/year
+  1,000 executions/day × 2 KB avg =  2.0 MB/day   =  730 MB/year
+
+Comparison to existing workflow_execution_steps.input:
+  Currently stores { step: <config>, context: <full ExecutionContext> }
+  Each step log row can be 10-100 KB of JSONB (full context per step).
+  For a 5-step workflow: 5 × 20 KB = 100 KB per execution in step rows.
+  The 2 KB snapshot overhead is <2% of the existing per-execution storage.
+
+Conclusion:
+  Storage impact is NEGLIGIBLE relative to the existing workflow data model.
+  The protection provided (drift-safe approval resume) far outweighs the cost.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — REMAINING VERSIONING LIMITATIONS BEFORE P7-A
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P5-A closes H-01 (definition drift on approval resume) completely.
+The following are NOT in scope for P5-A and remain open until P7-A:
+
+  ✗ Workflow version history table
+    No workflow_definition_versions table exists yet.
+    An admin cannot compare "what did this workflow look like on 2026-04-01?"
+    Cannot roll back to a previous version via the API.
+    → Addressed in P7-A.
+
+  ✗ workflowVersion column on workflow_definitions
+    The workflow_definitions table has no version column yet.
+    workflow_executions.workflow_version is NULL for all executions until P7-A
+    adds the column to definitions and engine.ts starts reading it.
+    → Addressed in P7-A (requires schema + activation flow update).
+
+  ✗ User-facing "version" display in execution details
+    The snapshotPresent indicator in the execution detail response is correct,
+    but workflowVersion: null is not informative yet.
+    Until P7-A: operators can identify which definition was active by correlating
+    execution.startedAt with definition.updatedAt — imprecise but functional.
+    → Addressed in P7-A.
+
+  ✗ Snapshot comparison across executions
+    No API to compare the steps_snapshot of two different executions of the
+    same workflow (useful for: "why did run N behave differently from run N-1?").
+    → Requires P7-A version history for meaningful comparison.
+
+  ✗ Snapshot validation on resume
+    When the legacy path fires, the live definition steps are not validated
+    against the original trigger context.  A schema-incompatible edit could
+    still cause a runtime error during legacy resume.
+    → The WARN log surfaces this risk; P7-A snapshot guarantee eliminates it.
+
+What P5-A DOES achieve (completely):
+  ✓ All new executions (post-P5-A deployment) are drift-safe.
+  ✓ Approval resume cannot silently execute wrong steps.
+  ✓ Live definition edits while an execution is paused have zero effect on resume.
+  ✓ Legacy executions degrade gracefully with a visible WARN log.
+  ✓ The workflow_version column is in place for P7-A to populate — zero schema
+    work needed in P7-A for this column.
+  ✓ 38 new pure logic tests document and protect the snapshot model.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Files changed:
+    lib/db/src/schema/workflows.ts                              +65 lines
+    artifacts/api-server/src/lib/workflows/engine.ts            +43 lines
+    artifacts/api-server/src/lib/workflows/executor.ts          +85 lines
+    artifacts/api-server/src/routes/workflows.ts                +14 lines
+    artifacts/api-server/src/lib/workflows/__tests__/snapshot.test.ts  (new, 570 lines)
+
+  Schema: 2 new nullable columns on workflow_executions.
+    steps_snapshot    JSONB  NULL   — immutable steps at trigger time
+    workflow_version  INT    NULL   — populated in P7-A
+
+  Risk closed: H-01 (CATASTROPHIC — definition drift on approval resume)
+    Before P5-A: admin edit to active workflow during approval pause → wrong steps on resume.
+    After P5-A:  no live definition fetch on resume — drift impossible for new executions.
+
+  Tests: 287 → 325 (38 new), all passing.
+  Typecheck: clean.
+  DB push: applied.
+
+══════════════════════════════════════════════════════════════════════════════════
+END — workflow-phase-5a-report.txt
+══════════════════════════════════════════════════════════════════════════════════

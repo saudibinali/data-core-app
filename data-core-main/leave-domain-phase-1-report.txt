@@ -1,0 +1,256 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║           LEAVE DOMAIN — PHASE 1 IMPLEMENTATION REPORT                     ║
+║           Core Leave Lifecycle (DB + Routes + Events + Listeners)           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Generated: 2026-05-13
+Status:    ✅ COMPLETE — typecheck passes, DB migrated, API server running
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. DATABASE SCHEMA  (lib/db/src/schema/hr.ts)
+────────────────────────────────────────────────────────────────────────────────
+
+Two new tables appended after hrWorkspaceSettingsTable:
+
+  ┌─ leave_requests ──────────────────────────────────────────────────────────┐
+  │  id                   serial PK                                           │
+  │  workspace_id         integer NOT NULL FK → workspaces.id                │
+  │  employee_id          integer NOT NULL FK → employees.id                 │
+  │  requested_by_user_id integer NOT NULL FK → users.id                     │
+  │  leave_policy_id      integer NULL FK → hr_leave_policies.id             │
+  │  leave_type           text NOT NULL  (annual|sick|unpaid|maternity|…)    │
+  │  start_date           date NOT NULL                                       │
+  │  end_date             date NOT NULL                                       │
+  │  days_requested       integer NOT NULL  (calendar days)                  │
+  │  business_days_count  integer NOT NULL  (server-calculated)              │
+  │  status               text DEFAULT 'pending'                             │
+  │                       (pending|pending_approval|approved|rejected|       │
+  │                        withdrawn|cancelled)                               │
+  │  employee_note        text NULL                                           │
+  │  manager_note         text NULL                                           │
+  │  attachment_urls      jsonb NULL  (string[])                             │
+  │  current_approver_id  integer NULL FK → users.id                        │
+  │  approved_by_user_id  integer NULL FK → users.id                        │
+  │  approved_at          timestamptz NULL                                   │
+  │  rejected_by_user_id  integer NULL FK → users.id                        │
+  │  rejected_at          timestamptz NULL                                   │
+  │  cancelled_at         timestamptz NULL                                   │
+  │  request_number       text NOT NULL  (LRQ-{YYYY}{MM}-{4-digit})         │
+  │  source_form_id       integer NULL  (future: form-driven leave)          │
+  │  source_submission_id integer NULL  (future: form-driven leave)          │
+  │  created_at           timestamptz NOT NULL DEFAULT now()                 │
+  │  updated_at           timestamptz NOT NULL DEFAULT now()                 │
+  │                                                                           │
+  │  Indexes:                                                                 │
+  │    idx_leave_requests_workspace   (workspace_id)                         │
+  │    idx_leave_requests_employee    (employee_id)                          │
+  │    idx_leave_requests_status      (status)                               │
+  │    idx_leave_requests_dates       (start_date, end_date)                 │
+  │  Unique: uq_leave_request_number  (workspace_id, request_number)         │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ leave_approval_steps ────────────────────────────────────────────────────┐
+  │  id               serial PK                                               │
+  │  leave_request_id integer NOT NULL FK → leave_requests.id                │
+  │  step_order       integer NOT NULL  (Phase 1: always 1)                  │
+  │  approver_user_id integer NOT NULL FK → users.id                         │
+  │  approver_role    text NOT NULL  (manager|hr|admin)                      │
+  │  status           text DEFAULT 'pending'                                  │
+  │                   (pending|approved|rejected|skipped)                    │
+  │  comment          text NULL                                               │
+  │  decided_at       timestamptz NULL                                        │
+  │  notified_at      timestamptz NULL                                        │
+  │  timeout_at       timestamptz NULL  (future SLA enforcement)             │
+  │  created_at       timestamptz NOT NULL DEFAULT now()                     │
+  │                                                                           │
+  │  Indexes:                                                                 │
+  │    idx_leave_approval_steps_request   (leave_request_id)                 │
+  │    idx_leave_approval_steps_approver  (approver_user_id)                 │
+  │    idx_leave_approval_steps_status    (status)                           │
+  │  Unique: uq_leave_approval_step  (leave_request_id, step_order)          │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+  New type exports:
+    export type LeaveRequest       = typeof leaveRequestsTable.$inferSelect;
+    export type LeaveApprovalStep  = typeof leaveApprovalStepsTable.$inferSelect;
+
+  DB migration: pnpm --filter @workspace/db run push → ✅ Applied
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. ROUTE FILE  (artifacts/api-server/src/routes/leave.ts)
+────────────────────────────────────────────────────────────────────────────────
+
+All 6 routes implemented with full business logic:
+
+  POST   /hr/leave-requests              — submit leave request
+  GET    /hr/leave-requests              — list (HR=all, employee=own)
+  GET    /hr/leave-requests/:id          — detail with approval steps
+  PATCH  /hr/leave-requests/:id/approve  — approver approves
+  PATCH  /hr/leave-requests/:id/reject   — approver rejects
+  PATCH  /hr/leave-requests/:id/withdraw — employee self-withdrawal
+
+  Key implementation details:
+  ─────────────────────────────
+  • calcBusinessDays()     — reads hrWorkCalendarsTable (isDefault=true) and
+                             hrCalendarHolidaysTable; falls back to Mon–Fri if
+                             no default calendar is configured for the workspace.
+                             Holidays in range are excluded from the count.
+
+  • generateRequestNumber() — LRQ-{YYYY}{MM}-{4-digit-random}
+                              Uniqueness enforced by DB unique index; collisions
+                              are caught by the DB constraint.
+
+  • findApproverForEmployee() — Priority:
+                                1. Employee.directManagerId → manager's userId
+                                2. Any workspace admin (excluding requester)
+                                Returns null when no approver found.
+
+  • Transaction safety (POST):
+    1. Conflict check — overlapping dates in pending|pending_approval|approved
+    2. Balance read FOR UPDATE — prevents race condition double-booking
+    3. Balance validation — entitled - used - pending ≥ businessDaysCount
+    4. INSERT leave_requests
+    5. UPDATE balance (pending +days or used +days if auto-approved)
+    6. INSERT leave_approval_steps (if requiresApproval=true and approver found)
+    All 6 steps in a single db.transaction() — HTTP response sent AFTER commit.
+
+  • Auto-approval path:
+    When policy.requiresApproval = false (or no policy):
+      → status = "approved", used += days (no pending step)
+      → Emits BOTH leave.requested + leave.approved
+
+  • Approval path:
+    When policy.requiresApproval = true:
+      → status = "pending_approval", pending += days
+      → Creates approval step with step_order = 1
+      → Emits leave.requested only
+
+  • PATCH approve/reject:
+    Finds pending step for the request; checks actor is the designated approver
+    OR has admin/manager role.
+    On approve: pending -= days, used += days; status → approved
+    On reject:  pending -= days; status → rejected
+
+  • PATCH withdraw:
+    Only the requestor can withdraw.
+    Allowed from "pending" or "pending_approval" status.
+    Sets pending approval steps to "skipped".
+    Releases balance: pending -= days.
+
+  Route registered in:
+    artifacts/api-server/src/routes/index.ts
+      import leaveRouter from "./leave";
+      router.use(leaveRouter);  ← inserted after hrRouter
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. EVENT BUS LISTENERS
+────────────────────────────────────────────────────────────────────────────────
+
+  3a. Activity Listeners  (artifacts/api-server/src/lib/events/listeners/activity.ts)
+
+    EVENT_TYPES.LEAVE_REQUESTED  → action="leave_requested"  ticketId=null  userId=employeeUserId
+    EVENT_TYPES.LEAVE_APPROVED   → action="leave_approved"   ticketId=null  userId=approvedByUserId
+    EVENT_TYPES.LEAVE_REJECTED   → action="leave_rejected"   ticketId=null  userId=rejectedByUserId
+    EVENT_TYPES.LEAVE_WITHDRAWN  → action="leave_withdrawn"  ticketId=null  userId=employeeUserId
+
+    Metadata format: "<leaveType> | <startDate> → <endDate> | <days>d"
+    All 4 use dedup.isNew(event.id) guard (in-memory IdempotencyGuard).
+
+  3b. Notification Bus Listeners (artifacts/api-server/src/lib/events/listeners/notifications-bus.ts)
+
+    LEAVE_REQUESTED  → Notify approver (currentApproverId) — type="leave_request"
+                       Skipped for auto-approved path (requiresApproval=false).
+    LEAVE_APPROVED   → Notify employee                     — type="leave_approved"
+    LEAVE_REJECTED   → Notify employee                     — type="leave_rejected"
+    LEAVE_WITHDRAWN  → Notify approver (step 1 approver)  — type="leave_withdrawn"
+                       Skipped if no approval step exists.
+
+    All use dedup.isNew(event.id) guard (own IdempotencyGuard instance).
+    All use correct columns: message (not body), isRead (not read).
+    All call emitToUser(userId, "notification") for real-time SSE push.
+
+  New imports added to notifications-bus.ts:
+    leaveRequestsTable, leaveApprovalStepsTable from "@workspace/db"
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. TYPECHECK RESULT
+────────────────────────────────────────────────────────────────────────────────
+
+  pnpm run typecheck → ✅ PASS (0 errors)
+
+  Issues fixed during implementation:
+    • zod/v4 not available in api-server → replaced with inline parseSubmitLeaveBody()
+      and parseComment() / parseReason() helpers (no runtime dep added).
+    • notificationsTable.body → notificationsTable.message (correct column name).
+    • notificationsTable.read → notificationsTable.isRead (correct column name).
+    • No metadata column in notificationsTable → removed from inserts.
+    • emitToUser(userId, inserted.id) → emitToUser(userId, "notification") (correct sig).
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. SMOKE TEST
+────────────────────────────────────────────────────────────────────────────────
+
+  GET  /api/healthz           → 200 OK   ✅
+  POST /api/hr/leave-requests → 401 Unauthorized (correct — auth required) ✅
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. WHAT IS INTENTIONALLY DEFERRED (Phase 2+)
+────────────────────────────────────────────────────────────────────────────────
+
+  • DELETE /hr/leave-requests/:id/cancel — HR/admin cancels an approved leave
+  • POST /hr/leave-balances/adjust       — HR manual balance adjustment
+  • Bulk balance initialisation for new employees
+  • Multi-step approval chain (stepOrder > 1)
+  • Attendance record auto-creation on approval
+  • Calendar event auto-creation on approval
+  • Payroll deduction hooks on approval
+  • Form-driven leave submission (sourceFormId / sourceSubmissionId)
+  • SLA / timeout enforcement on approval steps (timeoutAt field is reserved)
+  • OpenAPI spec + codegen (Orval) for leave endpoints
+  • Frontend UI pages for leave requests
+
+  Legacy routes preserved (backward compatibility):
+    POST  /hr/me/leave-requests        (hr.ts → hrEmployeeLeavesTable)
+    POST  /hr/employees/:id/leaves     (hr.ts → hrEmployeeLeavesTable)
+    PATCH /hr/attendance/leaves/:id    (hr.ts → hrEmployeeLeavesTable)
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. FILES CHANGED
+────────────────────────────────────────────────────────────────────────────────
+
+  MODIFIED:
+    lib/db/src/schema/hr.ts
+      — Added leaveRequestsTable, leaveApprovalStepsTable
+      — Added LeaveRequest, LeaveApprovalStep type exports
+
+    artifacts/api-server/src/routes/index.ts
+      — import leaveRouter from "./leave"
+      — router.use(leaveRouter)
+
+    artifacts/api-server/src/lib/events/listeners/activity.ts
+      — 4 new leave event listeners (LEAVE_REQUESTED, APPROVED, REJECTED, WITHDRAWN)
+      — Updated migration status table
+
+    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+      — 4 new leave notification listeners
+      — Added imports: leaveRequestsTable, leaveApprovalStepsTable
+      — Updated migration status table
+
+  CREATED:
+    artifacts/api-server/src/routes/leave.ts
+      — 6 routes: POST, GET×2, PATCH×3
+      — ~1000 lines (heavily documented)
+
+  DB MIGRATION:
+    leave_requests          table created
+    leave_approval_steps    table created
+    All indexes and constraints applied
+
+════════════════════════════════════════════════════════════════════════════════

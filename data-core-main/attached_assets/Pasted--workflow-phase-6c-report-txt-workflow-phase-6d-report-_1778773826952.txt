@@ -1,0 +1,267 @@
+راجع:
+- workflow-phase-6c-report.txt
+- workflow-phase-6d-report.txt
+- workflow-phase-6e-report.txt
+- workflow-platform-hardening-review.txt
+خصوصًا:
+- no historical metrics
+- tenant health snapshots
+- governance alerts lifecycle
+- operational trend gaps
+- metrics aggregation model
+
+ثم نفّذ فقط:
+P7-A — Historical Governance Snapshot Foundations
+
+ولا تنفّذ:
+- realtime streaming
+- external analytics warehouses
+- Prometheus integrations
+- ML forecasting
+- anomaly prediction engines
+- distributed time-series clusters
+
+عنوان المهمة:
+WORKFLOW PHASE 7-A — Historical Governance Snapshots & Trend Infrastructure
+
+المهمة الحالية:
+تحويل:
+point-in-time governance visibility
+
+إلى:
+historical operational intelligence
+
+الهدف:
+تمكين:
+- trend analysis
+- operational history
+- health evolution tracking
+- alert frequency visibility
+- future dashboards & reporting
+
+بطريقة:
+deterministic append-only governance history
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT GOVERNANCE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- evaluateTenantHealth()
+- OperationalMetricsSnapshot
+- GovernanceAlert
+- governance dashboard polling
+- current observability events
+
+حدّد:
+- ما الذي يُفقد بين polling cycles
+- أين لا يوجد historical continuity
+- أين current-state فقط غير كافٍ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN SNAPSHOT STORAGE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+governance_snapshots table
+
+كمخزن:
+append-only.
+
+المطلوب:
+- workspaceId
+- capturedAt
+- severity
+- metricsSnapshot
+- indicators
+- alertSummary
+- stuckCounts
+- stormSeverity
+
+مع:
+immutable snapshot semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — SNAPSHOT CAPTURE PIPELINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+captureGovernanceSnapshot()
+
+بحيث:
+- ينادي evaluateTenantHealth()
+- يحفظ snapshot جديدة
+- لا يعدّل snapshots القديمة
+- deterministic snapshot structure
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RETENTION & STORAGE GOVERNANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+retention rules بسيطة.
+
+المطلوب:
+- snapshot interval recommendation
+- retention duration recommendation
+- pruning strategy مستقبلية
+
+لكن:
+لا تنفّذ distributed archival systems.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — TREND QUERY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+query layer
+لاستخراج:
+- severity history
+- error-rate trend
+- approval backlog trend
+- delay backlog trend
+- stuck-count trend
+
+مع:
+time-range semantics:
+1h / 24h / 7d / 30d
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — ALERT FREQUENCY INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+aggregation model
+يعرف:
+- repeated GOV-* alerts
+- chronic warning patterns
+- recurring storms
+- persistent degradation
+
+بدون:
+ML أو AI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DASHBOARD READINESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+historical data model
+جاهز لـ:
+- sparklines
+- trend charts
+- severity timelines
+- historical drill-down
+
+حتى لو UI غير موجود حاليًا.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+governance_snapshot_captured
+
+B)
+governance_snapshot_capture_failed
+
+C)
+governance_trend_query_requested
+
+D)
+governance_chronic_alert_detected
+
+كلها تحتوي:
+- workspaceId
+- snapshotSeverity
+- trendRange
+- alertCodes
+- capturedAt
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Historical infrastructure MUST:
+- remain append-only
+- never mutate old snapshots
+- never rewrite operational history
+- never affect runtime execution
+
+أي:
+observability-only persistence.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+snapshot stored immutably
+
+T2:
+multiple snapshots preserve chronological order
+
+T3:
+trend queries return deterministic ranges
+
+T4:
+severity history extracted correctly
+
+T5:
+alert frequency aggregation works
+
+T6:
+snapshot capture does not mutate runtime state
+
+T7:
+historical queries exclude future timestamps
+
+T8:
+retention recommendations computed correctly
+
+T9:
+snapshot serialization stable
+
+T10:
+trend calculations deterministic
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- distributed analytics infra
+- realtime streaming
+- ML forecasting
+- anomaly prediction
+- warehouse ETL systems
+- dashboard charting libraries
+
+خلك:
+minimal historical governance infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-7a-report.txt
+
+ويحتوي:
+- snapshot storage architecture
+- append-only guarantees
+- trend query model
+- alert frequency intelligence
+- retention recommendations
+- observability additions
+- tests results
+- remaining historical analytics gaps
+- readiness assessment قبل advanced operational analytics

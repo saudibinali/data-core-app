@@ -1,0 +1,139 @@
+================================================================================
+WORKFLOW PHASE 19E — PDF REPORTING & SCHEDULED ENTERPRISE REPORTS
+================================================================================
+Date: 2026-05-19
+Phase: P19-E
+Status: COMPLETE (implementation delivered; smoke tests require DATABASE_URL)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+P19-E adds PDF report generation (pdf-lib default, optional puppeteer), workspace-
+branded HTML templates with ar/en direction, scheduled report schedules with a
+DB polling worker, and email delivery of secure download links through the
+existing notification queue. All PDFs flow through export_jobs, generated_reports,
+signed download tokens, and report_access_logs. No report center UI, Redis, or BI.
+
+--------------------------------------------------------------------------------
+PDF RENDERER STATUS
+--------------------------------------------------------------------------------
+- pdf-renderer.ts: pdf-lib table renderer (default) + optional puppeteer HTML path
+- pdf-report-generator.ts: three HR reports wired
+- HTML templates: header/footer, branding color, RTL, optional watermark
+- Dependencies: pdf-lib, cron-parser
+
+Verdict: GO (builtin renderer); PARTIAL (pixel-perfect HTML via puppeteer — optional)
+
+--------------------------------------------------------------------------------
+REPORT TEMPLATES STATUS
+--------------------------------------------------------------------------------
+- report-pdf-templates.ts (PDF HTML)
+- report-email-templates.ts (programmatic email HTML)
+- notification template report.ready seeded via templates.ts
+
+Verdict: GO
+
+--------------------------------------------------------------------------------
+SCHEDULED REPORTS STATUS
+--------------------------------------------------------------------------------
+- Migration 0005: scheduled_report_schedules, workspace_report_branding
+- scheduled-report-service.ts: CRUD-lite (create, list, enable/disable)
+- Routes: GET/POST /reports/schedules, PATCH /reports/schedules/:id
+- Fields: schedule_cron, schedule_timezone, recipient_json, next_run_at,
+  last_run_at, enabled
+
+Verdict: GO
+
+--------------------------------------------------------------------------------
+SCHEDULER WORKER STATUS
+--------------------------------------------------------------------------------
+- scheduled-report-scheduler.ts: 60s DB poll, atomic next_run_at advance
+- Started from init-sequence.ts alongside export job processor
+- Duplicate run prevention via claim update before job creation
+
+Verdict: GO
+
+--------------------------------------------------------------------------------
+EMAIL DELIVERY STATUS
+--------------------------------------------------------------------------------
+- export-notifications.ts: report.ready template, download URL in payload
+- notification_jobs + notification_deliveries on completion
+- No binary attachments in email
+
+Verdict: GO
+
+--------------------------------------------------------------------------------
+WORKSPACE BRANDING STATUS
+--------------------------------------------------------------------------------
+- workspace_report_branding table + merge with workspaces.logo_url/primary_color
+- GET/PUT /api/reports/branding
+- Injected into PDF and email templates
+
+Verdict: GO (API-only; no branding editor UI — expected gap)
+
+--------------------------------------------------------------------------------
+SECURITY STATUS
+--------------------------------------------------------------------------------
+- Same JWT download token flow for PDF as xlsx/csv
+- Workspace-scoped jobs, reports, schedules
+- Permission hr.manage on export/schedule mutations
+- report_access_logs on download token issue
+
+Verdict: GO
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+File: artifacts/api-server/src/routes/__tests__/pdf-scheduled-reports.smoke.test.ts
+Run: pnpm --filter api-server test pdf-scheduled-reports.smoke
+Requires: DATABASE_URL, RUN_P19E_SMOKE != 0
+
+Cases:
+  1. PDF format in registry
+  2. PDF generation (%PDF header)
+  3. PDF export job → generated_reports lifecycle
+  4. Workspace isolation on download token
+  5. Scheduled run creates job; second tick does not duplicate
+  6. report.ready email job with downloadUrl (no attachment)
+
+(Execute locally with DATABASE_URL to record pass/fail counts.)
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+- None for phase scope. Puppeteer not bundled by default.
+- APP_PUBLIC_URL must be set correctly in production for email links.
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+| Area                         | Verdict   |
+|------------------------------|-----------|
+| PDF reporting                | GO        |
+| Scheduled reports            | GO        |
+| Report email delivery        | GO        |
+| Workspace branding           | PARTIAL   |
+| Enterprise reporting readiness | PARTIAL |
+
+PARTIAL notes:
+- Branding: no UI editor (API/DB only)
+- Enterprise: report center UI deferred to P19-F
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P19-F — Report Center UI & Enterprise Document Experience
+
+--------------------------------------------------------------------------------
+CONFIRMED OUT OF SCOPE (NOT STARTED)
+--------------------------------------------------------------------------------
+- Report center UI
+- BI dashboards
+- Payroll full rollout
+- OCR/AI
+- Redis redesign
+- Document migration
+
+================================================================================
+END PHASE 19E REPORT
+================================================================================

@@ -1,0 +1,10 @@
+P-SCM-ENA WORKFLOW PHASE REPORT
+===============================
+Date: 2026-05-20
+Status: COMPLETE
+
+DELIVERABLES: procurement + inventory activation services,
+GET/POST /scm/workspace/activation|activate, procurement dashboard UI,
+go-live scm phase, docs, smoke tests.
+
+EXIT: SCM enabled only after go-live + finance prepare batch.

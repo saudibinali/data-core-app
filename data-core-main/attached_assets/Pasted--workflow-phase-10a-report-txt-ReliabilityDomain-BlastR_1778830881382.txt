@@ -1,0 +1,282 @@
+راجع:
+- workflow-phase-10a-report.txt
+خصوصًا:
+- ReliabilityDomain
+- BlastRadius
+- advisoryStormDetected
+- degradationStatus
+- propagationRisk
+- containment boundaries
+- structured reliability events
+
+ثم نفّذ فقط:
+P10-B — Reliability History, Incident Timelines & Operational SLO Foundations
+
+ولا تنفّذ:
+- automated recovery
+- incident auto-remediation
+- distributed persistence clusters
+- predictive AI reliability
+- autoscaling recovery systems
+- self-healing infrastructure
+
+عنوان المهمة:
+WORKFLOW PHASE 10-B — Reliability History, Incident Timelines & Operational SLO Foundations
+
+المهمة الحالية:
+تحويل:
+point-in-time reliability intelligence
+
+إلى:
+historical reliability governance infrastructure
+
+الهدف:
+تمكين:
+- reliability history persistence
+- incident timeline reconstruction
+- operational degradation tracking
+- SLO readiness
+- recovery-analysis foundations
+
+بطريقة:
+deterministic reliability-history architecture
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT RELIABILITY GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+قسم:
+"Remaining Resilience Gaps"
+
+خصوصًا:
+- no reliability history
+- no containment boundary history
+- no SLO definitions
+- no recovery tracking
+
+حدّد:
+- أين الزمن غير محفوظ
+- أين degradation transitions تضيع
+- أين historical reliability visibility ناقصة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN RELIABILITY HISTORY MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ReliabilityDomainSnapshot
+
+ليحتوي:
+- snapshotId
+- workspaceId
+- domainId
+- degradationStatus
+- propagationRisk
+- containmentLevel
+- observabilityHealth
+- blastRadiusScore
+- advisoryStormDetected
+- capturedAt
+
+مع:
+append-only deterministic persistence semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — INCIDENT TIMELINE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+IncidentTimeline
+
+ليحتوي:
+- incidentId
+- workspaceId
+- startedAt
+- lastObservedAt
+- highestSeverity
+- propagationHistory
+- containmentTransitions
+- advisoryStormMoments
+- recoveryMoments
+- incidentStatus
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — RELIABILITY TRANSITION ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+trackReliabilityTransition()
+
+بحيث:
+- يكتشف degradation changes
+- يتتبع containment boundary transitions
+- يسجل propagation escalation
+- يكتشف recovery moments
+- يمنع duplicate transition spam
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — OPERATIONAL SLO FOUNDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+OperationalReliabilitySLO
+
+يحتوي:
+- sloId
+- metricName
+- targetThreshold
+- evaluationWindow
+- breachCondition
+- currentStatus
+
+أمثلة:
+- healthy workspace ratio
+- critical workspace count
+- advisory storm frequency
+- cascading-risk duration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — RELIABILITY HISTORY QUERIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم APIs مثل:
+
+GET /platform/reliability/history
+GET /platform/reliability/incidents
+GET /platform/reliability/slo-status
+
+بحيث:
+- super-admin only
+- deterministic pagination
+- stable ordering
+- audit-safe serialization
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+historical reliability intelligence
+
+داخل:
+- governance dashboards
+- incident consoles
+- reliability operations center
+- scheduler oversight history
+
+لكن:
+بدون automated remediation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+reliability_snapshot_persisted
+
+B)
+reliability_transition_detected
+
+C)
+incident_timeline_updated
+
+D)
+operational_slo_breach_detected
+
+كلها تحتوي:
+- workspaceId
+- incidentId
+- degradationStatus
+- propagationRisk
+- sloId
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Reliability history layer MUST:
+- remain append-only
+- never mutate runtime state
+- never auto-remediate
+- preserve audit history
+- fail closed on ambiguity
+
+أي:
+historical reliability governance فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+snapshot persistence deterministic
+
+T2:
+incident timelines reconstructed correctly
+
+T3:
+transition detection stable
+
+T4:
+duplicate transition spam prevented
+
+T5:
+recovery moments tracked correctly
+
+T6:
+SLO breach classification deterministic
+
+T7:
+serialization ordering stable
+
+T8:
+append-only guarantees preserved
+
+T9:
+super-admin enforcement valid
+
+T10:
+history layer remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- self-healing remediation
+- automatic recovery execution
+- AI incident prediction
+- distributed recovery systems
+- autoscaling repair logic
+- autonomous orchestration
+
+خلك:
+minimal deterministic reliability-history layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-10b-report.txt
+
+ويحتوي:
+- reliability history architecture
+- incident timeline semantics
+- transition tracking model
+- operational SLO model
+- persistence guarantees
+- observability additions
+- governance integration points
+- tests results
+- remaining resilience gaps
+- readiness assessment قبل recovery recommendation phase

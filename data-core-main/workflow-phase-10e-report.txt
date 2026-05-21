@@ -1,0 +1,704 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 10-E REPORT
+Controlled Remediation Execution Research & Explicit Operator Confirmation
+Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date         : 2026-05-15
+Phase        : P10-E
+Status       : COMPLETE
+Tests        : 1994 passed / 1994 total (35 files)
+New tests    : 63 (T1–T10)
+Typecheck    : CLEAN (zero errors)
+DB migration : remediation_execution_attempts table created
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OBJECTIVE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Convert audit-only orchestration lifecycle (P10-D) into explicit
+operator-confirmed remediation execution research infrastructure.
+
+Blocking gaps closed from P10-D "Remaining Resilience Gaps":
+  ✓  No execution step tracking        → remediation_execution_attempts table
+  ✓  No remediation confirmation layer → confirmRemediationExecution() engine
+  ✓  No orchestration execution semantics → 6-state execution lifecycle
+  ✓  No remediation attempt history    → append-only execution audit log
+  ✓  No execution type vocabulary      → 8 typed execution domains
+  ✓  No rollback-result recording      → independent rollbackStatus field
+
+Zero autonomous execution added. Every step requires a named human operator.
+confirmationMode = "explicit" is an immutable invariant — not a runtime flag.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. REMEDIATION EXECUTION ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1  Layer Design
+
+  P10-E adds a confirmation-gated execution tracking layer that sits above
+  P10-D's orchestration audit records:
+
+  Layer E — Pure Execution Engine (read-only, sync, no DB)
+    artifacts/api-server/src/lib/workflows/remediation-execution.ts
+
+    Core functions:
+      buildExecutionAttempt(input)           → RemediationExecutionAttempt
+      confirmRemediationExecution(a, by)     → ConfirmationValidation
+      validateExecutionTransition(c, n)      → ExecutionTransitionValidation
+      detectDuplicateExecution(id, existing) → { isDuplicate, conflictingId? }
+
+    Status guards:
+      canConfirm / canMarkExecuting / canComplete / canRollBack / canAbandon
+
+    Constants:
+      EXECUTION_VALID_TRANSITIONS   — full state machine table
+      TERMINAL_EXECUTION_STATUSES   — {completed, rolled_back, abandoned}
+      ACTIVE_EXECUTION_STATUSES     — {pending_confirmation, confirmed, executing}
+      ALL_EXECUTION_TYPES           — 8 typed execution domains
+      ALL_ROLLBACK_STATUSES         — 4 rollback outcome states
+      EXECUTION_ORCHESTRATION_MAP   — execution type → orchestration type mapping
+
+  DB Layer — Execution Audit Log
+    lib/db/src/schema/remediation-executions.ts
+    Table: remediation_execution_attempts
+    Semantics: append-only (records never deleted; status columns updated in place)
+
+2.2  Full Intelligence Chain (P10-A → P10-E)
+
+  P10-A: Live reliability domain evaluation (per-capture snapshot)
+  P10-B: Append-only snapshot persistence + incident lifecycle tracking
+  P10-C: Operator advisory recommendations + trend analysis
+  P10-D: Human-in-the-loop orchestration actions + remediation lifecycle
+  P10-E: Explicit-confirmation execution attempt tracking + rollback recording
+
+  Full traceability chain:
+    Incident (P10-B)
+      → Advisory Recommendation (P10-C)
+        → Orchestration Action (P10-D)
+          → Execution Attempt (P10-E)
+
+  Links:
+    RemediationExecutionAttempt.actionId        → RecoveryOrchestrationAction.actionId
+    EXECUTION_ORCHESTRATION_MAP[executionType]  → orchestrationType
+
+2.3  Data Flow
+
+  POST /platform/reliability/executions:
+    1. Validate input via buildExecutionAttempt() (pure engine, throws on error)
+    2. Query for active duplicates (same actionId + active status)
+    3. If duplicate → 409 EXEC_DUPLICATE with conflictingExecutionId
+    4. Insert to remediation_execution_attempts (status=pending_confirmation)
+    5. Return 201 { execution: ExecutionDto }
+
+  POST /platform/reliability/executions/:id/confirm:
+    1. Fetch execution by executionId
+    2. Validate confirmation preconditions via confirmRemediationExecution()
+       (checks: pending_confirmation status, explicit mode, non-empty confirmedBy)
+    3. Validate transition pending_confirmation → confirmed
+    4. Update: executionStatus, confirmedBy, confirmedAt, append executionNotes
+    5. Emit remediation_execution_confirmed event
+    6. Return { execution: ExecutionDto }
+
+  POST /platform/reliability/executions/:id/complete:
+    1. Fetch execution by executionId
+    2. Auto-advance confirmed → executing if currently confirmed (two-step pure check)
+    3. Validate transition executing → completed
+    4. Merge executionEvidence arrays (existing + new)
+    5. Update: executionStatus, executedAt, rollbackStatus, evidence, notes, completedAt
+    6. Emit remediation_execution_completed event
+    7. Return { execution: ExecutionDto }
+
+  POST /platform/reliability/executions/:id/rollback:
+    1. Fetch execution by executionId
+    2. canExecRollBack(status) guard — must be "executing"
+    3. Validate transition executing → rolled_back
+    4. Update: executionStatus, rollbackStatus, rolledBackAt, append notes
+    5. Emit remediation_execution_rolled_back event
+    6. Return { execution: ExecutionDto }
+
+  GET /platform/reliability/executions:
+    1. Apply filters: actionId?, workspaceId?, executionType?,
+                      executionStatus?, activeOnly?
+    2. Order: createdAt DESC
+    3. Paginate: limit (1–100, default 50), offset (default 0)
+    4. Return { executions[], total, limit, offset }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONFIRMATION SEMANTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1  confirmationMode = "explicit" — Immutable Invariant
+
+  Every execution attempt is created with confirmationMode = "explicit".
+  This is not a configurable field. It is an immutable design invariant enforced
+  by the pure engine. No other value is accepted.
+
+  Purpose: the field exists to document that execution tracking in this system
+  requires a named human operator's explicit confirmation. Any future extension
+  that introduces different confirmation modes (e.g., "two_party") requires a
+  schema migration and a deliberate design decision — not a runtime flag change.
+
+  Invariant enforced at:
+    buildExecutionAttempt()        — always sets confirmationMode = "explicit"
+    confirmRemediationExecution()  — rejects if confirmationMode ≠ "explicit"
+    DB schema                      — default "explicit", no constraint allows other values
+
+3.2  Two-Stage Confirmation Gate
+
+  Stage 1 — precondition check (confirmRemediationExecution):
+    a. confirmationMode must be "explicit"
+    b. executionStatus must be "pending_confirmation"
+    c. confirmedBy must be non-empty (operator attribution is mandatory)
+    Any failure → { valid: false, errorCode: "EXEC_CONFIRMATION_*" }
+
+  Stage 2 — lifecycle transition check (validateExecutionTransition):
+    pending_confirmation → confirmed must appear in EXECUTION_VALID_TRANSITIONS
+    Redundant by design — ensures the state machine table is the single source
+    of truth even if the precondition check is bypassed.
+
+  Both checks are run before any DB write. DB is only written on success.
+
+3.3  What "Confirmation" Means
+
+  Confirmation does NOT mean the operator has started executing anything.
+  Confirmation means: "I, the named operator, have reviewed this execution
+  attempt and explicitly intend to proceed."
+
+  Execution progression (executing status) is a separate lifecycle transition
+  that can only occur after confirmation. This two-step design ensures there is
+  always an audit record of:
+    - who decided to attempt the remediation (initiatedBy + creation)
+    - who approved proceeding (confirmedBy + confirmedAt)
+    - when active execution began (executedAt)
+    - what outcome was recorded (completedAt or rolledBackAt)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. EXECUTION LIFECYCLE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  RemediationExecutionAttempt Fields
+
+  executionId        — "exec:<workspaceId>-<ms>-<seq>" (unique, stable)
+  actionId           — soft-ref to recovery_orchestration_actions.action_id
+  workspaceId        — target workspace (FK cascade-delete)
+  executionType      — one of 8 execution types (see 4.2)
+  confirmationMode   — always "explicit" (immutable invariant)
+  initiatedBy        — operator who created the attempt (required)
+  confirmedBy        — operator who confirmed (null until confirmed)
+  confirmedAt        — ISO 8601 timestamp of confirmation (null until confirmed)
+  executedAt         — ISO 8601 timestamp of executing entry (null until then)
+  executionStatus    — current lifecycle state (one of 6 states)
+  rollbackStatus     — independent rollback outcome (one of 4 states)
+  executionEvidence  — operator evidence codes/refs (JSON string array, cumulative)
+  executionNotes     — operator notes (appended across transitions, never replaced)
+  completedAt        — ISO 8601 timestamp of completion (null until completed)
+  rolledBackAt       — ISO 8601 timestamp of rollback (null until rolled_back)
+  abandonedAt        — ISO 8601 timestamp of abandonment (null until abandoned)
+
+4.2  Eight Execution Types
+
+  scheduler_configuration_review       — review and adjust scheduler config params
+  fairness_weight_adjustment           — adjust fairness policy weight distribution
+  containment_boundary_reconfiguration — reconfigure containment thresholds/limits
+  advisory_threshold_tuning            — tune advisory pressure threshold values
+  workload_pressure_investigation      — investigate workload patterns causing pressure
+  recovery_validation_execution        — structured validation of recovery stability
+  escalation_stabilization             — apply steps to reduce escalation frequency
+  operational_intervention             — direct operational intervention on workspace
+
+4.3  Execution Type → Orchestration Type Mapping (EXECUTION_ORCHESTRATION_MAP)
+
+  scheduler_configuration_review        → scheduler_pressure_review
+  fairness_weight_adjustment            → fairness_policy_review
+  containment_boundary_reconfiguration  → containment_audit
+  advisory_threshold_tuning             → advisory_threshold_review
+  workload_pressure_investigation       → scheduler_pressure_review
+  recovery_validation_execution         → recovery_stability_validation
+  escalation_stabilization             → escalation_monitoring
+  operational_intervention             → operational_watch
+
+  One execution type can map to one orchestration type.
+  Multiple execution types may share an orchestration type (many-to-one is allowed).
+  Traceability chain: advisory → orchestration → execution (via these maps).
+
+4.4  Four Rollback Statuses (independent of executionStatus)
+
+  not_applicable — execution was not rolled back (default; used for completed execs)
+  pending        — rollback initiated, outcome not yet recorded
+  completed      — rollback completed successfully
+  failed         — rollback attempt failed; manual recovery is required
+
+  rollbackStatus is a separate concern from executionStatus.
+  An execution with executionStatus="rolled_back" may have rollbackStatus="failed",
+  indicating that the reversal was attempted but did not succeed — the operator
+  must follow up manually. This separation prevents conflating execution outcome
+  with rollback outcome.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. ROLLBACK-RESULT GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Rollback Eligibility
+
+  Rollback is only available from the "executing" status.
+  canRollBack(status): true only when status = "executing".
+  Once in a terminal state (completed / rolled_back / abandoned) no rollback
+  attempt is accepted — the state machine rejects it with EXEC_TERMINAL.
+
+5.2  rollbackStatus as Outcome Record
+
+  When an operator invokes POST /:id/rollback, they must supply:
+    rolledBackBy    — named operator
+    rollbackStatus  — one of: pending | completed | failed
+    notes?          — optional
+
+  The supplied rollbackStatus is stored permanently. This allows the operator to
+  record whether the reversal itself succeeded ("completed") or failed ("failed").
+
+  For in-progress reversals where outcome isn't yet known, "pending" is used,
+  and a subsequent operation (future phase) may update it — or the notes field
+  is used to document what happened.
+
+5.3  No Cascading Rollbacks
+
+  Rolling back an execution attempt:
+    - Does NOT undo any DB schema changes (the engine never makes any)
+    - Does NOT modify the parent orchestration action's status
+    - Does NOT remove evidence or notes from the execution record
+    - Does NOT revert any scheduler or fairness policy state changes
+      (the engine never makes scheduler mutations — this phase is research only)
+
+  Rollback is an AUDIT RECORD only.
+
+5.4  Abandonment vs. Rollback
+
+  abandoned:   Operator gives up without completing execution or performing rollback.
+               No implication that any action was taken. Used for pre-completion exit.
+
+  rolled_back: Operator explicitly reversed steps taken during execution.
+               Implies execution steps were performed and then reversed.
+               rollbackStatus documents whether the reversal succeeded.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. EXECUTION LIFECYCLE STATE MACHINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+States and transitions:
+
+  pending_confirmation ──→ confirmed ──→ executing ──→ completed    (terminal)
+         │                    │               │
+         └──→ abandoned       └──→ abandoned  └──→ rolled_back      (terminal)
+                                              └──→ abandoned         (terminal)
+
+  EXECUTION_VALID_TRANSITIONS table (enforced deterministically):
+    pending_confirmation: [confirmed, abandoned]
+    confirmed:            [executing, abandoned]
+    executing:            [completed, rolled_back, abandoned]
+    completed:            []   terminal
+    rolled_back:          []   terminal
+    abandoned:            []   terminal
+
+  Error codes from validateExecutionTransition():
+    EXEC_TERMINAL          — current status is terminal; no transitions allowed
+    EXEC_INVALID_NEXT      — next status is not a known status string
+    EXEC_TRANSITION_DENIED — transition not in EXECUTION_VALID_TRANSITIONS
+
+  Error codes from confirmRemediationExecution():
+    EXEC_CONFIRMATION_MODE_INVALID  — confirmationMode is not "explicit"
+    EXEC_CONFIRMATION_WRONG_STATUS  — not in pending_confirmation
+    EXEC_CONFIRMATION_NO_OPERATOR   — confirmedBy is empty or whitespace
+
+  Error codes from buildExecutionAttempt() (throws with .code):
+    EXEC_VALIDATION_INITIATED_BY    — initiatedBy is empty or whitespace
+    EXEC_VALIDATION_ACTION_ID       — actionId is empty
+    EXEC_VALIDATION_WORKSPACE_ID    — workspaceId is ≤ 0 or non-integer
+    EXEC_VALIDATION_TYPE            — executionType is not in ALL_EXECUTION_TYPES
+
+  HTTP error codes:
+    EXEC_DUPLICATE      — 409, active execution already exists for actionId
+    EXEC_NOT_FOUND      — 404, executionId not in DB
+    EXEC_ROLLBACK_DENIED — 409, not in "executing" status
+    EXEC_VALIDATION     — 400, pure engine input validation failure
+
+  Convenience: complete from confirmed (skips executing):
+    POST /:id/complete auto-advances confirmed → executing before completing.
+    Validated as two sequential pure-engine checks before DB write.
+    Audit record shows executedAt = now (set to current time if not yet set).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. GOVERNANCE INTEGRATION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P10-D Orchestration Actions:
+  executionAttempt.actionId → orchestrationAction.actionId
+  Allows querying "all execution attempts for orchestration action X" via
+  GET /platform/reliability/executions?actionId=X.
+
+P10-C Advisory Recommendations:
+  Three-hop traceability:
+    recommendationId → orchestrationAction.recommendationId
+                    → executionAttempt.actionId
+  Frontend can surface: "This execution tracks the advisory REC-123 for incident INC-456."
+
+P10-B Incident Timelines:
+  incidentId flows through the orchestration action → execution chain.
+  Per-incident execution history requires two queries:
+    1. GET /orchestrations?incidentId=X → actionIds
+    2. GET /executions?actionId=<each actionId>
+  (Dedicated route is a remaining gap — see section 10.)
+
+P9-E Fairness Policies:
+  fairness_weight_adjustment type documents that an operator reviewed and adjusted
+  fairness policy weights. The adjustment details go in executionEvidence.
+  Engine records the attempt — it never mutates policies directly.
+
+Super Admin Panel integration surfaces:
+  POST /platform/reliability/executions              → "Track New Execution"
+  POST /:id/confirm                                  → "Confirm" button
+  POST /:id/complete                                 → "Mark Complete" button
+  POST /:id/rollback                                 → "Record Rollback" button
+  GET  /platform/reliability/executions?activeOnly=true → Active Executions Queue
+  GET  /platform/reliability/executions?actionId=X  → Execution History for Action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. OBSERVABILITY ADDITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Four structured events emitted by the execution layer:
+
+A) remediation_execution_created
+   Fired: inside buildExecutionAttempt() — pure engine, on value object creation.
+   Fields: executionId, actionId, workspaceId, executionType,
+           executionStatus="pending_confirmation", confirmedBy="", action
+
+B) remediation_execution_confirmed
+   Fired: inside POST /:id/confirm route, after successful DB update.
+   Fields: executionId, actionId, workspaceId, executionType,
+           executionStatus="confirmed", confirmedBy, action
+
+C) remediation_execution_completed
+   Fired: inside POST /:id/complete route, after successful DB update.
+   Fields: executionId, actionId, workspaceId, executionType,
+           executionStatus="completed", confirmedBy, action
+
+D) remediation_execution_rolled_back
+   Fired: inside POST /:id/rollback route, after successful DB update.
+   Fields: executionId, actionId, workspaceId, executionType,
+           executionStatus="rolled_back", confirmedBy, action
+
+All events: logger.info() with structured JSON — no console.log.
+Event A fires from pure engine (creation is always logged, regardless of DB success).
+Events B/C/D fire from route handlers after DB persistence
+(ensuring events only fire on committed transitions).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. GOVERNANCE API LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All routes:
+  - Require Authorization: Bearer <jwt> with role = super_admin
+  - Protected by requireAuth + requireSuperAdmin middleware chain
+  - Deterministic: same inputs → same validation → same DB mutation
+  - Append-only: no DELETE endpoint; records are permanent
+  - Audit-safe: all DTO fields are JSON-safe ISO strings
+
+POST /platform/reliability/executions
+  Auth:    super_admin
+  Body:    { actionId, workspaceId, executionType, initiatedBy,
+             executionEvidence?, executionNotes? }
+  Guards:  input validation (400 on failure),
+           duplicate check (409 EXEC_DUPLICATE if active execution for actionId)
+  Returns: 201 { execution: ExecutionDto }
+
+POST /platform/reliability/executions/:id/confirm
+  Auth:    super_admin
+  Body:    { confirmedBy, notes? }
+  Guards:  status must be "pending_confirmation",
+           confirmationMode must be "explicit",
+           confirmedBy must be non-empty
+  Returns: 200 { execution: ExecutionDto }
+
+POST /platform/reliability/executions/:id/complete
+  Auth:    super_admin
+  Body:    { completedBy, rollbackStatus?, notes?, executionEvidence? }
+  Guards:  status must be "confirmed" or "executing"
+           (confirmed auto-advances to executing before completing)
+  Returns: 200 { execution: ExecutionDto }
+
+POST /platform/reliability/executions/:id/rollback
+  Auth:    super_admin
+  Body:    { rolledBackBy, rollbackStatus, notes? }
+  Guards:  status must be "executing" (409 EXEC_ROLLBACK_DENIED otherwise)
+  Returns: 200 { execution: ExecutionDto }
+
+GET /platform/reliability/executions
+  Auth:    super_admin
+  Params:  actionId?, workspaceId?, executionType?, executionStatus?,
+           activeOnly? (filters to pending_confirmation|confirmed|executing),
+           limit (1–100, default 50), offset (default 0)
+  Returns: { executions: ExecutionDto[], total: number, limit, offset }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. DB SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Table: remediation_execution_attempts
+
+  id                  serial PRIMARY KEY
+  execution_id        text UNIQUE NOT NULL
+  action_id           text NOT NULL (soft ref → recovery_orchestration_actions.action_id)
+  workspace_id        integer NOT NULL FK → workspaces.id ON DELETE CASCADE
+  execution_type      text NOT NULL
+  confirmation_mode   text NOT NULL DEFAULT 'explicit'
+  initiated_by        text NOT NULL
+  confirmed_by        text
+  confirmed_at        timestamptz
+  executed_at         timestamptz
+  execution_status    text NOT NULL DEFAULT 'pending_confirmation'
+  rollback_status     text NOT NULL DEFAULT 'not_applicable'
+  execution_evidence  json NOT NULL DEFAULT '[]'
+  execution_notes     text
+  completed_at        timestamptz
+  rolled_back_at      timestamptz
+  abandoned_at        timestamptz
+  created_at          timestamptz NOT NULL DEFAULT now()
+  updated_at          timestamptz NOT NULL DEFAULT now()
+
+  Indexes:
+    remediation_exec_action_status_idx  (action_id, execution_status)
+    remediation_exec_workspace_idx      (workspace_id, execution_status)
+    remediation_exec_type_idx           (execution_type, execution_status)
+    remediation_exec_created_idx        (created_at)
+
+  FK: workspace_id → workspaces.id with CASCADE DELETE
+      (orphaned execution records cleaned up when workspace is removed)
+
+  Note on action_id:
+    action_id is a text soft-reference only (no FK constraint).
+    This allows execution records to outlive the orchestration action record
+    for forensic analysis. Hard FK would cascade-delete execution history
+    when an orchestration action is deleted — which violates append-only audit
+    semantics. The application layer enforces referential integrity via
+    the duplicate-check query before insert.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/api-server/src/lib/workflows/__tests__/remediation-execution.test.ts
+
+T1  (8 assertions)  execution creation deterministic
+    ✓ buildExecutionAttempt creates attempt with status=pending_confirmation
+    ✓ confirmationMode is always 'explicit'
+    ✓ executionId starts with 'exec:'
+    ✓ executionId contains workspaceId
+    ✓ rollbackStatus defaults to 'not_applicable'
+    ✓ confirmedBy and confirmedAt are null initially
+    ✓ executedAt is null initially
+    ✓ makeExecutionId is monotonically unique per call
+
+T2  (7 assertions)  confirmation required before execution
+    ✓ confirmRemediationExecution returns valid for pending_confirmation + confirmedBy
+    ✓ confirmation fails with EXEC_CONFIRMATION_NO_OPERATOR when confirmedBy is empty
+    ✓ confirmation fails with EXEC_CONFIRMATION_WRONG_STATUS when already confirmed
+    ✓ confirmation fails with EXEC_CONFIRMATION_MODE_INVALID when mode is not explicit
+    ✓ throws EXEC_VALIDATION_INITIATED_BY when initiatedBy is empty
+    ✓ throws EXEC_VALIDATION_ACTION_ID when actionId is empty
+    ✓ throws EXEC_VALIDATION_TYPE when executionType is unknown
+
+T3  (6 assertions)  duplicate execution conflicts rejected
+    ✓ isDuplicate=false when no existing executions for actionId
+    ✓ isDuplicate=true when same actionId has active execution (pending_confirmation)
+    ✓ isDuplicate=true when same actionId has active execution (confirmed)
+    ✓ isDuplicate=true when same actionId has active execution (executing)
+    ✓ isDuplicate=false when same actionId execution is terminal (completed)
+    ✓ isDuplicate=false when different actionId
+
+T4  (9 assertions)  execution lifecycle transitions deterministic
+    ✓ pending_confirmation → confirmed is valid
+    ✓ pending_confirmation → abandoned is valid
+    ✓ confirmed → executing is valid
+    ✓ executing → completed is valid
+    ✓ executing → rolled_back is valid
+    ✓ pending_confirmation → completed is INVALID (skips states)
+    ✓ completed → confirmed is INVALID (terminal state)
+    ✓ rolled_back → executing is INVALID (terminal state)
+    ✓ abandoned → pending_confirmation is INVALID (terminal state)
+
+T5  (6 assertions)  rollback-result tracking preserved
+    ✓ rollbackStatus defaults to 'not_applicable' on creation
+    ✓ ALL_ROLLBACK_STATUSES has exactly 4 entries
+    ✓ canRollBack returns true only for executing status
+    ✓ canComplete returns true only for executing status
+    ✓ canMarkExecuting returns true only for confirmed status
+    ✓ canAbandon is true for all non-terminal states
+
+T6  (6 assertions)  append-only execution history guaranteed
+    ✓ buildExecutionAttempt does not mutate input
+    ✓ TERMINAL_EXECUTION_STATUSES has exactly 3 entries
+    ✓ ACTIVE_EXECUTION_STATUSES has exactly 3 entries
+    ✓ ALL_EXECUTION_TYPES has exactly 8 entries
+    ✓ terminal statuses have empty EXECUTION_VALID_TRANSITIONS arrays
+    ✓ isTerminalExecutionStatus correctly classifies all statuses
+
+T7  (5 assertions)  audit serialization stable
+    ✓ RemediationExecutionAttempt is fully JSON-serializable
+    ✓ RemediationExecutionAttempt has no function properties
+    ✓ ExecutionTransitionValidation is fully JSON-serializable
+    ✓ EXECUTION_ORCHESTRATION_MAP covers all 8 execution types
+    ✓ describeExecutionType returns non-empty string for every type
+
+T8  (5 assertions)  super-admin enforcement valid
+    ✓ buildExecutionAttempt has no async behavior
+    ✓ validateExecutionTransition has no async behavior
+    ✓ confirmRemediationExecution has no async behavior
+    ✓ same input → same execution type, status, confirmationMode (deterministic)
+    ✓ canConfirm true only for pending_confirmation
+
+T9  (5 assertions)  observability events scoped correctly
+    ✓ emitExecutionCreatedEvent does not throw
+    ✓ emitExecutionConfirmedEvent does not throw
+    ✓ emitExecutionCompletedEvent does not throw
+    ✓ emitExecutionRolledBackEvent does not throw
+    ✓ buildExecutionAttempt emits created event without throwing
+
+T10 (6 assertions)  no autonomous remediation execution occurs
+    ✓ buildExecutionAttempt returns a value object — not a Promise
+    ✓ execution attempt has no execute/run/dispatch/trigger methods
+    ✓ engine produces only value objects — no callbacks or side-effecting refs
+    ✓ full lifecycle path ends at terminal — no further transitions possible
+    ✓ isActiveExecutionStatus returns false for all terminal states
+    ✓ confirmationMode invariant: value is always 'explicit' regardless of input
+
+  Total P10-E: 63 assertions (10 test groups)
+  Cumulative:  1994 tests / 1994 passed (35 files)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. REMAINING RESILIENCE GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P10-E is intentionally minimal and human-controlled. Remaining gaps:
+
+  1. NO EXECUTION-TO-INCIDENT DIRECT ROUTE
+     GET /executions does not support incidentId filter directly.
+     Cross-incident query requires: get orchestrations by incidentId → extract
+     actionIds → get executions by actionId. Two round-trips.
+     Gap: a dedicated route or DB join shortcut linking execution records to
+          their origin incident would improve operator usability.
+
+  2. NO FRONTEND EXECUTION TRACKING QUEUE
+     All P10-E routes are backend only.
+     Gap: no "Active Executions" queue in the Super Admin panel — no confirm
+          button, no rollback form, no evidence collection UX.
+
+  3. EXECUTION EVIDENCE IS UNSTRUCTURED
+     executionEvidence is a JSON string array — fully operator-controlled.
+     Values like "backlog_depth:42" are human-readable but not machine-parseable.
+     Gap: structured evidence schema (key/value pairs with typed fields) would
+          enable aggregate analysis across executions of the same type.
+
+  4. NO EXECUTION SLA / STALE DETECTION
+     Active executions (pending_confirmation or confirmed) can remain indefinitely.
+     An operator may create an execution attempt and never confirm it.
+     Gap: stale execution detection (e.g., pending_confirmation for 24h+ with no
+          confirmation) is not modelled. A background job or cleanup route
+          could flag or auto-abandon stale attempts.
+
+  5. NO ROLLBACK STATUS UPDATE ROUTE
+     rollbackStatus is set once during POST /:id/rollback.
+     If initial rollbackStatus="pending" and the reversal later completes or
+     fails, there is no route to update it.
+     Gap: a POST /:id/update-rollback-status route would close this.
+
+  6. NO CROSS-EXECUTION DEPENDENCY
+     Multiple execution attempts for different actionIds on the same workspace
+     have no ordering or dependency tracking.
+     Gap: if two executions are in progress simultaneously for the same workspace,
+          there is no collision detection or sequencing enforcement at the
+          workspace level.
+
+  7. NO TWO-PARTY CONFIRMATION
+     confirmationMode = "explicit" means one operator both creates and confirms.
+     For high-risk execution types (e.g., containment_boundary_reconfiguration),
+     a second operator may need to independently confirm.
+     Gap: two-party confirmation would require a separate confirmedBy2 field
+          and an additional pending state, plus an intentional mode flag.
+
+  8. NO EXECUTION OUTCOME ANALYSIS
+     Completed executions and their associated rollbackStatus outcomes are not
+     aggregated. There is no "execution success rate" or "rollback frequency"
+     metric available.
+     Gap: trend analysis over execution outcomes would inform future advisory
+          calibration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. READINESS ASSESSMENT — BEFORE SUPERVISED REMEDIATION AUTOMATION RESEARCH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Explicit-confirmation remediation execution tracking infrastructure is operational:
+
+  EXECUTION LAYER READINESS
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ 8 execution types covering all remediation domains
+  ✓ 6-state deterministic lifecycle (pending_confirmation → confirmed →
+    executing → completed / rolled_back / abandoned)
+  ✓ confirmationMode = "explicit" as immutable invariant (not a runtime flag)
+  ✓ Two-stage confirmation gate (precondition + transition validation)
+  ✓ Operator attribution mandatory at every stage
+  ✓ Active-duplicate prevention per actionId (409 on conflict)
+  ✓ Independent rollbackStatus field (4 outcomes, not conflated with lifecycle)
+  ✓ Append-only execution notes (each transition appends, never replaces)
+  ✓ Cumulative executionEvidence (each completion merge-appends evidence)
+  ✓ 4 structured observability events
+  ✓ 5 governance API routes live and super-admin gated
+  ✓ Full typecheck clean (zero TS errors)
+  ✓ 63 new assertions, 1994 total passing
+
+  COMPLETE P10-A → P10-E STACK
+  ─────────────────────────────────────────────────────────────────────────────
+  P10-A: Live reliability domain evaluation (per-capture snapshot)
+  P10-B: Append-only snapshot persistence + incident lifecycle tracking
+  P10-C: Operator advisory recommendations + trend analysis (read-only)
+  P10-D: Human-in-the-loop orchestration + remediation lifecycle (audit-only)
+  P10-E: Explicit-confirmation execution tracking + rollback recording
+  Stack: capture → incident → recommendation → orchestration → execution
+
+  PREREQUISITES SATISFIED FOR SUPERVISED REMEDIATION AUTOMATION RESEARCH
+  ─────────────────────────────────────────────────────────────────────────────
+  ✓ Full traceability: advisory → orchestration → execution → outcome
+  ✓ Named operator on every action: initiatedBy, confirmedBy, completedBy/rolledBackBy
+  ✓ Lifecycle state machine: every execution step is tracked and attributable
+  ✓ Rollback semantics: execution → rollback chain is documented in DB permanently
+  ✓ 8 execution types as typed vocabulary for supervised automation research
+  ✓ EXECUTION_ORCHESTRATION_MAP as traceability backbone
+  ✓ executionEvidence as semi-structured outcome storage for pattern analysis
+  ✓ DB schema supports retrospective analysis of execution patterns and outcomes
+
+  SAFETY BOUNDARY (must remain respected in all future phases)
+  ─────────────────────────────────────────────────────────────────────────────
+  ⚠ Execution attempts are TRACKING RECORDS ONLY — they document human decisions
+    without executing anything automatically.
+  ⚠ No future phase may introduce automatic confirmation
+    (confirmationMode = "explicit" must remain an invariant, not a feature flag).
+  ⚠ No future phase may introduce automatic status advancement
+    (e.g., a scheduler that auto-confirms pending_confirmation attempts).
+  ⚠ No future phase may link execution completion to automated scheduler mutation.
+  ⚠ The "supervisor" in any supervised automation research is always a human
+    operator confirmed by the confirmation layer. The system is the record-keeper.
+    This separation must be maintained permanently.
+  ⚠ Any future phase introducing partial automation (e.g., automated evidence
+    collection while human confirms execution) must be explicitly modelled as
+    a new execution type with deliberate safety review, not retrofitted into
+    existing types.
+
+  VERDICT: READY for Supervised Remediation Automation Research
+  Condition: automation research must remain:
+    (a) explicitly gated by human confirmation
+    (b) tracked via this execution attempt layer (not bypass it)
+    (c) rollback-capable with documented rollback outcome
+    (d) super_admin-only gated throughout
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 10-E REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

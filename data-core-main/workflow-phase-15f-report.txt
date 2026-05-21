@@ -1,0 +1,250 @@
+================================================================================
+WORKFLOW PHASE 15-F — Commercial Risk & Renewal Readiness
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Platform/Super Admin read-only commercial risk intelligence and renewal
+readiness scoring from existing contracts, invoices, and manual payment records.
+No emails, no automated tasks, no status mutations, no electronic payment.
+
+Next phase: P15-G — Commercial Console Integration
+
+================================================================================
+1) RISK COMPUTATION LOGIC
+================================================================================
+
+Module: artifacts/api-server/src/lib/commercial-risk-engine.ts
+
+CommercialRiskLevel (computed per tenant, not stored in DB):
+  - low
+  - medium
+  - high
+  - critical
+
+Scoring rules (priority order):
+  1. No active contract OR expired active contract → critical
+  2. ≥2 overdue invoices OR (≥1 overdue + outstanding ≥ 1000 SAR) OR
+     (disputed payments + outstanding ≥ 1000) → critical
+  3. Any overdue invoice OR outstanding > 0 OR rejected/disputed payments → high
+  4. Renewal at_risk / attention_needed readiness OR renewal notice window → medium
+  5. Otherwise → low
+
+Signals returned (all computed):
+  activeContractExists, daysUntilContractEnd, daysUntilRenewalDate,
+  renewalCommitmentStatus, renewalNoticeDays, unpaidInvoiceCount,
+  overdueInvoiceCount, outstandingAmount, disputedPaymentCount,
+  hasRejectedPayments, hasOverdueInvoices, hasExpiredContract,
+  hasMissingBillingContact, hasMissingInvoicePdf, lastPaymentDate,
+  lastInvoiceDate, contractEndDate, renewalDate
+
+Data loader (read-only): artifacts/api-server/src/lib/commercial-risk-loader.ts
+  Batch-loads workspaces, accounts, contracts, billing contacts, invoices,
+  documents, and payment records; feeds computeTenantCommercialRisk().
+
+================================================================================
+2) RENEWAL READINESS LOGIC
+================================================================================
+
+RenewalReadinessStatus:
+  - no_active_contract — no active contract row
+  - blocked — active contract expired (end date in past or status expired)
+  - at_risk — inside renewal notice window AND commitment not "committed"
+  - attention_needed — missing billing contact, missing PDF on issued/shared
+    invoice, rejected payments, overdue invoices, or outstanding balance
+  - ready — none of the above
+
+Renewal notice window:
+  daysUntilRenewalDate or daysUntilContractEnd within renewalNoticeDays
+  (from active contract).
+
+Commitment:
+  Only "committed" satisfies renewal commitment; pending/other → at_risk
+  when notice window is open.
+
+Platform summary (aggregateCommercialRiskSummary):
+  Counts by risk level and readiness; total outstanding; overdue invoice count;
+  upcoming renewals (renewal within 90 days).
+
+================================================================================
+3) PERMISSIONS ADDED
+================================================================================
+
+New code (total platform permissions: 32):
+  - commercial.risk.read
+
+Backend: artifacts/api-server/src/lib/platform-permissions.ts
+Frontend: artifacts/ops-platform/src/lib/platform-permissions-config.ts
+         artifacts/ops-platform/src/lib/commercial-config.ts (COMMERCIAL_PERMISSION_CONFIG)
+
+Role matrix (additive — no redesign):
+  root_platform_owner / platform_admin: all 32
+  finance_admin / sales_admin / auditor: commercial.risk.read
+  support_admin / read_only_operator: commercial.risk.read (read-only commercial visibility)
+  workspace_support: NO commercial.risk.read (unchanged — no commercial access)
+
+Nav gating: artifacts/ops-platform/src/lib/platform-access.ts
+  PlatformNavItemKey "commercial-risk" → ["commercial.risk.read"]
+
+================================================================================
+4) BACKEND APIs (GET ONLY)
+================================================================================
+
+Router: artifacts/api-server/src/routes/commercial-risk.ts
+Registered in artifacts/api-server/src/routes/index.ts
+
+GET /api/platform/commercial-risk/summary
+  Permission: commercial.risk.read
+  Returns: totalTenants, risk level counts, readiness counts,
+           totalOutstandingAmount, overdueInvoiceCount, upcomingRenewalsCount
+
+GET /api/platform/commercial-risk/list
+  Permission: commercial.risk.read
+  Query filters: riskLevel, renewalReadinessStatus, hasOverdueInvoices,
+                 renewalWithinDays
+  Returns: tenants[] with riskLevel, renewalReadinessStatus, outstandingAmount,
+            overdueInvoiceCount, contractEndDate, renewalDate, reasons[]
+
+GET /api/platform/tenants/:tenantId/commercial-risk
+  Permission: commercial.risk.read
+  Returns: full assessment (riskLevel, renewalReadinessStatus, signals,
+            reasons[], recommendedActions[])
+
+Explicitly NOT implemented:
+  POST / PATCH / DELETE on risk routes
+  Auto invoice/contract status changes
+  Notifications, email, tasks, payment gateway
+
+================================================================================
+5) REASONS & RECOMMENDED ACTIONS (KEYS ONLY)
+================================================================================
+
+Reason codes:
+  active_contract_missing
+  contract_expired
+  renewal_notice_window_open
+  renewal_commitment_not_committed
+  overdue_invoices_present
+  outstanding_amount_present
+  rejected_payment_present
+  billing_contact_missing
+  invoice_pdf_missing
+
+Recommended action keys (display only — no execution):
+  review_contract_terms
+  contact_customer_owner
+  verify_collection_status
+  upload_missing_invoice_pdf
+  update_renewal_commitment
+  review_billing_contacts
+
+Labels: artifacts/ops-platform/src/lib/commercial-config.ts
+  RISK_REASON_LABELS, RECOMMENDED_ACTION_LABELS
+
+================================================================================
+6) AUDIT BEHAVIOR
+================================================================================
+
+Events (platform-audit-events.ts):
+  commercial_risk_viewed — tenant detail GET success
+  commercial_risk_access_denied — tenant detail 404 / denied
+
+Logged on: GET /platform/tenants/:tenantId/commercial-risk only
+NOT logged on: summary or list (avoids audit noise)
+
+Metadata: actorId, tenantId, riskLevel, renewalReadinessStatus, timestamp (in JSON metadata)
+
+Total platform audit events: 37
+
+================================================================================
+7) FRONTEND
+================================================================================
+
+Page: artifacts/ops-platform/src/pages/super-admin-commercial-risk.tsx
+Route: /super-admin/commercial-risk
+Nav: Super Admin sidebar "Commercial Risk" (ShieldAlert icon)
+
+Sections:
+  - Summary cards: total tenants, critical/high risk, overdue invoices,
+    outstanding amount, upcoming renewals
+  - Risk list with filters (risk level, readiness, overdue only)
+  - Tenant detail panel: signals, reasons, recommended actions (read-only)
+  - Link to Tenant Registry (no payment/collect/email actions)
+
+Hooks: artifacts/ops-platform/src/hooks/use-commercial-risk.ts
+  useCommercialRiskSummary(enabled)
+  useCommercialRiskList(filters, enabled)
+  useTenantCommercialRisk(tenantId, canRead)
+
+React Query keys:
+  ["platform", "commercial-risk", "summary"]
+  ["platform", "commercial-risk", "list", filters]
+  ["platform", "tenants", tenantId, "commercial-risk"]
+
+Visible only with commercial.risk.read; access-denied state otherwise.
+
+================================================================================
+8) SAFETY CONTRACT
+================================================================================
+
+artifacts/ops-platform/src/lib/commercial-config.ts — COMMERCIAL_SAFETY_CONTRACT
+
+P15-F flags (all true):
+  commercialRiskReadOnly
+  noAutomatedDunning
+  noAutomatedRenewalActions
+  noEmailSending
+  noPaymentGateway
+  noElectronicPayment
+  noInvoiceGenerationEngine
+  noTaxCalculation
+  noZatcaIntegration
+  noAccountingLedger (noAccountingLedger equivalent flags)
+  noTenantCustomerActions
+  noAutoStatusChanges
+  riskPermissionGated
+  auditRiskDetailViews
+
+Import-time guard: every contract property must be true.
+
+================================================================================
+9) TESTS
+================================================================================
+
+api-server:
+  commercial-risk-engine.test.ts — scoring scenarios
+  commercial-risk.test.ts — routes, permissions, GET-only, detail audit
+  commercial-permissions.test.ts — commercial.risk.read + count 32
+  commercial-audit-events.test.ts — risk audit events
+  platform-permissions.test.ts / platform-audit-events.test.ts — counts updated
+
+ops-platform:
+  commercial-risk-ui.test.ts — page gating, nav, forbidden terms, safety
+  commercial-config.test.ts — P15-F safety flags
+  platform-permissions-config.test.ts / platform-access.test.ts — count 32
+
+Results:
+  api-server:  67 files, 3623 tests passed
+  ops-platform: 30 files, 1270 tests passed
+
+================================================================================
+10) LIMITATIONS LEFT FOR P15-G
+================================================================================
+
+P15-G — Commercial Console Integration (next):
+  - Embed risk/readiness into Tenant Registry commercial panel (not separate page only)
+  - Deep links from tenant row to risk detail
+  - Unified commercial console UX with contracts/invoices/collection
+  - Optional export of risk report (would add export-specific audit if implemented)
+  - Cross-widget refresh when payments/contracts change
+  - No automated actions in P15-G unless explicitly scoped later
+
+Intentionally not in P15-F:
+  - Persisted risk scores / historical risk trends in DB
+  - Email or in-app notifications
+  - Automated dunning or renewal workflows
+  - Tenant/customer-facing risk visibility
+  - Payment gateway or status auto-updates
+
+================================================================================
+END OF REPORT — Phase 15-F Complete
+================================================================================

@@ -1,0 +1,274 @@
+راجع:
+- workflow-phase-9a-report.txt
+- workflow-phase-7a-report.txt
+- workflow-phase-7d-report.txt
+- workflow-phase-8e-report.txt
+- workflow-phase-8f-report.txt
+خصوصًا:
+- scheduler behavior
+- governance alerts
+- hotspot concentration
+- comparative intelligence
+- runtimeWeightedComplexity
+- tenant isolation boundaries
+
+ثم نفّذ فقط:
+P9-B — Workload Partitioning & Execution Containment Foundations
+
+ولا تنفّذ:
+- distributed queues
+- Kubernetes orchestration
+- multi-region partitioning
+- autoscaling clusters
+- shard migration systems
+- distributed workload balancing
+
+عنوان المهمة:
+WORKFLOW PHASE 9-B — Workload Partitioning & Execution Containment Foundations
+
+المهمة الحالية:
+تحويل:
+shared operational execution behavior
+
+إلى:
+tenant-contained workload governance architecture
+
+الهدف:
+تمكين:
+- workload containment
+- noisy-tenant mitigation
+- execution-pressure partitioning
+- scheduler fairness foundations
+- tenant-safe workload scaling
+
+بطريقة:
+deterministic workload partitioning semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EXECUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workflow execution loop
+- scheduler polling
+- governance alerts
+- runtime pressure scoring
+- comparative ranking
+- tenant isolation enforcement
+
+حدّد:
+- أين workload contention ممكن
+- أين noisy-tenant risk موجود
+- أين shared scheduler pressure غير معزول
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN WORKLOAD PARTITION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TenantWorkloadPartition
+
+ليحتوي:
+- workspaceId
+- partitionId
+- executionPressureLevel
+- activeExecutionCount
+- delayedExecutionCount
+- advisoryPressureLevel
+- schedulerWeight
+- containmentStatus
+
+مع:
+deterministic partition semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EXECUTION CONTAINMENT ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+evaluateWorkloadContainment()
+
+بحيث:
+- يقيس execution pressure لكل workspace
+- يكتشف noisy-tenant behavior
+- يحدد contention severity
+- يقيّم scheduler saturation risk
+- يمنع shared-pressure blindness
+
+لكن:
+بدون throttling فعلي.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PARTITION PRESSURE SCORING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+PartitionPressureScore
+
+يعتمد على:
+- active executions
+- delayed workload backlog
+- governance hotspot density
+- runtimeWeightedComplexity
+- advisory escalation severity
+
+مع:
+normalized deterministic scoring.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SCHEDULER FAIRNESS FOUNDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+scheduler fairness semantics
+
+بحيث:
+- no tenant starvation
+- no infinite noisy-tenant dominance
+- partition-aware scheduling readiness
+- fairness observability
+
+لكن:
+بدون queue orchestration.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — NOISY TENANT DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اكتشف:
+- execution monopolization
+- chronic backlog tenants
+- excessive advisory concentration
+- scheduler pressure spikes
+
+اعتمد فقط على:
+existing analytics + execution metrics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+partition intelligence
+
+داخل:
+- governance dashboards
+- operational consoles
+- comparative intelligence
+- advisory systems
+
+لكن:
+بدون automated throttling.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+tenant_partition_pressure_evaluated
+
+B)
+tenant_noisy_behavior_detected
+
+C)
+scheduler_fairness_risk_detected
+
+D)
+tenant_execution_containment_assessed
+
+كلها تحتوي:
+- workspaceId
+- partitionId
+- executionPressureLevel
+- schedulerWeight
+- containmentStatus
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Partition engine MUST:
+- remain advisory-only
+- never throttle automatically
+- never pause executions
+- never mutate scheduler behavior
+- never starve tenants intentionally
+
+أي:
+read-only workload governance فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+partition pressure scoring deterministic
+
+T2:
+noisy tenant detection stable
+
+T3:
+scheduler fairness semantics valid
+
+T4:
+high execution pressure classified correctly
+
+T5:
+chronic backlog tenant detection
+
+T6:
+advisory concentration scoring stable
+
+T7:
+partition serialization deterministic
+
+T8:
+no tenant starvation semantics
+
+T9:
+no runtime throttling occurs
+
+T10:
+partition engine remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- distributed schedulers
+- autoscaling infra
+- throttling engines
+- dynamic queue migration
+- tenant sharding
+- Kubernetes orchestration
+
+خلك:
+minimal deterministic workload containment layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9b-report.txt
+
+ويحتوي:
+- workload partition architecture
+- containment semantics
+- partition pressure formulas
+- scheduler fairness foundations
+- noisy tenant detection model
+- governance integration points
+- observability additions
+- tests results
+- remaining workload-scaling gaps
+- readiness assessment قبل scaling orchestration phase

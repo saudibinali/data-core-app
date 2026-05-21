@@ -1,0 +1,680 @@
+FORMS EVENT ARCHITECTURE REVIEW
+================================
+Date:    2026-05-13
+Status:  ANALYSIS ONLY — no code changes in this report
+Scope:   How to represent form submissions inside the canonical EventBus
+         architecture without creating event chaos or dynamic event explosion.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — HOW EVENT NAMES ARE GENERATED TODAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1 — The schema
+  formDefinitionsTable.workflowEvent: text (nullable)
+  — Set by workspace admins at form-creation time.
+  — Free-text string. No validation, no enum, no FK constraint.
+  — Stored in DB; read at submission time by POST /forms/:id/submissions.
+
+1.2 — Runtime dispatch in forms.ts
+  POST /forms/:id/submissions (line 505-520):
+    const eventName = form.workflowEvent ?? `${form.module}.form.submitted`;
+    void eventDispatcher.dispatch({
+      event:       eventName,         ← DYNAMIC at runtime; not known at compile time
+      module:      form.module,
+      workspaceId: req.workspaceId,
+      triggeredBy: req.userId,
+      data: {
+        formId, formName, submissionId, requestNumber, module,
+        ...data,                       ← raw form field values (Record<string, unknown>)
+      },
+    });
+  The event name is resolved ONCE per submission, never validated.
+
+1.3 — How event names enter the DB (three different paths)
+
+  PATH A — Seed data (seed/forms.ts):
+    Hardcoded strings per template:
+    │  Form template             │  workflowEvent stored
+    │─────────────────────────────│──────────────────────────────
+    │  Leave Request             │  "leave.requested"
+    │  IT Equipment Request      │  "system.form.submitted"
+    │  Expense Reimbursement     │  "approval.requested"
+    │  Employee Feedback         │  "system.form.submitted"
+
+  PATH B — Admin UI (POST /forms):
+    workflowEvent = req.body.workflowEvent ?? null
+    Any string the admin types. No validation. Could be:
+      "leave.requested", "my-custom-event", "hr.vacation.submitted", etc.
+
+  PATH C — HR Services (hr.ts, line 1843-1854):
+    eventBase     = `hr.${toSlug(name)}`        ← slug from admin-entered service name
+    workflowEvent = `${eventBase}.submitted`    ← e.g. "hr.annual-leave.submitted"
+    Also calls upsertServiceEvents(eventBase) which registers:
+      "hr.{slug}.submitted"
+      "hr.{slug}.status_changed"
+      "hr.{slug}.completed"
+      "hr.{slug}.rejected"
+    These are written to platformEventRegistryTable for workflow builder display.
+    An admin can create unlimited HR services → unlimited dynamic event names.
+
+1.4 — Existing event names found in the system
+
+  From seed data (static):
+    "leave.requested"        → canonical domain event (in EVENT_TYPES)
+    "approval.requested"     → legacy name for approval.created (in LEGACY_EVENT_NAMES)
+    "system.form.submitted"  → a 3-level name, no canonical equivalent
+
+  From hr.ts (dynamic, pattern-based):
+    "hr.{slug}.submitted"    → infinite namespace; NOT in EVENT_TYPES; NOT in EventTypeMap
+
+  From fallback formula:
+    "${form.module}.form.submitted" → e.g. "hr.form.submitted", "tickets.form.submitted"
+    Also NOT in EVENT_TYPES.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — FORM TYPES IN THE SYSTEM TODAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Based on seed data, hr.ts, and admin capabilities:
+
+  Category 1 — GENERIC SUBMISSIONS (no structured domain meaning)
+    IT Equipment Request      module=system   event="system.form.submitted"
+    Employee Feedback         module=system   event="system.form.submitted"
+    Any custom admin form     module=varies   event=admin-chosen
+    → These are pure data-collection forms.
+    → No business domain cares about their specific fields at the event level.
+    → "Something was submitted" is the totality of the semantic content.
+
+  Category 2 — APPROVAL-ROUTED SUBMISSIONS (trigger approval workflow)
+    Expense Reimbursement     module=approvals  event="approval.requested"
+    → The form is a wrapper around an approval flow.
+    → The "event" is really about the approval lifecycle, not the form itself.
+    → Domain owner: Approvals module, NOT Forms module.
+    → Structural mismatch: approval.created (ApprovalCreatedPayload) requires
+      approvalId, requestedByUserId, approverUserId, ticketId — NONE of which
+      come from a generic form submission.
+
+  Category 3 — DOMAIN-ALIASED SUBMISSIONS (form fires a domain event name)
+    Leave Request             module=hr  event="leave.requested"
+    → workflowEvent = "leave.requested" is a canonical domain event string.
+    → BUT: the payload is ...data (raw JSON field values from form.data).
+    → LeaveRequestedPayload requires: leaveRequestId (int), employeeUserId (int),
+      leaveType (validated enum), startDate (ISO date), endDate (ISO date),
+      daysRequested (computed int), departmentId (int FK).
+    → The forms.ts handler emits NONE of these structured fields.
+    → It emits { formId, formName, submissionId, leave_type: "annual", start_date: "2026-06-01", ... }
+    → The field names are snake_case strings from form UI; the expected payload
+      uses camelCase typed fields validated at the application level.
+    → Any listener registered on "leave.requested" expecting LeaveRequestedPayload
+      would receive completely wrong data with wrong field names and wrong types.
+    CRITICAL BUG: This is a schema contract violation happening silently.
+
+  Category 4 — DYNAMIC HR SERVICES (admin-created service flows)
+    Custom HR services        module=hr  event="hr.{slug}.submitted"
+    → Unlimited event names created by workspace admins.
+    → Only used for WorkflowEngine trigger matching.
+    → No typed payload contract exists for any of them.
+    → Currently entirely outside the typed EventBus system.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — WHAT THE CANONICAL BUS PROVIDES TODAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  EVENT_TYPES.FORM_SUBMITTED = "form.submitted"
+  FormSubmittedPayload:
+    submissionId:      number
+    formId:            number
+    formName:          string
+    owningModule:      string      ← the form's module field
+    submittedByUserId: number
+    departmentId?:     number | null
+    answers:           Record<string, unknown>   ← raw field values
+
+  EVENT_TYPES.LEAVE_REQUESTED = "leave.requested"
+  LeaveRequestedPayload:
+    leaveRequestId:  number        ← dedicated leave_requests table row ID
+    employeeUserId:  number
+    leaveType:       string        ← validated enum
+    startDate:       string        ← ISO date
+    endDate:         string        ← ISO date
+    daysRequested:   number        ← computed (endDate - startDate)
+    departmentId?:   number | null
+    employeeNote?:   string
+
+  Key observation: FormSubmittedPayload and LeaveRequestedPayload are COMPLETELY
+  DIFFERENT shapes. The "leave.requested" event CANNOT be emitted from the
+  generic form submission handler without violating the contract.
+
+  LEGACY_EVENT_NAMES map (bridge.ts compatibility):
+    "forms.form.submitted" → "form.submitted"
+    "approval.requested"   → "approval.created"
+    "approval.approved"    → "approval.completed"
+    "approval.rejected"    → "approval.completed"
+  Note: "leave.requested" is NOT in this map — it is already canonical.
+
+  Ready listeners (awaiting emitter):
+    activity.ts:          form.submitted → form_submitted activity_logs row
+    notifications-bus.ts: form.submitted → (no recipient logic yet, no-op with log)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — OPTION A DEEP ANALYSIS: ONE CANONICAL form.submitted
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Architecture:
+    ALL form submissions → appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED, payload)
+    payload.owningModule = form.module
+    payload.answers      = data  (raw JSON from form)
+    workflowEvent hint stored in payload.metadata or a new payload field.
+
+  Workflow matching:
+    WorkflowEngine currently matches on: event.event (the event name string).
+    Under Option A, ALL form submissions produce event type "form.submitted".
+    To preserve per-form workflow triggers, the WorkflowEngine must match on
+    a SECONDARY field (e.g. payload.answers.leave_type, or a new metadata field
+    containing the original workflowEvent string).
+
+  REQUIRED CHANGES:
+    1. Add `workflowEventHint?: string` to FormSubmittedPayload
+       (or use metadata.workflowEventName — no payload schema change)
+    2. WorkflowEngine must be updated to match on the hint field, not event name
+       — this is a BREAKING CHANGE to WorkflowEngine trigger logic.
+    3. Existing workflow_definitions with trigger_event="leave.requested" BREAK
+       unless migrated to trigger on form.submitted + condition workflowEventHint="leave.requested"
+    4. notifications-bus.ts form.submitted listener must define recipient logic
+       (currently a no-op placeholder)
+
+  ADVANTAGES:
+    ✓ Single typed contract — one payload shape for all forms
+    ✓ One bus subscription catches all form activity
+    ✓ activity.ts and notifications-bus.ts trivially handle all forms
+    ✓ No event explosion — HR services with dynamic names don't pollute EventTypeMap
+    ✓ Type safety: appEventBus.emit() always resolves to FormSubmittedPayload
+    ✓ No per-form listener registration needed
+    ✓ Extensible: adding a new form doesn't require a new event type
+
+  DISADVANTAGES:
+    ✗ WorkflowEngine requires modification (non-trivial, currently works)
+    ✗ Workflow workflow_definitions data migration required
+    ✗ Listeners cannot distinguish leave forms from feedback forms at the type
+      level — must introspect payload.owningModule or answers at runtime
+    ✗ Leave-specific business logic (approval routing, leave balance checks) has
+      nowhere to live in the event handler — would go in the listener based on
+      owningModule conditional, polluting generic listeners
+    ✗ "leave.requested" loses its semantic meaning as a first-class domain event
+    ✗ FormSubmittedPayload currently lacks workflowEventHint — schema change needed
+
+  VERDICT: Option A works well for the generic path (IT, Feedback, etc.)
+  but LOSES domain semantics for structured domain forms (Leave, Approvals).
+  It trades event richness for uniformity.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — OPTION B DEEP ANALYSIS: PER-DOMAIN TYPED EVENTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Architecture:
+    Leave form submission  → appEventBus.emit(EVENT_TYPES.LEAVE_REQUESTED, LeaveRequestedPayload)
+    Expense form           → appEventBus.emit(EVENT_TYPES.APPROVAL_CREATED, ApprovalCreatedPayload)
+    Feedback form          → appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED, FormSubmittedPayload)
+    HR custom services     → ???
+
+  CRITICAL STRUCTURAL PROBLEM:
+    LeaveRequestedPayload requires fields that DON'T EXIST in a form submission:
+      leaveRequestId  — a leave_requests table row ID (table doesn't exist)
+      daysRequested   — computed from endDate - startDate (not in payload today)
+      employeeUserId  — from req.userId (available)
+    The generic forms.ts handler cannot produce LeaveRequestedPayload because:
+      a. There is no leave_requests DB table — the form IS the request record.
+      b. The fields are snake_case in form data; payload needs camelCase validated.
+      c. daysRequested requires date computation and validation logic.
+    Conclusion: to emit proper leave.requested, you need a DEDICATED ROUTE
+    (hr.ts POST /hr/leave-requests) that validates the data, creates a DB record,
+    and emits the typed event. The generic form submission handler CANNOT do this.
+
+  OPTION B IS NOT IMPLEMENTABLE from within forms.ts for domain events.
+  Domain events require domain routes, not generic form routes.
+
+  ADVANTAGES (if domain routes existed):
+    ✓ Rich typed payloads per domain event
+    ✓ Type-safe throughout — TypeScript enforces correct payload shape
+    ✓ Domain listeners can be highly specific (leave balance check, etc.)
+    ✓ Workflow matching on event.type stays simple
+    ✓ Semantic meaning preserved in event name
+
+  DISADVANTAGES:
+    ✗ Requires a dedicated route per domain event type
+    ✗ The "form builder" concept breaks — forms are no longer generic
+    ✗ HR custom services generate infinite event types — unregisterable statically
+    ✗ Each new domain form needs: DB table, route, payload type, EVENT_TYPES entry,
+      EventTypeMap entry, registry entry, listener updates = 6-8 files per form type
+    ✗ Dynamic HR services are fundamentally incompatible with static typing
+
+  VERDICT: Option B is architecturally correct for a few fixed domain events
+  but impossible to apply uniformly across all form types, especially dynamic HR.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — RISK MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK                        │ Option A │ Option B │ Hybrid (recommended)
+  ────────────────────────────│──────────│──────────│──────────────────────
+  Event explosion             │ NONE     │ HIGH     │ LOW
+  Semantic duplication        │ MEDIUM   │ LOW      │ LOW
+  Workflow coupling           │ HIGH     │ LOW      │ MEDIUM
+  Listener complexity         │ LOW      │ HIGH     │ LOW
+  Event ownership ambiguity   │ HIGH     │ LOW      │ LOW (clear boundary)
+  Dynamic typing problems     │ NONE     │ HIGH     │ NONE
+  Registry scalability        │ PERFECT  │ POOR     │ GOOD
+  Workflow maintainability    │ POOR     │ GOOD     │ GOOD
+  Contract violation (today)  │ SOLVES   │ SOLVES   │ SOLVES
+  WorkflowEngine changes      │ REQUIRED │ NONE     │ MINOR
+  Implementation complexity   │ MEDIUM   │ VERY HIGH│ MEDIUM
+  ────────────────────────────────────────────────────────────────────
+
+  CRITICAL RISKS WITH CURRENT ARCHITECTURE (must fix regardless of choice):
+
+  RISK-F01 — SCHEMA CONTRACT VIOLATION [CRITICAL]
+    forms.ts fires "leave.requested" with ...data (snake_case, unstructured JSON)
+    when LeaveRequestedPayload requires structured camelCase typed fields.
+    Any listener on "leave.requested" expecting LeaveRequestedPayload receives
+    garbage data.  Currently no listeners are active on this path — so the bug
+    is latent.  It will manifest the moment leave-specific listeners are added.
+    No TypeScript error catches this because eventDispatcher.dispatch() takes
+    Record<string, unknown>.  Silent data contract violation.
+
+  RISK-F02 — APPROVAL CONTRACT VIOLATION [HIGH]
+    Expense Reimbursement form fires "approval.requested" (→ approval.created).
+    ApprovalCreatedPayload requires: approvalId, requestedByUserId, approverUserId, ticketId.
+    The form submission provides NONE of these.  Same silent contract violation.
+    The approval.created listener in notifications-bus.ts would receive wrong data.
+    Currently gated because forms.ts uses eventDispatcher (not appEventBus),
+    so the bus listeners don't fire.  The bridge maps "approval.requested" to
+    "approval.created" but since it goes through legacy path, it only hits
+    workspace_event_logs and WorkflowEngine — NOT the typed bus listeners.
+
+  RISK-F03 — INFINITE DYNAMIC EVENTS [MEDIUM]
+    HR services create unlimited event names at runtime.
+    These cannot be registered in EventTypeMap statically.
+    Any attempt to subscribe to them on appEventBus requires runtime string matching
+    against a wildcard listener — breaking type safety.
+
+  RISK-F04 — WORKFLOW TRIGGER BREAKAGE ON MIGRATION [HIGH]
+    Current workflow_definitions.trigger_event values may include:
+      "leave.requested", "system.form.submitted", "hr.{slug}.submitted", etc.
+    Any migration that changes how the event name is dispatched WILL break
+    existing workflows in production workspaces that have these triggers.
+    Must audit + migrate workflow_definitions rows before changing dispatch.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — TRUE BUSINESS DOMAIN EVENTS vs GENERIC FORM SUBMISSIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  The test for "is this a true domain event?" is:
+    Does the event have a STABLE, TYPED payload that exists independently of the
+    form that collected the data?  Does business logic depend on specific named
+    fields in the payload?
+
+  TRUE DOMAIN EVENTS (need dedicated routes, NOT generic forms):
+    leave.requested    → Requires leave_requests table, daysRequested computation,
+                         leave balance check, structured leaveType validation.
+                         A form can COLLECT the data; a domain route OWNS the event.
+    approval.created   → Requires approvals table, approver assignment, ticketId FK.
+                         Already handled by approvals.ts — form route should NOT emit this.
+
+  GENERIC FORM SUBMISSIONS (form.submitted is the correct canonical event):
+    IT Equipment Request   → No domain-specific payload needed. "A form was submitted."
+    Employee Feedback      → No domain-specific listener behavior. Generic.
+    HR custom services     → Dynamic, admin-created. No static type possible.
+    Procurement requests   → If no dedicated route exists, generic is correct.
+    Any custom admin form  → By definition, generic.
+
+  CURRENTLY MISCLASSIFIED:
+    Leave Request (seed form) fires "leave.requested" via generic forms.ts
+    → It SHOULD be a generic form.submitted event
+    → OR it should have a dedicated /hr/leave-requests route that emits the real event
+    → The current hybrid (generic form + domain event name) is the worst option:
+      it creates a false impression of semantic richness while delivering untyped garbage
+
+    Expense Reimbursement fires "approval.requested" via generic forms.ts
+    → The approvals module already has its own route (POST /approvals)
+    → This form should not pretend to be an approval — it should submit as form.submitted
+    → OR the form submission should trigger a follow-up approval creation in a saga
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — RECOMMENDED ARCHITECTURE: STRATIFIED HYBRID
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  The correct answer is NOT "Option A" or "Option B" — it is a STRATIFIED model
+  that separates generic form submissions from true domain events.
+
+  ── Layer 1: Generic form submissions (forms.ts) ─────────────────────────────
+
+    Rule: forms.ts ALWAYS emits EVENT_TYPES.FORM_SUBMITTED.
+    No exceptions.  The workflowEvent column becomes a WORKFLOW HINT, not
+    the bus event type.
+
+    appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED, {
+      submissionId,
+      formId,
+      formName,
+      owningModule: form.module,
+      submittedByUserId: req.userId,
+      departmentId: ...,
+      answers: data,
+    });
+
+    The WorkflowEngine receives "form.submitted" and then matches based on:
+      - event.data.owningModule   (replaces module-based event names)
+      - event.data.answers.*      (field-level conditions for specific forms)
+    No WorkflowEngine changes needed if we add `workflowEventHint` to FormSubmittedPayload
+    and the engine falls back to checking it.
+
+    What happens to `workflowEvent` column?
+      It becomes `workflowEventHint` semantically.
+      The bus ignores it.  It is passed in payload.answers or as metadata.
+      The WorkflowEngine can use it as a secondary trigger key.
+
+    CHANGE REQUIRED: Add `workflowEventHint?: string` to FormSubmittedPayload.
+    This is a backward-compatible payload addition — existing listeners unaffected.
+
+  ── Layer 2: True domain events (dedicated routes) ───────────────────────────
+
+    Rule: Domain events are emitted ONLY from their domain routes.
+    They are NEVER emitted from forms.ts.
+
+    leave.requested:  Must come from POST /hr/leave-requests (dedicated route).
+                      This route validates structured data, computes daysRequested,
+                      creates a leave_requests DB record, emits LeaveRequestedPayload.
+                      The Leave Request FORM collects data and calls this route.
+                      It does NOT submit directly to /forms/:id/submissions.
+
+    approval.created: Already correct — comes from POST /approvals (approvals.ts).
+                      The Expense Reimbursement form should submit to POST /approvals
+                      or submit to /forms and trigger a saga that creates an approval.
+                      NOT by firing "approval.requested" with untyped form data.
+
+    Status: These domain routes DO NOT EXIST yet for leave.
+    The seed data's "Leave Request" form currently bypasses this correctly
+    because the structured domain routes haven't been built.
+    CORRECT APPROACH: Do NOT implement leave.requested emission until the
+    dedicated leave_requests route and table exist.
+
+  ── Layer 3: Dynamic HR service events (WorkflowEngine only) ─────────────────
+
+    Rule: HR service events (hr.{slug}.submitted) NEVER enter the typed EventBus.
+    They are WorkflowEngine primitives — dispatched directly to eventDispatcher.
+
+    Rationale:
+      1. They are infinite — cannot be statically typed
+      2. Their payload is always FormSubmittedPayload-shaped anyway
+      3. No specific listener logic is needed per-service
+      4. The WorkflowEngine matches on the event name string — fine for this use case
+
+    Implementation: keep as-is (eventDispatcher.dispatch) OR replace with:
+      appEventBus.emit(EVENT_TYPES.FORM_SUBMITTED, { ..., workflowEventHint: form.workflowEvent })
+      The bridge forwards this to the WorkflowEngine which checks workflowEventHint.
+    This requires minor WorkflowEngine update but eliminates the last legacy dispatch.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — EVENT TAXONOMY PROPOSAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ── TIER 1: Canonical domain events (EventTypeMap, typed payload, dedicated route)
+     Event name              │ Owner route          │ Status
+     ────────────────────────│──────────────────────│──────────────────────
+     ticket.created          │ tickets.ts POST      │ ✅ Active
+     ticket.updated          │ tickets.ts PATCH     │ ✅ Active
+     ticket.status_changed   │ tickets.ts PATCH     │ ✅ Active
+     approval.created        │ approvals.ts POST    │ ✅ Active
+     approval.completed      │ approvals.ts PATCH   │ ✅ Active
+     employee.created        │ admin.ts POST        │ ✅ Active
+     leave.requested         │ [no route yet]       │ ⏳ PLANNED — needs dedicated route
+     leave.approved          │ [no route yet]       │ ⏳ PLANNED — needs dedicated route
+     leave.rejected          │ [no route yet]       │ ⏳ PLANNED — needs dedicated route
+
+  ── TIER 2: Generic form event (EventTypeMap, FormSubmittedPayload, forms.ts route)
+     Event name              │ Owner route          │ Status
+     ────────────────────────│──────────────────────│──────────────────────
+     form.submitted          │ forms.ts POST submit │ ⏳ READY — needs appEventBus.emit()
+
+  ── TIER 3: WorkflowEngine primitives (NOT in EventTypeMap, eventDispatcher only)
+     Pattern                 │ Owner                │ Status
+     ────────────────────────│──────────────────────│──────────────────────
+     hr.{slug}.submitted     │ hr.ts service create │ ✅ Working via dispatcher
+     hr.{slug}.status_changed│ hr.ts service update │ ✅ Working via dispatcher
+     [any custom string]     │ admin-defined        │ ✅ Working via dispatcher
+
+  BOUNDARY RULE:
+    TIER 1 events have dedicated routes that OWN the event.
+    Forms that collect data for a TIER 1 domain must call the domain route, not forms.ts.
+    OR: forms.ts emits TIER 2 (form.submitted) and a saga creates the TIER 1 event separately.
+    NEVER: forms.ts emits a TIER 1 event name with untyped TIER 2 payload.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — FORMS/DOMAIN BOUNDARY PROPOSAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  CORRECT:
+    Leave Request form   → POST /forms/:id/submissions → form.submitted (generic)
+                        OR POST /hr/leave-requests (domain route) → leave.requested
+    IT Equipment form    → POST /forms/:id/submissions → form.submitted ✓ correct
+    Expense form         → POST /forms/:id/submissions → form.submitted ✓ correct
+                           (the approval is a SEPARATE step, triggered downstream by admin)
+    Feedback form        → POST /forms/:id/submissions → form.submitted ✓ correct
+    HR custom services   → POST /forms/:id/submissions → (dispatcher, TIER 3)
+
+  INCORRECT (current state, must be fixed before enabling bus listeners):
+    Leave Request form fires "leave.requested" via forms.ts → CONTRACT VIOLATION
+    Expense form fires "approval.requested" via forms.ts → CONTRACT VIOLATION
+
+  SEED DATA FIX REQUIRED:
+    Leave Request:      workflowEvent → "form.submitted" (until dedicated leave route exists)
+    Expense Reimburse:  workflowEvent → "form.submitted" (remove "approval.requested")
+
+  LONG-TERM GOAL (not in migration scope):
+    Leave Request form REPLACED by dedicated self-service leave request route
+    that validates, computes daysRequested, and emits proper leave.requested.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — SCALABILITY ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Under the Stratified Hybrid:
+    Bus event count:
+      TIER 1: finite, grows only with new first-class domain features (~1/quarter)
+      TIER 2: exactly 1 (form.submitted) — covers ALL generic forms forever
+      TIER 3: unlimited (WorkflowEngine handles, not bus)
+
+    EventTypeMap size:   bounded, grows intentionally with domain features
+    Listener count:      bounded, scales with TIER 1+2 only
+    Registry entries:    bounded (one per domain event) + HR service dynamic entries
+    WorkflowEngine load: unchanged — all events still reach it via bridge
+
+  Event volume under Stratified Hybrid:
+    All generic form submissions → single "form.submitted" listener invocation
+    No per-form listener registration needed
+    One activity log row per submission (clean)
+    One notification if recipient logic is defined
+
+  Comparison:
+    Option A only:        Same scalability, but WorkflowEngine coupling is higher
+    Option B only:        O(n) listener pairs per form type — unscalable
+    Stratified Hybrid:    O(1) for generic forms, O(k) for domain events (k fixed)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — MIGRATION STRATEGY (ORDERED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PHASE 0 — Pre-migration fixes (mandatory, unblock contract violations)
+  ───────────────────────────────────────────────────────────────────────
+  0-A. Fix seed data contract violations:
+       Change workflowEvent for "Leave Request" from "leave.requested" → "hr.form.submitted"
+         (or keep as is but document that it's a workflow hint only, not a bus event)
+       Change workflowEvent for "Expense Reimbursement" from "approval.requested" → "approvals.form.submitted"
+       These stop the silent contract violations when bus listeners activate.
+
+  0-B. Add `workflowEventHint?: string` to FormSubmittedPayload in core-events/src/events.ts.
+       This is a non-breaking addition.
+       Run codegen: pnpm --filter @workspace/api-spec run codegen
+
+  0-C. Audit workflow_definitions in all workspaces:
+       pnpm --filter @workspace/scripts run check-workflow-triggers
+       Identify any rows with trigger_event = "leave.requested" or "approval.requested"
+       that came from forms.  These must be migrated to "form.submitted" with a
+       workflowEventHint condition before the bus migration changes dispatch behavior.
+
+  PHASE 1 — Migrate forms.ts to appEventBus (the actual migration)
+  ──────────────────────────────────────────────────────────────────
+  1-A. In forms.ts POST /forms/:id/submissions (line 505-521):
+       Replace:
+         const eventName = form.workflowEvent ?? `${form.module}.form.submitted`;
+         void eventDispatcher.dispatch({ event: eventName, ... });
+       With:
+         void appEventBus.emit({
+           type:    EVENT_TYPES.FORM_SUBMITTED,
+           module:  "forms",
+           workspace: { workspaceId: req.workspaceId },
+           actor:   { userId: req.userId, role: req.userRole },
+           metadata: { idempotencyKey: `form-submitted-${submission.id}`, workflowEventHint: form.workflowEvent ?? undefined },
+           data: {
+             submissionId:      submission.id,
+             formId:            form.id,
+             formName:          form.name,
+             owningModule:      form.module,
+             submittedByUserId: req.userId,
+             departmentId:      null,
+             answers:           data,
+           },
+         });
+       The bridge automatically forwards to eventDispatcher → WorkflowEngine.
+       WorkflowEngine must be checked: does it match on event.metadata.workflowEventHint?
+       If not, add that matching path to WorkflowEngine before deploying.
+
+  1-B. Remove `import { eventDispatcher }` from forms.ts — it becomes dead.
+
+  1-C. Define notification recipient logic in notifications-bus.ts form.submitted listener.
+       Current implementation is a no-op ("no recipient logic yet, skipping insert").
+       Decide: who gets notified when a form is submitted?
+         Option: workspace admins for the form's owning module?
+         Option: form-level notification config (settings.notifyRoles)?
+         This is a PRODUCT DECISION, not a technical one.
+
+  PHASE 2 — HR services alignment (optional cleanup)
+  ───────────────────────────────────────────────────
+  2-A. HR services currently bypass forms.ts entirely for submission dispatch.
+       After Phase 1, consider routing HR service submissions through forms.ts
+       (if they use form_submissions table) so they also emit form.submitted.
+       The workflowEventHint carries the "hr.{slug}.submitted" for WorkflowEngine matching.
+       Benefit: activity logging and notifications work uniformly.
+
+  PHASE 3 — Domain route (leave lifecycle) — separate sprint, separate design
+  ─────────────────────────────────────────────────────────────────────────────
+  3-A. Create POST /hr/leave-requests dedicated route.
+       Schema: leave_requests table (leaveRequestId PK, employeeUserId, leaveType, startDate, endDate, daysRequested, status, etc.)
+       Route validates data, computes daysRequested, creates DB record, emits leave.requested.
+       The Leave Request FORM is updated to submit to this route instead of /forms/:id/submissions.
+       OR: form submits to /forms/:id/submissions → creates record → saga triggers this route.
+  3-B. Activate leave.requested listeners in activity.ts and notifications-bus.ts.
+  3-C. Update workflow_definitions trigger_event for leave workflows.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — RISKS IF WRONG ARCHITECTURE IS CHOSEN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  IF "pure Option B" (all forms get domain events) is chosen:
+    1. HR custom services are fundamentally incompatible — no TypeScript solution exists.
+    2. Every new admin-created form type needs 6 file changes — O(n) complexity.
+    3. The form builder concept breaks: creating a form no longer means creating
+       a new eventType — it means defining a new domain route.
+    4. Developers will inevitably shortcut by reusing "leave.requested" for
+       multiple things → event naming drift → semantic collapse.
+    5. EventTypeMap grows unbounded → generated client hooks multiply → bundle bloat.
+
+  IF "emit domain events from generic forms.ts" is continued (current state):
+    1. Contract violations accumulate silently — payload shape is wrong for domain listeners.
+    2. When leave.requested listeners activate, they receive unstructured form data
+       (leave_type not leaveType, no daysRequested, no leaveRequestId).
+    3. Activity logs will contain "form_submitted" for what should be "leave_requested" events.
+    4. Notifications will fire incorrectly (wrong fields for leave-specific messages).
+    5. TypeScript gives NO warning — the misuse is invisible until runtime.
+
+  IF "pure Option A without workflowEventHint" is chosen:
+    1. WorkflowEngine trigger_event column becomes meaningless for form-specific triggers.
+    2. All "leave.requested" workflow triggers in existing workspaces break silently.
+    3. Workspace admins lose the ability to trigger workflows on specific form types.
+    4. The workflow builder UI shows "form.submitted" as the only form trigger — useless.
+
+  IF "keep eventDispatcher forever for forms" (do nothing) is chosen:
+    1. activity.ts form.submitted listener never activates — no activity logs for forms.
+    2. notifications-bus.ts listener never activates — no form notifications.
+    3. The architecture permanently has two parallel dispatch paths.
+    4. future developers add code to both paths — maintenance doubles.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — FINAL RECOMMENDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RECOMMENDED: Stratified Hybrid (Section 8)
+  SUMMARY:
+
+    1. forms.ts always emits EVENT_TYPES.FORM_SUBMITTED (generic, typed)
+       with workflowEventHint in metadata for WorkflowEngine compatibility.
+       This solves the migration immediately and cleanly.
+
+    2. workflowEvent column in formDefinitionsTable is REPURPOSED as a hint
+       for the WorkflowEngine — it is NO LONGER the bus event type.
+       Rename it conceptually (not necessarily in DB — text column stays).
+
+    3. Domain events (leave.requested, approval.created) are ONLY emitted
+       from their domain routes.  No form submission ever directly emits them.
+       The seed data "Leave Request" form must stop claiming to emit "leave.requested"
+       — either change its workflowEvent or build the dedicated leave route first.
+
+    4. HR dynamic service events stay on the WorkflowEngine-only path.
+       They pass through the bridge as form.submitted with workflowEventHint.
+       No static typing required or desired for admin-created dynamic events.
+
+    5. Domain routes for leave lifecycle (leave.requested, leave.approved, leave.rejected)
+       are a SEPARATE SPRINT that can be done after forms migration completes.
+       Do not block forms migration on building the leave domain route.
+
+  WHAT TO DO BEFORE STARTING forms MIGRATION:
+
+    MUST DO (blockers):
+    □ Fix seed data: change "leave.requested" and "approval.requested" workflowEvent
+      values to non-domain event strings in seed/forms.ts (no DB migration needed).
+    □ Add `workflowEventHint?: string` to FormSubmittedPayload in core-events.
+    □ Run check-workflow-triggers script and audit any affected workflow_definitions.
+    □ Confirm WorkflowEngine reads metadata.workflowEventHint for trigger matching,
+      or document that it needs this change.
+
+    SHOULD DO (before activating form.submitted notifications listener):
+    □ Define recipient logic for form.submitted notifications
+      (who should be notified? per-module admin? configurable?).
+      The current no-op is acceptable for activity logging but not notifications.
+
+    NICE TO DO (non-blocking):
+    □ Rename workflowEvent → workflowEventHint in schema and codebase
+      (makes the intent clearer to future developers).
+
+  WHAT NOT TO DO:
+    ✗ Do not emit domain-typed events from the generic forms.ts handler.
+    ✗ Do not add per-form-type EventType entries for admin-created forms.
+    ✗ Do not add leave.requested listeners until the dedicated leave route exists.
+    ✗ Do not migrate HR service events to the bus before the WorkflowEngine
+      is updated to match on workflowEventHint.
+    ✗ Do not make forms migration depend on the leave domain route — they are
+      independent tracks.

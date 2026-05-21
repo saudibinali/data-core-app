@@ -1,0 +1,1117 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║    EVENT OBSERVABILITY & DIAGNOSTICS — ARCHITECTURE REVIEW                 ║
+║    Internal Operations Platform · May 2026                                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The system has a well-structured two-layer event architecture (appEventBus +
+eventDispatcher bridge) with good in-code documentation and a clear migration
+path. However, the current observability posture has 14 confirmed blind spots,
+3 structural duplication issues, and 4 broken trace links that would make
+production debugging very difficult.
+
+This review identifies exactly what exists, what is missing, and proposes a
+canonical observability model to implement in ordered phases — without
+introducing external tools, over-engineering, or disrupting current behavior.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§1  CURRENT ARCHITECTURE — COMPLETE MAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1.1  Layers Overview
+──────────────────────────────────────────────────────────────────────────────
+
+  HTTP Request (Express + pino-http)
+       │
+       │  req.id assigned by pino-http (per-request serial ID)
+       │  Logged at request start + completion with method, url, statusCode
+       │
+       ▼
+  Route Handler
+       │
+       │  void appEventBus.emit({ type, module, workspace, actor, data, metadata })
+       │  ↑ metadata.correlationId auto-generated UUID in @workspace/core-events
+       │  ↑ event.id auto-generated UUID per emit
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                    appEventBus (canonical layer)                    │
+  │  createEventBus({ logger: pinoAdapter, verboseEmit: dev-only })     │
+  │  All events tagged: { bus: "appEventBus" } in pino                  │
+  │                                                                     │
+  │  Subscriptions (registered on module load via index.ts):            │
+  │   ├─ activity.ts         — 11 typed subscriptions                   │
+  │   ├─ notifications-bus.ts — 8 typed subscriptions (+ SSE push)      │
+  │   └─ bridge.ts           — subscribeToAll() wildcard                │
+  └──────────┬─────────────────────────────────┬───────────────────────┘
+             │                                 │
+             ▼                                 ▼
+  ┌───────────────────────┐       ┌────────────────────────────────┐
+  │    activity.ts        │       │     bridge.ts (wildcard)       │
+  │  DB: activity_logs    │       │  Translates TypedEvent to      │
+  │  Table schema:        │       │  EventPayload + injects:       │
+  │    id, ticketId,      │       │    _busEventId = event.id      │
+  │    userId, action,    │       │    _busCorrelationId           │
+  │    metadata, createdAt│       │  → eventDispatcher.dispatch()  │
+  │                       │       └────────────┬───────────────────┘
+  │  NO: workspaceId      │                    │
+  │  NO: busEventId       │                    ▼
+  │  NO: correlationId    │       ┌────────────────────────────────┐
+  └───────────────────────┘       │   eventDispatcher (legacy)     │
+                                  │  Writes to workspace_event_logs│
+  ┌───────────────────────┐       │  Runs named listeners:         │
+  │  notifications-bus.ts │       │   ├─ WorkflowEngine ("*")      │
+  │  DB: notifications    │       │   └─ notifications.ts (empty)  │
+  │  + SSE emitToUser()   │       └────────────┬───────────────────┘
+  │                       │                    │
+  │  NO: busEventId       │                    ▼
+  │  NO: correlationId    │       ┌────────────────────────────────┐
+  │  NO: delivery confirm │       │   workspace_event_logs (DB)    │
+  └───────────────────────┘       │  id, workspaceId, eventName,   │
+                                  │  module, triggeredBy, status,  │
+  ┌───────────────────────┐       │  payload (JSONB — contains     │
+  │    SSE (sse.ts)        │       │    _busEventId, _busCorrelId)  │
+  │  In-memory Map:        │       │  result (JSONB), error,        │
+  │  userId → Response[]  │       │  retryCount, createdAt,        │
+  │                       │       │  processedAt                   │
+  │  NO: delivery logging │       └────────────┬───────────────────┘
+  │  NO: retry            │                    │
+  │  NO: connection count │                    ▼
+  │  NO: event history    │       ┌────────────────────────────────┐
+  └───────────────────────┘       │   WorkflowEngine               │
+                                  │  Matches trigger_event to      │
+  ┌───────────────────────┐       │  workflow_definitions          │
+  │  INLINE ROUTES (out   │       │  Creates workflow_executions   │
+  │  of event system):    │       │  Runs executeWorkflow() async  │
+  │  ├─ comments.ts       │       │                                │
+  │  ├─ messages.ts       │       │  triggerEventLogId: ALWAYS NULL│
+  │  └─ calendar.ts       │       │  (FK exists in schema but not  │
+  │  Insert notif directly │       │   populated in engine.ts)      │
+  │  Emit SSE directly     │       └────────────┬───────────────────┘
+  │  NO bus event emitted  │                    │
+  └───────────────────────┘                    ▼
+                                  ┌────────────────────────────────┐
+                                  │   executor.ts                  │
+                                  │  workflow_executions:          │
+                                  │    status: pending→running     │
+                                  │            →completed/failed/  │
+                                  │             waiting_approval   │
+                                  │  workflow_execution_steps:     │
+                                  │    per-step: status, input,    │
+                                  │    output, error, startedAt,   │
+                                  │    completedAt                 │
+                                  │                                │
+                                  │  NO: step timing (duration)    │
+                                  │  NO: link to event or request  │
+                                  └────────────────────────────────┘
+
+1.2  DB Tables — Observability Role
+──────────────────────────────────────────────────────────────────────────────
+
+  Table                      │ Purpose                          │ Observability Role
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  workspace_event_logs       │ Audit trail for every event      │ PRIMARY event store
+                             │ dispatched via eventDispatcher   │ Contains payload JSON
+                             │ (all new code via bridge)        │ Has _busEventId in payload
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  activity_logs              │ Human-readable history           │ SECONDARY — business view
+                             │ of user actions per domain       │ NO workspace col, NO eventId
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  notifications              │ In-app user notifications        │ TERTIARY — delivery record
+                             │ + SSE trigger                    │ NO correlation to event
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  workflow_executions        │ Workflow run record              │ PARTIAL — has step detail
+                             │ per trigger event                │ triggerEventLogId = NULL
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  workflow_execution_steps   │ Per-step trace                   │ GOOD — has startedAt,
+                             │                                  │ completedAt, error, output
+                             │                                  │ NO duration column
+  ───────────────────────────│──────────────────────────────────│────────────────────
+  platform_event_registry    │ Event type catalog (UI schema)   │ METADATA only — no runtime
+  ───────────────────────────│──────────────────────────────────│────────────────────
+
+1.3  Pino Logging Configuration
+──────────────────────────────────────────────────────────────────────────────
+
+  Location     : artifacts/api-server/src/lib/logger.ts
+  Level        : LOG_LEVEL env var (default: "info")
+  Production   : plain JSON to stdout
+  Development  : pino-pretty (colorized, human-readable)
+  Redacted     : req.headers.authorization, req.headers.cookie
+  Transport    : pino-http wired in app.ts
+
+  Structured fields emitted automatically:
+    HTTP layer : req.id (serial), req.method, req.url, res.statusCode
+    Bus layer  : { bus: "appEventBus" } on every bus log line
+    Bridge     : { bridge: "bus→dispatcher", eventType, eventId, correlationId }
+    Dispatcher : { event, workspaceId, logId } on "Event dispatched"
+    Activity   : { listener, leaveRequestId/ticketId/... }
+    Notif-bus  : { listener, recipientId/... }
+    Workflow   : { executionId, workflowKey, event, step, error }
+
+1.4  IdempotencyGuard
+──────────────────────────────────────────────────────────────────────────────
+
+  File    : lib/events/idempotency.ts
+  Method  : in-memory Set<string> keyed on event.id (UUID)
+  TTL     : 5 minutes (auto-eviction via setTimeout)
+  Scope   : Per-file instance — activity.ts and notifications-bus.ts each
+            have their own IdempotencyGuard instance (correct by design)
+  Limit   : In-memory only — does NOT survive server restarts
+
+1.5  Event Lifecycle — Happy Path (full trace today)
+──────────────────────────────────────────────────────────────────────────────
+
+  1. HTTP request arrives → pino-http logs: { req.id, method, url }
+  2. requireAuth middleware: verifies JWT, attaches req.userId, req.workspaceId
+  3. Route handler executes business logic (DB write)
+  4. void appEventBus.emit(event) — returns immediately, background fanout starts
+  5. Bus fanout (async, Promise.allSettled across all subscribers):
+       5a. activity.ts listener:
+            → dedup.isNew(event.id) check
+            → db.insert(activityLogsTable) 
+            → logger.info("[activity] X → activity_logs")
+       5b. notifications-bus.ts listener:
+            → dedup.isNew(event.id) check
+            → db.insert(notificationsTable)
+            → emitToUser(userId, "notification")
+            → logger.info("[notif-bus] X → notification sent")
+       5c. bridge.ts wildcard listener:
+            → logger.info("[bridge] forwarding typed event to legacy dispatcher")
+            → toEventPayload(event) — injects _busEventId, _busCorrelationId
+            → eventDispatcher.dispatch(payload)
+               → db.insert(workspaceEventLogsTable) {status: "processing"}
+               → runs specific + wildcard listeners:
+                   - WorkflowEngine.handleEvent(payload)
+                     → query workflow_definitions for trigger match
+                     → if match: db.insert(workflowExecutionsTable)
+                     → void executeWorkflow(id, steps, ctx)
+                        → per step: db.insert(workflowExecutionStepsTable)
+                        → step execution → db.update(step, execution)
+               → db.update(workspaceEventLogsTable) {status: "completed"}
+               → logger.info("Event dispatched")
+  6. HTTP response already sent before step 5 completes
+
+1.6  Registration Order (from index.ts)
+──────────────────────────────────────────────────────────────────────────────
+
+  On module load (side-effect imports in index.ts):
+  1. notifications.ts  — empty scaffold (no-op)
+  2. registerActivityListeners()    — 11 subscriptions on appEventBus
+  3. registerNotificationBusListeners() — 8 subscriptions on appEventBus
+  4. registerBridge()   — wildcard subscribeToAll on appEventBus
+
+  WorkflowEngine.start() is called from init-sequence.ts at server boot
+  (separate from the listener registration above).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§2  BLIND SPOTS — COMPLETE CATALOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Each blind spot is rated:
+    SEVERITY: Critical / High / Medium / Low
+    TYPE:     Data (missing DB field), Trace (broken link), Log (missing log),
+              Behavior (silent failure)
+
+──────────────────────────────────────────────────────────────────────────────
+BS-01 │ CRITICAL │ Trace │ workflow_executions.triggerEventLogId is always NULL
+──────────────────────────────────────────────────────────────────────────────
+
+  The schema has `triggerEventLogId integer` on workflow_executions — an FK
+  designed to link a workflow run back to the workspace_event_logs row that
+  triggered it. However, engine.ts NEVER populates this field:
+
+    const [execution] = await db.insert(workflowExecutionsTable).values({
+      workspaceId: payload.workspaceId,
+      workflowId: def.id,
+      triggeredBy: payload.triggeredBy ?? null,
+      status: "pending",
+      currentStepIndex: 0,
+      context: { triggerEvent: payload.event, triggerData: payload.data },
+      // ← triggerEventLogId is MISSING from this insert
+    })
+
+  This means: given a workflow_execution, you cannot find which event caused it.
+  Given a workspace_event_log row, you cannot find which workflows it triggered.
+  The cross-table link is completely broken.
+
+  Impact: "Why did this workflow run?" is unanswerable from the DB alone.
+          Admin cannot see: "This event triggered 3 workflows" from the event view.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-02 │ CRITICAL │ Trace │ activity_logs has no workspaceId column
+──────────────────────────────────────────────────────────────────────────────
+
+  Schema:
+    activity_logs(id, ticketId, userId, action, metadata, createdAt)
+
+  No workspaceId. Workspace isolation for activity queries requires a JOIN:
+    - For ticket actions: JOIN tickets ON tickets.workspaceId = ?
+    - For non-ticket actions (leave, employee): JOIN users ON users.workspaceId = ?
+
+  Non-ticket activity rows (leave.*, employee.created, form.submitted) have
+  ticketId = NULL, so workspace isolation relies entirely on userId → users.workspaceId
+  join, which breaks if a user changes workspace.
+
+  Impact: Workspace-scoped activity feed queries are slow, complex, and fragile.
+          Admin diagnostics cannot efficiently "show all workspace activity".
+
+──────────────────────────────────────────────────────────────────────────────
+BS-03 │ CRITICAL │ Data │ No busEventId link from activity_logs or notifications
+──────────────────────────────────────────────────────────────────────────────
+
+  When a bus event fires, it creates:
+    - 1 activity_log row (via activity.ts)
+    - 1+ notification rows (via notifications-bus.ts)
+    - 1 workspace_event_log row (via bridge → dispatcher)
+
+  But NONE of these DB rows contain the bus event.id (UUID).
+
+  The only place event.id appears is:
+    - Pino log: { bus: "appEventBus", eventId: "<uuid>" }
+    - workspace_event_logs.payload._busEventId
+
+  So there is NO way to query: "Show me the activity_log entry created
+  by bus event abc-123." Cross-table correlation is log-only, not queryable.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-04 │ High │ Trace │ correlationId not propagated beyond pino logs
+──────────────────────────────────────────────────────────────────────────────
+
+  appEventBus generates event.metadata.correlationId (UUID) per emit.
+  The bridge injects it as _busCorrelationId into workspace_event_logs.payload.
+  It is logged by the bridge: { correlationId: "..." }.
+
+  But it is NOT stored in:
+    - activity_logs  (no column)
+    - notifications  (no column)
+    - workflow_executions  (no column)
+    - workflow_execution_steps  (no column)
+
+  So correlationId is useful for grepping pino logs, but cannot be used
+  to JOIN across DB tables to reconstruct a full event trace.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-05 │ High │ Trace │ req.id not linked to event emission
+──────────────────────────────────────────────────────────────────────────────
+
+  pino-http assigns req.id (a serial number) to every HTTP request.
+  This appears in pino logs for the request lifecycle.
+
+  However, when routes call appEventBus.emit(), they do NOT pass req.id
+  into event.metadata. Therefore:
+    - Given a pino request log line (req.id=42), you CANNOT find which
+      events it emitted.
+    - Given an event in workspace_event_logs, you CANNOT find the
+      HTTP request that caused it.
+
+  The HTTP ↔ Event boundary is completely opaque in both pino and the DB.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-06 │ High │ Behavior │ Inline notification writers invisible to event system
+──────────────────────────────────────────────────────────────────────────────
+
+  Three route files insert into notificationsTable directly, without emitting
+  any bus event. They also call emitToUser/emitToUsers directly:
+
+    comments.ts   — POST /tickets/:id/comments → "comment_added" notification
+    messages.ts   — message notifications to recipients + SSE
+    calendar.ts   — meeting invitation notifications + SSE
+
+  These notifications:
+    - Have NO workspace_event_log entry
+    - Have NO activity_log entry
+    - Produce NO bus event (no correlationId, no event.id)
+    - Are completely invisible to any observability layer
+    - Cannot be queried by the events admin endpoint (GET /events)
+    - Cannot trigger workflows (no eventDispatcher call)
+
+  Impact: A significant portion of the notification surface is dark.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-07 │ High │ Behavior │ SSE delivery is completely silent
+──────────────────────────────────────────────────────────────────────────────
+
+  sse.ts:
+    - Silent no-op when user is offline (no log, no retry)
+    - No count of active connections (Map exists but not exposed)
+    - No per-event delivery confirmation
+    - write() failures are swallowed: try { res.write(payload) } catch { }
+    - No SSE push payload (only event type, frontend must refetch)
+
+  There is no way to answer:
+    - "Did this notification reach the user in real-time?"
+    - "How many users are connected right now?"
+    - "Did the SSE write fail silently?"
+
+──────────────────────────────────────────────────────────────────────────────
+BS-08 │ High │ Behavior │ form.submitted: listener registered but no emitter
+──────────────────────────────────────────────────────────────────────────────
+
+  Both activity.ts and notifications-bus.ts have active subscriptions for
+  EVENT_TYPES.FORM_SUBMITTED.
+
+  However, no route currently emits FORM_SUBMITTED to appEventBus.
+  The forms.ts route was listed as "MIGRATED" in index.ts, but the
+  notifications-bus.ts listener says "⏳ READY — no route currently emits".
+
+  This means:
+    - The listener subscription overhead is paid for zero events
+    - If forms.ts actually fires FORM_SUBMITTED, the notifications-bus.ts
+      handler is a no-op (no recipient logic defined)
+    - This creates a false sense of coverage in the migration status table
+
+──────────────────────────────────────────────────────────────────────────────
+BS-09 │ Medium │ Log │ Listener execution timing not recorded anywhere
+──────────────────────────────────────────────────────────────────────────────
+
+  When an event fires, listeners run via Promise.allSettled().
+  We know which listeners ran (from their success/error log lines) but:
+    - No timestamp of when each listener started
+    - No duration of how long each listener took
+    - No way to detect a slow listener that degrades the background fanout
+    - workspace_event_logs.processedAt records when eventDispatcher finished,
+      but this includes ALL listeners, not individual ones
+
+──────────────────────────────────────────────────────────────────────────────
+BS-10 │ Medium │ Data │ Listener identity not recorded in workspace_event_logs
+──────────────────────────────────────────────────────────────────────────────
+
+  dispatcher.ts stores errors as:
+    error: errors.join("; ")
+    result: { listeners: allListeners.length, results }
+
+  But allListeners is an anonymous function array — there is no way to tell
+  WHICH listener failed. The error message might be enough in some cases,
+  but for "WorkflowEngine OR notifications.ts failed?" there is no answer.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-11 │ Medium │ Behavior │ IdempotencyGuard: cross-restart dedup gap
+──────────────────────────────────────────────────────────────────────────────
+
+  The in-memory IdempotencyGuard does not survive server restarts.
+  If the server restarts immediately after an event is emitted (before
+  listeners complete), the same event.id could be processed again on restart
+  — creating duplicate activity_logs and notifications.
+
+  This is documented as a TODO but represents a real failure mode in
+  rapid-restart scenarios (deployments, crashes).
+
+──────────────────────────────────────────────────────────────────────────────
+BS-12 │ Medium │ Log │ Async workflow execution failures are barely surfaced
+──────────────────────────────────────────────────────────────────────────────
+
+  engine.ts runs workflows asynchronously:
+    void executeWorkflow(execution.id, steps, ctx).catch((err) => {
+      logger.error({ err, executionId, workflowKey }, "Unhandled workflow execution error");
+    });
+
+  This .catch() only fires if executeWorkflow() throws at the top level.
+  But executor.ts catches all per-step errors and returns { success: false }
+  — it NEVER throws. So the .catch() in engine.ts is currently unreachable.
+
+  Step failures update workflow_executions.status = "failed" in the DB,
+  but the only pino log is:
+    logger.warn({ executionId, step, error }, "Workflow step failed — execution halted")
+
+  There is no ALERT-level log or structured error aggregation for failed
+  workflow executions. Monitoring "how many workflows failed this week" requires
+  a DB query, not a log search.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-13 │ Medium │ Data │ workflow_execution_steps has no duration column
+──────────────────────────────────────────────────────────────────────────────
+
+  workflowExecutionStepsTable has startedAt and completedAt timestamps.
+  Duration must be computed: completedAt - startedAt.
+  No indexed duration column means slow-step queries require full-table scans.
+  No alerting threshold is possible without a runtime duration column.
+
+──────────────────────────────────────────────────────────────────────────────
+BS-14 │ Low │ Log │ verboseEmit disabled in production — debug blackout
+──────────────────────────────────────────────────────────────────────────────
+
+  appEventBus is created with verboseEmit: process.env.NODE_ENV !== "production"
+  In production: no debug log line per emit. Combined with LOG_LEVEL=info as
+  default, the bridge INFO log is the first visible trace of an event.
+  If the bridge fails silently (try/catch), the event leaves no production log.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§3  DUPLICATION ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For a single event (e.g. leave.approved), the following log/data writes occur:
+
+  Pino log #1  — appEventBus verboseEmit (debug, dev-only):
+    "[bus] emitting event: leave.approved"
+
+  Pino log #2  — bridge entry (info, always):
+    "[bridge] forwarding typed event to legacy dispatcher"
+    { bridge: "bus→dispatcher", eventType, eventId, correlationId, workspaceId }
+
+  Pino log #3  — activity.ts success (info, always):
+    "[activity] leave.approved → activity_logs"
+
+  Pino log #4  — notifications-bus.ts success (info, always):
+    "[notif-bus] leave.approved → notification sent to employee"
+
+  Pino log #5  — bridge success (debug, always):
+    "[bridge] legacy dispatch completed"
+
+  Pino log #6  — eventDispatcher "Event dispatched" (info, always):
+    "Event dispatched" { event, workspaceId, logId }
+
+  DB write #1  — activity_logs row (via activity.ts)
+  DB write #2  — notifications row (via notifications-bus.ts)
+  DB write #3  — workspace_event_logs row (via eventDispatcher via bridge)
+
+  TOTAL: 5-6 pino log lines + 3 DB writes for ONE business event.
+
+  DUP-01: Bridge info log + eventDispatcher info log represent the same event.
+          Both say "I processed this event" with different field names.
+          Recommendation: bridge log REPLACES dispatcher log (not both).
+
+  DUP-02: workspace_event_logs.payload._busEventId DUPLICATES the eventId
+          in pino bridge log. This is intentional (cross-system linking)
+          but the duplication should be understood when querying both.
+
+  DUP-03: notifications.ts (empty legacy scaffold) is still imported in
+          index.ts. This is dead code with no functional consequence but
+          adds startup noise and confusion for future developers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§4  CORRELATION MODEL — CURRENT STATE vs. IDEAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1  Current correlation capabilities
+──────────────────────────────────────────────────────────────────────────────
+
+  Given a workspace_event_logs row (id=X):
+    → payload._busEventId = event.id  ✅ (links to pino logs)
+    → payload._busCorrelationId       ✅ (links to bridge pino log)
+    → triggeredBy = userId            ✅
+    → workspaceId                     ✅
+    → Can find workflows?             ❌ (triggerEventLogId is always NULL)
+    → Can find activity_log?          ❌ (no busEventId in activity_logs)
+    → Can find notifications?         ❌ (no busEventId in notifications)
+
+  Given an activity_log row (id=Y):
+    → userId                          ✅
+    → action, metadata                ✅
+    → Can find workspace?             ⚠️  (requires JOIN via userId)
+    → Can find the bus event?         ❌ (no busEventId column)
+    → Can find workflow triggered?    ❌
+    → Can find notification sent?     ❌
+
+  Given a workflow_execution (id=Z):
+    → workflowId, workspaceId         ✅
+    → status, context (trigger data)  ✅
+    → triggeredBy (userId)            ✅
+    → Can find triggering event log?  ❌ (triggerEventLogId = NULL)
+    → Can find activity_log?          ❌
+    → Can find notification?          ❌
+
+  Given a pino log line with eventId=<UUID>:
+    → Can find workspace_event_log?   ✅ (payload._busEventId = uuid)
+    → Can find activity_log?          ❌ (no uuid column)
+    → Can find notification?          ❌ (no uuid column)
+    → Can find workflow execution?    ❌ (no uuid in workflow_executions)
+
+4.2  Ideal correlation model
+──────────────────────────────────────────────────────────────────────────────
+
+  A complete trace should allow:
+
+  HTTP req.id  ──▶  event.id (correlationId)  ──▶  workspace_event_log.id
+                         │                              │
+                         ├──▶  activity_log.busEventId  │
+                         │                              ├──▶  workflow_execution.triggerEventLogId
+                         ├──▶  notification.busEventId  │
+                         │                              └──▶  workflow_execution_steps (via execution)
+                         └──▶  causationId (for child events)
+
+4.3  Missing IDs — summary
+──────────────────────────────────────────────────────────────────────────────
+
+  Table                      │ Missing field(s)
+  ───────────────────────────│────────────────────────────────────────────────
+  activity_logs              │ workspaceId, busEventId, correlationId
+  notifications              │ busEventId, correlationId
+  workflow_executions        │ triggerEventLogId (schema exists, never written)
+  workspace_event_logs       │ (complete — _busEventId in payload is queryable)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§5  CANONICAL OBSERVABILITY MODEL — PROPOSED DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  Four Observability Layers (ownership boundaries)
+──────────────────────────────────────────────────────────────────────────────
+
+  Layer 1: STRUCTURED RUNTIME LOGS (pino — ephemeral)
+  ─────────────────────────────────────────────────────
+  Owner     : pino logger
+  Storage   : stdout / log aggregator (Loki, Papertrail, etc.) — NOT DB
+  What goes here:
+    - HTTP request/response (already done via pino-http)
+    - Event emission: type, eventId, correlationId, workspaceId, actor
+    - Bridge forward/failure: eventId, correlationId
+    - Listener start/success/failure: listener name, duration_ms, eventId
+    - Workflow start/step/failure: executionId, stepName, duration_ms
+    - SSE push: userId, event type, connectionCount, success/fail
+
+  What does NOT go here:
+    - Business payload data (use DB audit trail instead)
+    - Notification content (use notifications table)
+    - Event history (use workspace_event_logs)
+
+  Layer 2: DB AUDIT TRAIL (workspace_event_logs — permanent)
+  ─────────────────────────────────────────────────────────────
+  Owner     : eventDispatcher (via bridge)
+  Storage   : PostgreSQL
+  What goes here:
+    - Every dispatched event with full payload
+    - Listener results (completion status, error summary)
+    - Status: processing → completed/failed
+    - Cross-links: _busEventId, _busCorrelationId (already in payload)
+
+  What does NOT go here:
+    - Per-listener timing (pino logs)
+    - Workflow step details (workflow_execution_steps)
+    - User-readable activity history (activity_logs)
+
+  Layer 3: BUSINESS ACTIVITY HISTORY (activity_logs — permanent)
+  ────────────────────────────────────────────────────────────────
+  Owner     : activity.ts listener
+  Storage   : PostgreSQL
+  What goes here:
+    - Human-readable actions per user per domain (already done)
+    - workspaceId column (MISSING — needs to be added)
+    - busEventId column (MISSING — needed for cross-table trace)
+
+  What does NOT go here:
+    - Technical event details (use workspace_event_logs)
+    - Notification content (use notifications table)
+
+  Layer 4: EPHEMERAL RUNTIME TELEMETRY (in-memory — transient)
+  ──────────────────────────────────────────────────────────────
+  Owner     : SSE connections, IdempotencyGuard
+  Storage   : process memory — lost on restart
+  What goes here:
+    - Active SSE connection registry (current Map, ok)
+    - In-memory dedup seen set (current, ok)
+    - Listener execution latency accumulator (future)
+
+  What does NOT go here:
+    - Anything that needs to survive a server restart
+    - Anything needed for admin diagnostics (use DB or logs)
+
+5.2  Event Trace Lifecycle — Canonical Model
+──────────────────────────────────────────────────────────────────────────────
+
+  Every event should carry three correlation identifiers:
+
+  ① requestId     = req.id from pino-http (links event to HTTP request)
+                    Source: middleware injects into AppEventBus metadata
+                    Stored: workspace_event_logs.payload._requestId
+                            pino log field { requestId }
+
+  ② eventId       = event.id (UUID, already generated by appEventBus)
+                    Source: auto-generated by createEventBus() per emit
+                    Stored: workspace_event_logs.payload._busEventId ✅ (already done)
+                            activity_logs.busEventId ← ADD THIS
+                            notifications.busEventId ← ADD THIS
+                            workflow_executions.busEventId ← ADD THIS (replaces/fills triggerEventLogId)
+
+  ③ correlationId = event.metadata.correlationId (UUID)
+                    Source: auto-generated by createEventBus()
+                    Current use: bridge pino log only
+                    Future use: link child events emitted by workflow steps
+                                back to the parent event that triggered them
+
+  ④ causationId   (FUTURE ONLY — for child events)
+                    = parent event.id when a workflow step or listener emits
+                      a new event. Creates an event causation chain.
+                    Not needed now (no workflow steps emit events today).
+
+5.3  Listener Execution Model — Proposed
+──────────────────────────────────────────────────────────────────────────────
+
+  Each listener in activity.ts and notifications-bus.ts should:
+
+  a) Record start timestamp before business logic
+  b) Record end timestamp after DB insert
+  c) Compute duration_ms = end - start
+  d) Log structured: { listener: "activity.leave.approved", eventId, duration_ms, success: true/false }
+  e) On failure: include error.message, error.stack in log
+
+  The eventDispatcher layer (workspace_event_logs) should store per-listener results
+  with named listener identities, not just anonymous function results.
+  Current: result: { listeners: 3, results: [null, null, null] }
+  Proposed: result: { listeners: [
+    { name: "activity.ts", duration_ms: 4, success: true },
+    { name: "notifications-bus.ts", duration_ms: 12, success: true },
+    { name: "bridge.ts", duration_ms: 18, success: true },
+  ]}
+
+5.4  Workflow Traceability Model
+──────────────────────────────────────────────────────────────────────────────
+
+  The following FK must be populated (schema already exists):
+
+    workflow_executions.triggerEventLogId → workspace_event_logs.id
+
+  engine.ts receives payload (from eventDispatcher), which includes the log.id
+  (passed as the second argument to EventListener: dispatch() passes log.id).
+  Wait — the WorkflowEngine registers on eventDispatcher.on("*", handler)
+  but the handler receives (payload: EventPayload) — log.id is NOT passed.
+
+  The log.id IS passed to specific listeners (EventListener signature:
+    (payload: EventPayload, logId: number) => Promise<void>)
+  But the WorkflowEngine registers via .on("*", async (payload) => { ... })
+  using the generic handler type, NOT EventListener — so it does NOT receive logId.
+
+  Fix: Change WorkflowEngine.handleEvent() to accept an optional logId,
+  or retrieve the event log ID from the payload._busEventId cross-reference.
+  See §8 (implementation phases) for the recommended approach.
+
+5.5  Side-Effect Visibility Model
+──────────────────────────────────────────────────────────────────────────────
+
+  For each dispatched event, the following side effects should be traceable:
+
+  Side Effect          │ Current Visibility │ Proposed
+  ─────────────────────│────────────────────│───────────────────────────────
+  activity_log created │ pino log only      │ pino log + busEventId column
+  notification created │ pino log only      │ pino log + busEventId column
+  SSE push attempted   │ silent             │ pino debug log + count
+  workflow triggered   │ pino log           │ pino + triggerEventLogId filled
+  workflow step run    │ DB row             │ DB row + duration_ms column
+  inline notif (cmts)  │ none               │ should emit bus event in Phase 3
+
+5.6  Diagnostics Boundaries
+──────────────────────────────────────────────────────────────────────────────
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                    What Admin Diagnostics Can See                   │
+  ├──────────────┬──────────────────────────────────────────────────────┤
+  │ NOW          │ GET /api/events → paginated workspace_event_logs     │
+  │              │   with status, payload, error, module, eventName     │
+  │              │   filtering by module, status, eventName             │
+  │              │   Missing: workflow link, activity link, timing      │
+  ├──────────────┼──────────────────────────────────────────────────────┤
+  │ PHASE 1      │ GET /api/events/:id → enriched event detail          │
+  │ (minimal)    │   + linked workflow_executions (after BS-01 fix)     │
+  │              │   + linked activity_logs (after BS-02,03 fix)        │
+  │              │   + listener result detail (named, with timing)      │
+  ├──────────────┼──────────────────────────────────────────────────────┤
+  │ PHASE 2      │ GET /api/workflows/executions → filterable list      │
+  │ (diagnostics)│   with status, workflowId, triggeredBy, duration    │
+  │              │ GET /api/workflows/executions/:id → step timeline    │
+  │              │   with per-step timing, input/output, error          │
+  ├──────────────┼──────────────────────────────────────────────────────┤
+  │ PHASE 3      │ SSE connection metrics (active users, delivery rates)│
+  │ (tracing)    │ Notification delivery trace (sent, opened, SSE yes/no│
+  │              │ Event causation tree (parent → child events)         │
+  │              │ Inline route event emission (comments, messages)     │
+  └──────────────┴──────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§6  STORAGE STRATEGY — WHAT GOES WHERE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ┌────────────────────────────────┬──────────────┬──────────────────────────┐
+  │ Data Type                      │ Storage      │ Rationale                │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Event audit trail (full JSONB) │ DB           │ queryable, permanent,    │
+  │ workspace_event_logs           │              │ workspace-scoped          │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Business activity timeline     │ DB           │ human-readable history,  │
+  │ activity_logs                  │              │ dashboard feed            │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Notification delivery records  │ DB           │ user inbox, read-state   │
+  │ notifications                  │              │ tracking                  │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Workflow execution + steps     │ DB           │ step-level debug,        │
+  │ workflow_executions / steps    │              │ replay planning           │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ HTTP request log               │ Pino (stdout)│ ephemeral, high-volume,  │
+  │                                │              │ log aggregator handles   │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Listener timing / durations    │ Pino (stdout)│ ephemeral — aggregate    │
+  │                                │              │ in log tool, not DB      │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ SSE delivery success/fail      │ Pino (stdout)│ ephemeral, high-freq     │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ IdempotencyGuard seen set      │ In-memory    │ transient by design;     │
+  │                                │              │ future: add DB column    │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ SSE active connection registry │ In-memory    │ transient by design      │
+  ├────────────────────────────────┼──────────────┼──────────────────────────┤
+  │ Platform stats snapshots       │ NOT needed   │ compute on-demand from   │
+  │ (counters, aggregates)         │ as separate  │ existing DB tables;      │
+  │                                │ store        │ no separate metrics DB   │
+  └────────────────────────────────┴──────────────┴──────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§7  ADMIN DIAGNOSTICS UI — FUTURE DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  Event Timeline View
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: workspace_event_logs (already queryable via GET /api/events)
+  Columns    : timestamp, eventName, module, actor, status, payload preview
+  Filters    : module, eventName, status (failed/completed), date range, actor
+  Detail view: full JSONB payload, listener results (named), error message
+  New feature: link to triggered workflow executions (requires BS-01 fix)
+  New feature: link to activity_log (requires BS-03 fix)
+
+7.2  Failed Listeners View
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: workspace_event_logs WHERE status = 'failed' OR error IS NOT NULL
+  Columns    : timestamp, eventName, error summary, retryCount
+  New feature: named listener in error message (requires BS-10 fix)
+  Action     : Admin can inspect full error + payload, trigger manual retry
+
+7.3  Workflow Execution Traces
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: workflow_executions + workflow_execution_steps
+  List view  : executions with status, workflowName, triggerEvent, duration, actor
+  Detail view: step timeline with per-step: type, name, status, duration, input/output, error
+  New feature: link to triggering workspace_event_log (requires BS-01 fix)
+  Stuck detection: executions in "waiting_approval" or "running" for > N minutes
+
+7.4  Notification Delivery View (per user or per event)
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: notifications table
+  Per event  : show all notifications created by event X (requires busEventId)
+  Per user   : notification history, read/unread, delivery type (SSE vs. polling)
+  Gap today  : no way to see if SSE was active at delivery time
+
+7.5  Actor Timeline
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: activity_logs + workspace_event_logs (by triggeredBy)
+  Per user   : chronological list of actions, with domain context
+  Gap today  : activity_logs has no workspaceId — requires JOIN
+
+7.6  Workspace Event Inspection (super_admin)
+──────────────────────────────────────────────────────────────────────────────
+
+  Data source: workspace_event_logs filtered by workspaceId
+  View       : all events for a given workspace (already partially available via GET /api/events)
+  Future     : cross-workspace event comparison for super_admin
+
+7.7  Event Search / Filtering
+──────────────────────────────────────────────────────────────────────────────
+
+  Already supported by GET /api/events (module, status, eventName)
+  Needs to add: date range, actor (triggeredBy), full-text search in payload
+  Pagination already implemented (page, limit, total)
+
+7.8  Event Replay Visibility (design note — not implementation)
+──────────────────────────────────────────────────────────────────────────────
+
+  The system has no event replay mechanism today. workspace_event_logs stores
+  the full payload, making replay theoretically possible. The design for replay
+  must address:
+    - Idempotency of re-fired events (IdempotencyGuard uses event.id;
+      a replayed event would need a new event.id to not be deduped)
+    - Side-effect isolation (should replay re-create notifications? activity logs?)
+    - Scope: replay for specific failed listeners only vs. full event replay
+    - Admin UI: per-event "replay" button → triggers admin-only API
+  This is Phase 4+ work and should not be designed in detail now.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§8  IMPLEMENTATION PHASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 0 — Pre-requisites (no DB schema changes needed)
+──────────────────────────────────────────────────────────────────────────────
+
+  0-A: Fix triggerEventLogId not being populated (BS-01)
+       ─────────────────────────────────────────────────
+       File: engine.ts
+       Change: EventDispatcher.dispatch() already returns the log.id.
+               The WorkflowEngine registers on("*") — NOT as an EventListener
+               typed function, so it currently does NOT receive logId.
+               Fix: Either refactor engine to register as EventListener (receives logId),
+               or retrieve the eventLogId from workspace_event_logs using the
+               _busEventId cross-reference in payload.data.
+               Simplest: change the wildcard handler signature in dispatcher.on()
+               to pass logId to all handlers.
+
+  0-B: Remove dead notifications.ts import (DUP-03)
+       ─────────────────────────────────────────────
+       File: lib/events/index.ts
+       Remove: import "./listeners/notifications";
+       Delete: listeners/notifications.ts
+       Note: Safe at any time — no active listeners in that file.
+
+  0-C: Propagate req.id to event emission (BS-05)
+       ─────────────────────────────────────────────
+       Pattern: In route handlers, pass req.id into event.metadata:
+         void appEventBus.emit({
+           ...
+           metadata: { requestId: req.id }
+         });
+       Store in: workspace_event_logs.payload._requestId (via bridge)
+
+Phase 1 — Minimal Observability (highest ROI, low risk)
+──────────────────────────────────────────────────────────────────────────────
+
+  1-A: Add workspaceId to activity_logs (BS-02)
+       ─────────────────────────────────────────
+       Schema change: ALTER TABLE activity_logs ADD COLUMN workspace_id integer
+       Populate: in activity.ts listeners, extract from event.workspace.workspaceId
+       Benefit: workspace-scoped activity queries, cross-workspace isolation
+
+  1-B: Add busEventId to activity_logs (BS-03 partial)
+       ─────────────────────────────────────────────────
+       Schema change: ALTER TABLE activity_logs ADD COLUMN bus_event_id uuid
+       Populate: in activity.ts listeners, use event.id
+       Benefit: given a workspace_event_log row, find the activity_log it created
+
+  1-C: Add busEventId to notifications (BS-03 partial)
+       ─────────────────────────────────────────────────
+       Schema change: ALTER TABLE notifications ADD COLUMN bus_event_id uuid
+       Populate: in notifications-bus.ts listeners, use event.id
+       Benefit: given an event, find all notifications it generated
+
+  1-D: Add listener timing to pino logs (BS-09)
+       ─────────────────────────────────────────
+       Pattern in each listener:
+         const t0 = Date.now();
+         // ... business logic ...
+         logger.info({ listener, eventId: event.id, duration_ms: Date.now()-t0 }, "...");
+       No schema changes needed — structured pino log only.
+
+  1-E: Name listeners in workspace_event_logs result (BS-10)
+       ─────────────────────────────────────────────────────
+       Requires: EventListener functions to have a .listenerName property
+       OR: dispatcher tracks listeners by name (Map<string, EventListener[]>)
+       Result: workspace_event_logs.result = { listeners: [{name, success, durationMs}] }
+
+Phase 2 — Diagnostics
+──────────────────────────────────────────────────────────────────────────────
+
+  2-A: Admin API: GET /api/events/:id — enriched event detail
+       Joins: workspace_event_logs + activity_logs (by busEventId)
+               + workflow_executions (by triggerEventLogId) after Phase 0-A
+               + notifications (by busEventId)
+
+  2-B: Admin API: GET /api/workflows/executions — filterable workflow list
+       Expose: workflow_executions with joins to workflow_definitions
+       Filters: status, workflowId, dateRange, triggeredBy
+
+  2-C: Admin API: GET /api/workflows/executions/:id — full step timeline
+       Expose: workflow_executions + workflow_execution_steps
+       Include: per-step duration (computed from startedAt/completedAt)
+       Include: link to triggering event (triggerEventLogId after Phase 0-A)
+
+  2-D: SSE connection metrics — expose connection count via health endpoint
+       File: sse.ts — add getConnectionCount(workspaceId?) helper
+       Expose: GET /api/health/sse-connections (super_admin only)
+
+  2-E: Structured SSE delivery pino log (BS-07)
+       File: sse.ts — log { userId, event, connectionCount, wrote: true/false }
+       Level: debug (high volume — not info)
+
+Phase 3 — Tracing
+──────────────────────────────────────────────────────────────────────────────
+
+  3-A: correlationId storage in DB (BS-04)
+       Add correlationId column to workflow_executions and activity_logs
+       so correlation-based queries are possible without log search.
+
+  3-B: Emit bus events from inline notification routes (BS-06)
+       comments.ts → emit COMMENT_ADDED to appEventBus
+       messages.ts → emit MESSAGE_SENT
+       calendar.ts → emit MEETING_INVITATION_SENT
+       Move inline DB inserts to listeners in notifications-bus.ts.
+       This gives comments/messages/calendar full event observability.
+
+  3-C: Persistent IdempotencyGuard (BS-11)
+       Add processed_bus_event_id column to activity_logs and notifications.
+       On startup, load recent event IDs from DB into in-memory guard.
+       This closes the cross-restart dedup gap.
+
+  3-D: Duration column in workflow_execution_steps (BS-13)
+       Add duration_ms integer computed on step completion.
+       ALTER TABLE workflow_execution_steps ADD COLUMN duration_ms integer;
+       Populate in executor.ts.
+
+Phase 4 — Operational Tooling
+──────────────────────────────────────────────────────────────────────────────
+
+  4-A: Failed workflow alerts
+       Dead letter queue pattern (in-DB): when a workflow execution fails,
+       insert into a workflow_execution_alerts table for admin review.
+       Alert email/notification to workspace admin.
+
+  4-B: Stuck workflow detection
+       Cron job (or startup check): query workflow_executions WHERE
+       status IN ('running', 'waiting_approval') AND startedAt < NOW() - INTERVAL '1 hour'.
+       Surface these in admin diagnostics.
+
+  4-C: Event search with payload full-text
+       Add GIN index to workspace_event_logs.payload for jsonb_path_ops.
+       Enable filtering by payload content (e.g., "all events involving ticketId=42").
+
+  4-D: Notification delivery report
+       Aggregate: notifications grouped by type, workspace, time period.
+       SSE delivery rate estimation: SSE connection count at notification time
+       (requires Phase 2-D) vs. notification created count.
+
+Phase 5 — Advanced Telemetry (only if scale demands it)
+──────────────────────────────────────────────────────────────────────────────
+
+  5-A: Event replay mechanism
+       Admin endpoint: POST /api/events/:id/replay
+       Creates new event with new event.id, same payload.
+       Respects idempotency (new UUID bypasses guard).
+
+  5-B: causationId for workflow-emitted events
+       If workflow steps ever emit domain events, add causationId = parent event.id
+       to create a traceable event causation chain.
+
+  5-C: OpenTelemetry spans (if external monitoring is added)
+       Only add OTel spans if a collector (Grafana, Datadog) is available.
+       Do NOT add OTel without a receiver — it adds overhead with no benefit.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§9  RISKS IF OBSERVABILITY IS BUILT INCORRECTLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK-01: Logging chaos from per-listener verbosity
+  ─────────────────────────────────────────────────────
+  If listener timing and tracing are added naïvely, each event generates 8-12
+  pino log lines. With high event volume this becomes unreadable signal-in-noise.
+  Mitigation: listener timing logs MUST be at debug level. Only errors and
+  key milestones at info level.
+
+  RISK-02: DB write amplification
+  ─────────────────────────────────────────────────────
+  Every event already writes to 3 DB tables. Adding busEventId to activity_logs
+  and notifications is safe. But adding a FOURTH table (e.g., a separate
+  "listener_execution_log" table) for every listener run would create
+  11 DB rows per event (one per listener) — performance risk at scale.
+  Mitigation: store listener results as JSONB in workspace_event_logs.result,
+  NOT as separate rows.
+
+  RISK-03: Conflating audit trail with operational monitoring
+  ─────────────────────────────────────────────────────────────
+  workspace_event_logs is the audit trail. Do NOT add real-time metrics or
+  aggregated counters to it. Keep it append-only event log. Aggregations should
+  be computed at query time or cached separately.
+
+  RISK-04: Breaking the idempotency model with replay
+  ─────────────────────────────────────────────────────
+  Replaying an event with the original event.id will be silently swallowed
+  by IdempotencyGuard. Replaying with a new event.id will duplicate the
+  audit trail. Both are correctness risks.
+  Mitigation: design replay with explicit "replay_of = original_event_id"
+  field and exclude replayed events from dedup guard.
+
+  RISK-05: Shared IdempotencyGuard across listeners
+  ─────────────────────────────────────────────────────
+  The current design correctly uses separate IdempotencyGuard instances per
+  listener file. If a future developer consolidates these into a single
+  global guard (to save memory), it will silently cause activity.ts to suppress
+  events that notifications-bus.ts has not yet processed.
+  Mitigation: document this invariant prominently. Add a startup assertion
+  that verifies each listener file has its own instance.
+
+  RISK-06: Inline route notification writers out of sync with bus listeners
+  ─────────────────────────────────────────────────────────────────────────
+  When inline routes (comments.ts, messages.ts, calendar.ts) are eventually
+  migrated to bus events, the transition must be atomic: add emit AND remove
+  inline insert in the SAME commit. If either is missed, notifications are
+  either lost or duplicated. This is the same risk that was managed carefully
+  in T06-A, T06-B, T07 — the process works, just must be followed.
+
+  RISK-07: triggerEventLogId FK without population creates misleading schema
+  ─────────────────────────────────────────────────────────────────────────────
+  The schema has the FK column but it is never written. This misleads developers
+  into thinking the link exists. Until BS-01 is fixed, add a code comment
+  confirming this field is intentionally not populated yet.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§10  FINAL RECOMMENDATIONS BEFORE IMPLEMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Priority order before writing any observability code:
+
+  ① Fix BS-01 first (triggerEventLogId never populated).
+    This is a schema feature that already exists but is broken. Fixing it unlocks
+    the most valuable diagnostic capability — "what workflow did this event trigger?"
+    — and requires only a 3-line change in engine.ts.
+
+  ② Add workspaceId to activity_logs (Phase 1-A).
+    This is a structural issue that affects every query against the activity feed.
+    Every day this is not fixed, workspace-scoped queries get more expensive.
+
+  ③ Add busEventId to activity_logs and notifications (Phase 1-B, 1-C).
+    Enables cross-table event trace joins. Low risk, high payoff.
+
+  ④ Add listener timing to pino logs (Phase 1-D).
+    Zero schema change, zero risk, immediate improvement in diagnosability.
+
+  ⑤ Remove dead notifications.ts import (Phase 0-B).
+    Zero risk, eliminates confusion.
+
+  DO NOT implement:
+  - External tracing tools (OpenTelemetry, Jaeger) before Phase 5
+  - Separate metrics database (Prometheus, InfluxDB) — not needed at this scale
+  - Event replay without careful idempotency design
+  - A new "listener_execution_log" DB table — use JSONB in workspace_event_logs.result
+
+  DO NOT change:
+  - EventBus fanout behavior
+  - Bridge one-way direction
+  - IdempotencyGuard TTL or per-file instance pattern
+  - Current listener registration order in index.ts
+
+  The existing architecture is fundamentally sound. The gap is not in the design
+  but in the linkage between layers. Adding the four missing columns
+  (activity_logs.workspaceId, activity_logs.busEventId, notifications.busEventId,
+  and populating workflow_executions.triggerEventLogId) — along with structured
+  pino listener timing — would close 9 of the 14 identified blind spots with
+  minimal risk and zero external dependencies.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+§11  QUICK REFERENCE — BLIND SPOT RESOLUTION MATRIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  BS ID │ Sev      │ Phase │ What to do
+  ──────│──────────│───────│───────────────────────────────────────────────────
+  BS-01 │ Critical │ 0-A   │ Populate triggerEventLogId in engine.ts
+  BS-02 │ Critical │ 1-A   │ Add workspaceId column to activity_logs
+  BS-03 │ Critical │ 1-B   │ Add busEventId to activity_logs + notifications
+  BS-04 │ High     │ 3-A   │ Add correlationId to workflow_executions
+  BS-05 │ High     │ 0-C   │ Pass req.id into event.metadata in route handlers
+  BS-06 │ High     │ 3-B   │ Emit bus events from comments/messages/calendar
+  BS-07 │ High     │ 2-E   │ Add pino debug log to SSE delivery in sse.ts
+  BS-08 │ Medium   │ N/A   │ Clarify form.submitted emitter status / remove stub
+  BS-09 │ Medium   │ 1-D   │ Add duration_ms to listener pino logs
+  BS-10 │ Medium   │ 1-E   │ Name listeners in workspace_event_logs.result
+  BS-11 │ Medium   │ 3-C   │ Persist processed event IDs in DB for cross-restart dedup
+  BS-12 │ Medium   │ 4-A   │ Add structured failure alerts for workflow executions
+  BS-13 │ Medium   │ 3-D   │ Add duration_ms column to workflow_execution_steps
+  BS-14 │ Low      │ N/A   │ Accept dev/prod log level asymmetry as intentional
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Review completed : 2026-05-13
+  Files reviewed   : 18 source files + 6 DB schema files
+  Status           : Analysis complete — no implementation performed
+  Next action      : Implement Phase 0 (BS-01, BS-05, Phase 0-B)
+                     then Phase 1 schema additions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

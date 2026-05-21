@@ -1,0 +1,283 @@
+راجع:
+- workflow-platform-hardening-review.txt
+- workflow-phase-5c-report.txt
+- workflow-phase-5e-report.txt
+- workflow-phase-5f-report.txt
+خصوصًا:
+- H-03
+- delayed execution gaps
+- TTL lifecycle
+- execution snapshots
+- publish governance
+- runtime consistency model
+
+ثم نفّذ فقط:
+P6-A — Scheduling Infrastructure Foundations
+
+ولا تنفّذ:
+- reminder engine
+- escalation policies
+- retries
+- cron orchestration mesh
+- distributed schedulers
+- DAG execution
+- background queue systems
+
+عنوان المهمة:
+WORKFLOW PHASE 6-A — Scheduling Infrastructure & Delayed Workflow Execution Foundations
+
+المهمة الحالية:
+إضافة:
+time-based workflow execution capability
+
+فوق:
+runtime engine الحالي
+
+الهدف:
+تمكين:
+- delay steps
+- wait-until execution
+- delayed resume
+- future scheduled continuation
+
+بطريقة:
+single-process enterprise-safe scheduling model
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT EXECUTION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- executor.ts
+- TTL checks
+- approval waiting
+- resumeExecution()
+- execution snapshots
+- cancellation lifecycle
+- guarded transitions
+
+حدّد:
+- أين execution تتوقف حاليًا
+- أين future continuation غير موجودة
+- أين delayed resume يحتاج safe re-entry
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN DELAY STEP MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+delay step type جديد.
+
+الحد الأدنى المطلوب:
+- delayForMinutes
+- delayUntilTimestamp
+
+لكن:
+واحد فقط active per step.
+
+المطلوب:
+- deterministic wake-up time
+- immutable delay semantics داخل snapshots
+- no mutable runtime timers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — EXECUTION WAITING STATE MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف lifecycle واضح:
+
+running
+→ waiting_delay
+→ running
+
+مع:
+guarded transitions كاملة
+بنفس فلسفة:
+P4-D exact-once transitions.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — PERSISTED WAKE-UP MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم persistence model يحتوي:
+
+- wakeAt
+- waitingReason
+- scheduledStepIndex
+- resumedAt
+
+المطلوب:
+- execution survives process restart
+- no in-memory timer dependency
+- snapshot compatibility
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — SCHEDULER LOOP DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+minimal scheduler worker
+
+داخل:
+single-process architecture.
+
+المطلوب:
+- polling loop
+- deterministic batch pickup
+- guarded resume acquisition
+- no duplicate wake-up
+
+لكن:
+لا تبنِ distributed scheduler.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — GUARDED WAKE-UP ACQUISITION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+exact-once wake-up acquisition.
+
+المطلوب:
+scheduler عندما يلتقط execution:
+يستخدم:
+guarded UPDATE + .returning()
+
+مثل:
+P4-D transition safety.
+
+الهدف:
+منع:
+- duplicate resume
+- multi-worker pickup مستقبلًا
+- race with cancellation/timeout
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — DELAY GOVERNANCE RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف validation/governance تغطي:
+
+- negative delays
+- absurd delays
+- invalid timestamps
+- delay after terminal steps
+- nested delay abuse
+- excessive wait durations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — AUDIT & OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+execution_delay_started
+
+B)
+execution_delay_resumed
+
+C)
+execution_delay_expired
+
+D)
+execution_delay_resume_blocked
+
+E)
+scheduler_poll_cycle
+
+كلها تحتوي:
+- executionId
+- workflowId
+- workflowVersion
+- wakeAt
+- scheduledStepIndex
+- workspaceId
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — EXACT-ONCE COMPATIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد:
+delay scheduling
+لا يكسر:
+- approval governance
+- cancellation
+- TTL
+- snapshots
+- version linkage
+- routing engine
+- guarded transitions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+delay step transitions execution → waiting_delay
+
+T2:
+wake-up resumes from next step exactly once
+
+T3:
+duplicate wake-up prevented
+
+T4:
+cancelled execution cannot resume from scheduler
+
+T5:
+timed_out execution cannot resume from scheduler
+
+T6:
+delay snapshot preserved correctly
+
+T7:
+scheduler survives process restart semantics
+
+T8:
+invalid delays blocked by validation
+
+T9:
+scheduler pickup uses guarded acquisition
+
+T10:
+delay workflows preserve exact-once behavior
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- distributed schedulers
+- retries
+- reminder fanout engine
+- escalation policies
+- cron expression language
+- queue infrastructure
+- Kafka
+- Temporal-style orchestration
+
+خلك:
+minimal deterministic delayed execution infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-6a-report.txt
+
+ويحتوي:
+- scheduling architecture
+- delay lifecycle
+- wake-up acquisition model
+- scheduler safety model
+- persistence behavior
+- observability additions
+- governance rules
+- tests results
+- remaining scheduling limitations
+- readiness assessment قبل simulation engine

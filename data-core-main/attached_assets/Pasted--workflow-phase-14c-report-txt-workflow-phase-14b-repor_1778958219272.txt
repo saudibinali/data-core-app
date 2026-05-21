@@ -1,0 +1,542 @@
+راجع:
+- workflow-phase-14c-report.txt
+- workflow-phase-14b-report.txt
+- workflow-phase-14a-report.txt
+
+خصوصًا:
+- artifacts/api-server/src/routes/platform-me.ts
+- artifacts/api-server/src/lib/platform-permissions.ts
+- artifacts/api-server/src/middlewares/requireAuth.ts
+- artifacts/api-server/src/routes/platform-users.ts
+- artifacts/api-server/src/routes/tenants.ts
+- activity_logs table/model
+- current audit write helpers/patterns
+- artifacts/ops-platform/src/lib/platform-access.ts
+- artifacts/ops-platform/src/components/platform-permission-route.tsx
+- artifacts/ops-platform/src/pages/super-admin-platform-users.tsx
+- artifacts/ops-platform/src/components/layout/super-admin-layout.tsx
+- any existing activity/audit/event log pages
+
+ثم نفّذ فقط:
+P14-D — Platform User Audit & Activity Tracking
+
+ولا تنفّذ:
+- billing/commercial modules
+- invoice/payment
+- tenant-side billing
+- tenant users
+- customer users
+- HR employee users
+- SSO
+- MFA
+- password reset
+- email invite sending
+- delete user
+- custom role builder
+- permission editor
+- break-glass recovery
+- audit deletion/editing
+
+عنوان المهمة:
+WORKFLOW PHASE 14-D — Platform User Audit & Activity Tracking
+
+المهمة الحالية:
+بناء قراءة منظمة لنشاط مستخدمي المنصة ومحاولات الوصول والصلاحيات، اعتمادًا على activity_logs الحالية، بدون تعديل أو حذف سجلات.
+
+الهدف:
+تمكين Platform Owner / authorized roles من رؤية:
+- من أنشأ Platform User
+- من غيّر حالة Platform User
+- من غيّر دور Platform User
+- من مُنع بسبب صلاحية ناقصة
+- من حاول إجراء محظور على Root/Protected account
+- من نفذ أو حاول إجراءات حساسة على Tenant lifecycle/subscription/entitlements
+- متى حدث ذلك
+- النتيجة success/blocked/denied
+- السبب reason / blockedReason
+
+بطريقة:
+read-only platform audit visibility
+بدون بناء نظام SIEM وبدون تعديل السجلات
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT AUDIT LOG MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- activity_logs schema/table
+- fields الحالية:
+  - actorId
+  - targetUserId
+  - action
+  - result
+  - reason
+  - metadata
+  - createdAt
+  - workspaceId إن وجد
+- كيف P14-A/P14-B/P14-C تسجل:
+  - platform_user_created
+  - platform_user_create_blocked
+  - platform_user_status_changed
+  - platform_user_status_change_blocked
+  - platform_user_role_changed
+  - platform_user_role_change_blocked
+  - platform_permission_denied
+  - protected_root_action_blocked
+  - platform_user_access_policy_violation
+
+وثق في التقرير:
+- audit fields المتاحة
+- أي fields ناقصة
+- كيف سيتم التعامل مع metadata
+- limitations
+
+مهم:
+لا تغيّر audit schema إلا إذا ضروري جدًا.
+لا تضف delete/edit للـ logs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — PLATFORM AUDIT EVENT TAXONOMY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف config/lib:
+
+platform-audit-events.ts
+
+Event groups:
+- platform_user_management — إدارة مستخدمي المنصة
+- platform_role_management — إدارة أدوار المنصة
+- platform_permission_denial — رفض الصلاحيات
+- root_protection — حماية المالك الجذري
+- tenant_lifecycle — دورة حياة المستأجر
+- tenant_subscription — اشتراك المستأجر
+- tenant_entitlement — صلاحيات وميزات المستأجر
+- platform_access — وصول المنصة
+
+Event config:
+لكل event:
+- actionCode
+- label
+- labelAr
+- group
+- severity:
+  - info
+  - warning
+  - critical
+- resultType:
+  - success
+  - blocked
+  - denied
+  - failed
+- description
+
+Include known events:
+- platform_user_created — إنشاء مستخدم منصة
+- platform_user_create_blocked — منع إنشاء مستخدم منصة
+- platform_user_status_changed — تغيير حالة مستخدم منصة
+- platform_user_status_change_blocked — منع تغيير حالة مستخدم منصة
+- platform_user_role_changed — تغيير دور مستخدم منصة
+- platform_user_role_change_blocked — منع تغيير دور مستخدم منصة
+- platform_permission_denied — رفض صلاحية منصة
+- protected_root_action_blocked — منع إجراء على المالك الجذري
+- platform_user_access_policy_violation — مخالفة سياسة وصول مستخدم منصة
+- tenant_lifecycle_changed — تغيير دورة حياة مستأجر
+- tenant_subscription_updated — تحديث اشتراك مستأجر
+- tenant_entitlement_override_updated — تحديث استثناء صلاحيات مستأجر
+
+Unknown events:
+- group = platform_access
+- severity = info
+- label = actionCode
+- labelAr = "حدث غير مصنف"
+
+Exports:
+- PLATFORM_AUDIT_EVENT_CONFIG
+- PLATFORM_AUDIT_EVENT_GROUPS
+- getPlatformAuditEventConfig(actionCode)
+- getPlatformAuditSeverity(actionCode)
+- isPlatformAuditEvent(actionCode)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — BACKEND READ API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف APIs:
+
+GET /platform/activity
+
+Permission:
+- requirePlatformPermission("platform.activity.read")
+أو audit.read
+
+Query params:
+- actorId optional
+- targetUserId optional
+- action optional
+- group optional
+- result optional
+- severity optional
+- from optional ISO date
+- to optional ISO date
+- limit default 50 max 200
+- cursor optional
+
+Returns:
+- items[]
+  - id
+  - actorId
+  - actorEmail/displayName if join available
+  - targetUserId
+  - targetEmail/displayName if join available
+  - action
+  - actionLabel
+  - actionLabelAr
+  - group
+  - severity
+  - result
+  - reason
+  - blockedReason
+  - resourceType
+  - resourceId
+  - metadataSafe
+  - createdAt
+- nextCursor
+
+Rules:
+- read-only
+- no secrets
+- redact sensitive metadata keys:
+  - password
+  - token
+  - secret
+  - apiKey
+  - authorization
+  - cookie
+- stable pagination
+- newest first
+
+GET /platform/users/:userId/activity
+
+Permission:
+- requirePlatformPermission("platform.activity.read")
+أو audit.read
+
+Returns latest activity for a specific platform user:
+- as actor
+- or target
+
+Query:
+- limit default 20 max 100
+- cursor optional
+
+Rules:
+- read-only
+- cannot expose secrets
+- should include blocked attempts
+
+مهم:
+لا تضف:
+- delete audit
+- edit audit
+- export
+- SIEM integration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FRONTEND CONFIG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+
+platform-audit-config.ts
+
+Includes:
+- PLATFORM_AUDIT_EVENT_CONFIG mirror
+- PLATFORM_AUDIT_EVENT_GROUPS
+- PLATFORM_AUDIT_SEVERITY_CONFIG
+- PLATFORM_AUDIT_RESULT_CONFIG
+- PLATFORM_AUDIT_FILTER_CONFIG
+- PLATFORM_AUDIT_SAFETY_CONTRACT
+
+Safety contract:
+- readOnlyAudit
+- noAuditDelete
+- noAuditEdit
+- noSecretMetadataDisplay
+- permissionGated
+- platformActivityOnly
+- noSiemIntegration
+- noExport
+- preserveBackendAuthority
+
+كلها true.
+
+Import-time guard.
+
+Labels بالعربي والإنجليزي:
+- success — ناجح
+- blocked — محظور
+- denied — مرفوض
+- failed — فشل
+- info — معلومات
+- warning — تحذير
+- critical — حرج
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FRONTEND HOOKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف:
+- usePlatformActivity(filters)
+- usePlatformUserActivity(userId, filters)
+
+React Query:
+- keys:
+  - ["platform", "activity", filters]
+  - ["platform", "users", userId, "activity", filters]
+- pagination support إذا موجود
+- no mutations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — FRONTEND UI — PLATFORM ACTIVITY PAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف/حدّث صفحة:
+
+/super-admin/platform-activity
+
+Permission:
+- platform.activity.read أو audit.read
+
+Components:
+- PlatformActivityPage
+- PlatformActivityFilters
+- PlatformActivityTimeline
+- PlatformActivityEventCard
+- PlatformAuditSeverityBadge
+- PlatformAuditResultBadge
+
+Filters:
+- action
+- group
+- result
+- severity
+- actorId
+- targetUserId
+- date range
+- limit
+
+Timeline card displays:
+- action label + Arabic label
+- severity badge
+- result badge
+- actor
+- target
+- reason
+- blockedReason
+- resource
+- timestamp
+- metadataSafe collapsed
+
+Empty state:
+- No activity found — لا توجد أنشطة
+
+Denied state:
+- PlatformAccessDenied
+
+مهم:
+لا تضف export.
+لا تضف delete/edit.
+لا تعرض secrets.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — FRONTEND UI — USER DETAIL ACTIVITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+في Platform Users page UserDetailPanel:
+
+أضف section:
+- Recent Activity — آخر النشاط
+
+Requires:
+- platform.activity.read أو audit.read
+
+Shows:
+- آخر 10 أحداث تخص المستخدم كـ actor أو target
+- action
+- result
+- timestamp
+- reason/blockedReason مختصر
+
+If no permission:
+- لا تعرض القسم أو اعرض compact denied حسب التصميم
+
+If no activity:
+- لا توجد أنشطة حديثة
+
+مهم:
+لا تضف mutations.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — NAVIGATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+تأكد أن Platform Activity nav item:
+- يظهر فقط لمن يملك platform.activity.read أو audit.read
+- يستخدم route guard
+- لا يظهر للـ finance_admin إذا لا يملكها حسب matrix الحالي
+- يظهر للـ support_admin إذا يملك platform.activity.read
+- يظهر للـ auditor إذا يملك audit.read/platform.activity.read
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SECURITY / REDACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف helper:
+redactAuditMetadata(metadata)
+
+Redact keys case-insensitive containing:
+- password
+- token
+- secret
+- apiKey
+- authorization
+- cookie
+- credential
+
+Replace value:
+"[REDACTED]"
+
+Nested objects:
+- redact recursively
+
+Arrays:
+- redact recursively
+
+Tests required.
+
+مهم:
+لا تعرض raw metadata بدون redaction.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+platform audit event config stable
+
+T2:
+unknown event fallback safe
+
+T3:
+redactAuditMetadata redacts password/token/secret/apiKey/authorization/cookie recursively
+
+T4:
+GET /platform/activity requires platform.activity.read or audit.read
+
+T5:
+GET /platform/activity filters by action/result/group/severity/date
+
+T6:
+GET /platform/activity paginates newest first
+
+T7:
+GET /platform/activity returns metadataSafe not raw secrets
+
+T8:
+GET /platform/users/:userId/activity returns actor/target activity
+
+T9:
+workspace user denied
+
+T10:
+frontend audit safety contract all true
+
+T11:
+Platform Activity nav visible only with platform.activity.read/audit.read
+
+T12:
+PlatformActivityPage renders filters/timeline
+
+T13:
+severity/result badges render Arabic + English labels
+
+T14:
+metadata collapsed and redacted
+
+T15:
+UserDetailPanel recent activity visible only with permission
+
+T16:
+no audit delete/edit/export/SIEM integration exists
+
+T17:
+frontend/backend tests pass
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P14-D MUST:
+- be read-only
+- permission-gated
+- redact secrets
+- show platform activity clearly
+- preserve backend authority
+- preserve root protection
+- preserve fixed role matrix
+- avoid audit deletion/editing/export
+- avoid SIEM integration
+- avoid billing/commercial
+- avoid tenant/customer/HR users
+- avoid password reset/delete/email invite/SSO/MFA
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- audit delete
+- audit edit
+- audit export
+- SIEM integration
+- custom roles
+- permission editor
+- tenant users
+- customer users
+- HR employee users
+- password reset
+- delete user
+- email invite sending
+- SSO
+- MFA
+- break-glass recovery
+- billing/commercial
+- invoice/payment
+- tenant-side billing
+- HR modules
+
+خلك:
+Read-only Platform Activity & Audit Visibility فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-14d-report.txt
+
+ويحتوي:
+- current audit model review
+- platform audit event taxonomy
+- backend activity APIs
+- metadata redaction behavior
+- frontend activity page
+- user detail recent activity
+- navigation/route guard behavior
+- safety guarantees
+- tests results
+- limitations intentionally left for P14-E
+- readiness assessment قبل Platform Administration Users Console Finalization

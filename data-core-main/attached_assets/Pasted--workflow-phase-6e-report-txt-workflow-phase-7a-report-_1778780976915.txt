@@ -1,0 +1,279 @@
+راجع:
+- workflow-phase-6e-report.txt
+- workflow-phase-7a-report.txt
+- workflow-phase-7b-report.txt
+- workflow-phase-7c-report.txt
+- workflow-phase-7d-report.txt
+خصوصًا:
+- generated React Query hooks
+- TrendEnvelope<T>
+- sourceLayer semantics
+- truncation behavior
+- governance dashboard architecture
+- remaining frontend analytics gaps
+
+ثم نفّذ فقط:
+P7-E — Historical Analytics Dashboard Foundations
+
+ولا تنفّذ:
+- realtime streaming
+- advanced BI tooling
+- custom chart builders
+- AI insights
+- predictive analytics
+- cross-workspace federation dashboards
+
+عنوان المهمة:
+WORKFLOW PHASE 7-E — Historical Analytics Dashboard & Trend Visualization Foundations
+
+المهمة الحالية:
+تحويل:
+historical analytics APIs
+
+إلى:
+enterprise historical operations experience
+
+الهدف:
+تمكين:
+- trend visibility
+- long-term operational monitoring
+- historical governance exploration
+- operational degradation analysis
+
+بطريقة:
+read-only historical analytics dashboard
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT ANALYTICS SURFACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- useGetGovernanceTrendsSeverity()
+- useGetGovernanceTrendsErrorRate()
+- useGetGovernanceTrendsBacklogs()
+- useGetGovernanceTrendsStorms()
+- TrendEnvelope<T>
+
+حدّد:
+- أين sourceLayer يؤثر على UI semantics
+- أين truncation يحتاج visibility
+- أين chart density تختلف حسب tier
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN HISTORICAL DASHBOARD LAYOUT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم layout يحتوي:
+
+A)
+Range selector
+(1h / 24h / 7d / 30d / 90d / 180d / 365d)
+
+B)
+Severity timeline
+
+C)
+Error-rate trend
+
+D)
+Backlog pressure trend
+
+E)
+Storm activity trend
+
+F)
+Operational insights panel
+
+المطلوب:
+clarity > visual complexity.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — RANGE SELECTOR MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+single shared range state
+
+يربط:
+كل charts.
+
+المطلوب:
+- synchronized reload
+- loading coordination
+- stale-state handling
+- sourceLayer awareness
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — SEVERITY TIMELINE VISUALIZATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+severity changes عبر الزمن.
+
+المطلوب:
+- healthy / warning / degraded / critical semantics
+- deterministic color mapping
+- tooltip timestamps
+- sourceLayer indication
+
+لكن:
+بدون realtime animations.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — NUMERIC TREND CHARTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض:
+- error-rate
+- approval backlog
+- delay backlog
+- stuckCount
+- stormFrequency
+
+المطلوب:
+- readable scales
+- stable axes
+- sourceLayer-aware labels
+- sparse/dense dataset handling
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — TRUNCATION VISIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+إذا:
+truncated=true
+
+اعرض:
+واضح جدًا:
+- data capped
+- resolution reduced
+- recommendation to narrow range
+
+ولا تخفِ truncation بصمت.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — OPERATIONAL INSIGHTS PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+اعرض insights بسيطة مثل:
+- dominant historical severity
+- peak backlog period
+- storm-heavy periods
+- average error-rate trend direction
+
+لكن:
+بدون AI summaries.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — DASHBOARD SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Historical dashboard MUST:
+- remain READ-ONLY
+- never mutate governance history
+- never trigger rollups
+- never invoke pruning
+- never affect runtime execution
+
+أي:
+visualization-only analytics surface.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+historical_dashboard_loaded
+
+B)
+historical_dashboard_range_changed
+
+C)
+historical_chart_rendered
+
+D)
+historical_truncation_warning_shown
+
+كلها تحتوي:
+- workspaceId
+- selectedRange
+- sourceLayer
+- chartType
+- truncated
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+range selector synchronizes all charts
+
+T2:
+severity chart reflects deterministic colors
+
+T3:
+error-rate chart handles raw/hourly/daily layers
+
+T4:
+backlog chart handles float averages correctly
+
+T5:
+storm chart displays frequency semantics correctly
+
+T6:
+truncation warning visible when truncated=true
+
+T7:
+dashboard remains read-only
+
+T8:
+sourceLayer labels displayed correctly
+
+T9:
+empty trend data renders safely
+
+T10:
+API failures handled gracefully
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- realtime chart streaming
+- advanced BI builders
+- chart exports
+- PDF analytics reports
+- AI-generated insights
+- admin mutation actions
+
+خلك:
+minimal enterprise historical analytics console.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-7e-report.txt
+
+ويحتوي:
+- dashboard architecture
+- chart semantics
+- sourceLayer visualization strategy
+- truncation UX model
+- operational insights model
+- observability additions
+- tests results
+- remaining analytics UX gaps
+- readiness assessment قبل advanced governance analytics

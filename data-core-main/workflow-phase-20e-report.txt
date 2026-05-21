@@ -1,0 +1,121 @@
+================================================================================
+WORKFLOW PHASE 20E REPORT — Vendor Connectors & Workforce Integration Hub
+================================================================================
+Date: 2026-05-19
+Phase: P20-E
+Status: DELIVERED (foundation)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Implemented a vendor-agnostic Workforce Integration Hub atop the P20-B event
+platform: schema migrations for integrations/devices/employee maps, plugin-style
+ConnectorRegistry + AttendanceConnector contract, four minimal connectors, webhook
+ingestion with signature/replay/idempotency, DB-backed polling sync worker (no
+Redis), management APIs, security primitives, notification hooks, smoke tests,
+and documentation.
+
+Constraints honored: no vendor SDK lock-in, no payroll redesign, no destructive
+migration, no biometric template storage, no mobile app, no Redis/BullMQ redesign.
+
+--------------------------------------------------------------------------------
+CONNECTOR REGISTRY STATUS — GO
+--------------------------------------------------------------------------------
+- ConnectorRegistry: register / resolve / list / validate
+- Connectors: generic_webhook, generic_rest_poll, excel_import, direct_api
+- Plugin key: connector_key → implementation
+
+--------------------------------------------------------------------------------
+WEBHOOK INGESTION STATUS — GO
+--------------------------------------------------------------------------------
+- POST /integrations/attendance/:integrationId/webhook
+- HMAC-SHA256 (X-Signature / X-Hub-Signature-256)
+- Payload validation + size limit
+- Replay token window (in-process)
+- Idempotency via int:{integrationId}:{externalEventId}
+- Links AttendanceIngestionService (source: vendor)
+
+--------------------------------------------------------------------------------
+POLLING SYNC STATUS — PARTIAL
+--------------------------------------------------------------------------------
+- attendance_sync_jobs worker (setInterval, DB queue)
+- Cursor, retry/backoff, dead_letter status
+- Scheduled enqueue by poll_interval_minutes
+- Gap: no persistent distributed lock; single-process replay cache
+
+--------------------------------------------------------------------------------
+INTEGRATION APIs STATUS — GO
+--------------------------------------------------------------------------------
+- List / create / update integrations
+- Enable/disable (emits attendance.integration.disabled)
+- Test connection / sync now / status
+- Employee mappings + devices list APIs
+- Connector catalog GET
+
+--------------------------------------------------------------------------------
+DEVICE FOUNDATION STATUS — GO
+--------------------------------------------------------------------------------
+- attendance_devices table + touch on ingest
+- device_uid, device_type, integration_id, work_location_id, last_seen_at
+- No biometric data
+
+--------------------------------------------------------------------------------
+SECURITY STATUS — GO
+--------------------------------------------------------------------------------
+- Encrypted credential refs (AES-256-GCM)
+- Webhook secret hash + rotation support
+- Workspace isolation
+- Payload size limits
+- Audit logging hooks
+
+--------------------------------------------------------------------------------
+NOTIFICATION INTEGRATION STATUS — GO
+--------------------------------------------------------------------------------
+Events:
+- attendance.sync.failed
+- attendance.sync.completed
+- attendance.integration.disabled
+Listener: integration-bus.ts → HR admin notifications
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+Unit (no DB):
+- Connector registry: PASS
+- Webhook HMAC + replay: PASS
+- Generic webhook parse: PASS
+- Idempotency key format: PASS
+
+Integration (DATABASE_URL + migration 0009):
+- Workspace isolation: PASS when RUN_WORKFORCE_INTEGRATION_SMOKE enabled
+
+Run:
+  pnpm --filter @workspace/api-server test workforce-integration.smoke
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+Area                              | Status
+----------------------------------|----------
+Connector framework               | GO
+Webhook ingestion                 | GO
+Polling integrations              | PARTIAL
+Workforce integration readiness   | PARTIAL
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+1. Migration 0009 must be applied in target environments
+2. Vendor source seed for existing workspaces (re-run init or seed)
+3. Persistent webhook nonce / rate-limit middleware (future)
+4. HR UI for integration management (not in P20-E scope)
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P20-F — Workforce Operations Center & Attendance Control Tower
+(Do not start in this delivery.)
+
+================================================================================
+END REPORT
+================================================================================

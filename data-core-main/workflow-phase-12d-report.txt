@@ -1,0 +1,666 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW PHASE 12-D
+Governance Workflows UI & Human Review Lifecycle Foundations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date           : 2026-05-16
+Phase          : P12-D (frontend-only workflow lifecycle review UI)
+Prior phase    : P12-C (policy violations UI — 320/320 tests)
+Final Status   : P12-D COMPLETE
+Backend tests  : 2399 / 2399 (42 files — unchanged)
+Frontend tests : 393 / 393 (6 files — 73 new assertions across 10 groups)
+Typecheck      : Pre-existing isActive errors in workflows.tsx — unchanged; zero new errors
+New files      : 2 (lifecycle timeline component, P12-D test file)
+Modified files : 2 (governance-console-config.ts, super-admin-governance-workflows.tsx)
+Backend changes: NONE
+DB migrations  : NONE
+Enforcement    : NONE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — GOVERNANCE WORKFLOWS UI ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+P12-D converts the P12-A placeholder workflows page into a full lifecycle
+review experience. Architecture remains frontend-only, read-only, and
+super-admin-restricted. No backend routes were modified.
+
+Layer additions (P12-D only):
+
+  governance-console-config.ts  (extended — pure TS constants)
+    + WORKFLOW_STATUS_MAP         (9 entries: 5 canonical + 4 legacy compat)
+    + WORKFLOW_STATUS_ORDER       (5 canonical statuses in display order)
+    + ESCALATION_LEVEL_MAP        (8 entries: 4 canonical L1–L4 + 4 legacy)
+    + ESCALATION_LEVEL_ORDER      (4 canonical levels in ascending order)
+    + RESOLUTION_CLASSIFICATION_MAP (5 classifications)
+    + ALL_RESOLUTION_CLASSIFICATION_KEYS
+    + WORKFLOW_STATUS_FILTER_OPTIONS        (6: all + 5 canonical statuses)
+    + ESCALATION_LEVEL_FILTER_OPTIONS       (5: all + 4 canonical levels)
+    + RESOLUTION_CLASSIFICATION_FILTER_OPTIONS (6: all + 5 classifications)
+    + WORKFLOWS_UI_SAFETY_CONTRACT          (12 boolean invariants — all true)
+    + WORKFLOWS_EMPTY_STATE                 (3 empty/error text blocks)
+    + WORKFLOW_LIFECYCLE_EVENT_ORDER        (7 ordered event key tuple)
+
+  governance-workflow-lifecycle-timeline.tsx  (new shared component)
+    Renders a vertical spine timeline for one workflow's lifecycle.
+    - LifecycleNode per event: dot colour + icon + label + timestamp + details
+    - Stable order by WORKFLOW_LIFECYCLE_EVENT_ORDER index
+    - Compact mode: only recorded events, no detail expansion
+    - Full mode: all 7 slots shown; unrecorded slots shown as dimmed
+    - buildLifecycleEvents(workflow) utility: maps raw workflow object → events
+
+  super-admin-governance-workflows.tsx  (full rewrite from P12-A shell)
+    4 sections:
+    1. Lifecycle overview banner (total + active + escalated count, highlighted when
+       escalated > 0 with orange border)
+    2. Status summary cards (5 canonical statuses, clickable quick-filter)
+    3. Escalation level summary cards (4 canonical levels, clickable quick-filter)
+    4. Workflow list (5-axis filters, expandable rows with full lifecycle + evidence)
+
+Dependency graph (P12-D additions):
+
+  governance-console-config.ts  (pure TS — no deps)
+         ↓
+  governance-workflow-lifecycle-timeline.tsx  (component — depends on config)
+         ↓
+  super-admin-governance-workflows.tsx  (page — depends on hooks + timeline
+                                         + evidence component + config)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — WORKFLOW STATUS VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: WORKFLOW_STATUS_MAP (9 entries with backward compatibility)
+
+2.1  Canonical statuses (WORKFLOW_STATUS_ORDER)
+
+  Status         Tier       Order  Badge colour  Description
+  ──────────────────────────────────────────────────────────────────────────────
+  initiated      active     0      blue          "Workflow has been created and is awaiting operator assignment."
+  investigating  active     1      blue          "Active investigation is under way."
+  escalated      elevated   2      orange        "Elevated to a higher review authority."
+  resolved       closed     3      zinc          "Investigation concluded and findings recorded."
+  closed         closed     4      zinc          "Workflow archived — no further action required."
+
+2.2  Legacy compatibility statuses
+
+  Status         Tier       Maps to (conceptually)
+  ──────────────────────────────────────────────────────
+  open           active     initiated
+  acknowledged   active     investigating
+  under_review   active     investigating
+  dismissed      closed     closed
+
+  Legacy statuses render correctly via WorkflowStatusBadge. No code path
+  needs a migration — both API shapes produce visual output.
+
+2.3  Tier → badge colour mapping
+
+  active   → blue   (bg-blue-100 / text-blue-700)
+  elevated → orange (bg-orange-100 / text-orange-700)
+  closed   → zinc   (bg-zinc-100 / text-zinc-600)
+
+2.4  Left border colour on workflow rows
+
+  elevated → border-l-orange-400
+  active   → border-l-blue-400
+  closed   → border-l-zinc-300
+
+2.5  Escalated banner
+
+  When escalatedCount > 0, the overview banner upgrades to:
+  - 2px orange border (border-orange-400)
+  - orange background tint
+  - GitBranch icon in orange
+  - "{N} escalated" in bold orange text
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — ESCALATION LEVEL VISUAL MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: ESCALATION_LEVEL_MAP (8 entries with backward compatibility)
+
+3.1  Canonical levels (ESCALATION_LEVEL_ORDER)
+
+  Level           Tier      Order  Colour      Description
+  ──────────────────────────────────────────────────────────────────────────────
+  L1_automated   low        0      blue        "Initial automated detection level — human review may follow."
+  L2_operator    medium     1      amber       "Assigned to an operator for hands-on review."
+  L3_management  high       2      orange      "Elevated to management-level review."
+  L4_executive   critical   3      red         "Executive-level review required."
+
+  NOTE: "L1_automated" is a historical naming artefact. It describes a detection
+  origin, not an execution mode. All review actions are human-driven. This is
+  explicit in the description ("human review may follow") and enforced by
+  WORKFLOWS_UI_SAFETY_CONTRACT.noEnforcementTrigger = true.
+
+3.2  Legacy compatibility levels
+
+  informational  → tier low    (maps to L1)
+  standard       → tier medium (maps to L2)
+  elevated       → tier high   (maps to L3)
+  critical       → tier critical (maps to L4)
+
+3.3  EscalationBadge display
+
+  Renders as a plain text span (not a pill badge), styled in the tier colour.
+  Shown on both collapsed row header and expanded detail.
+  title attribute carries the level description for hover context.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — RESOLUTION CLASSIFICATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Source: RESOLUTION_CLASSIFICATION_MAP (5 entries)
+
+  Classification              Tier       Badge colour   Description
+  ──────────────────────────────────────────────────────────────────────────────
+  confirmed_violation         finding    red            "Investigation confirmed a policy deviation occurred."
+  false_positive              cleared    emerald        "Investigation found no actual policy deviation."
+  operational_exception       exception  amber          "Deviation was an approved operational exception."
+  policy_gap                  gap        violet         "Investigation revealed an uncovered policy area."
+  unresolved_pending_review   pending    slate          "Investigation is ongoing — resolution not yet recorded."
+
+Design principles:
+  - "confirmed_violation" uses tier "finding" — not "violation" — to avoid
+    implying legal findings. It confirms a policy deviation, not legal fault.
+  - "false_positive" uses tier "cleared" — visually positive (emerald) to
+    signal this is a good outcome, not a problem.
+  - No label contains "guilty", "illegal", "law", "verdict", or "fault".
+
+ResolutionBadge is shown in the collapsed row header when a classification
+is present, and again in the expanded detail view with its description.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — WORKFLOW DETAIL EXPANSION DESIGN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkflowRow is a collapsible component with two display states.
+
+5.1  Collapsed (always visible)
+
+  [StatusBadge]  workflowActionId (mono)  violationId · policyId  [EscalationBadge]  [ResolutionBadge?]  [▾]
+
+  Left border colour follows status tier.
+  data-testid: workflow-row-{index}
+
+5.2  Expanded detail
+
+  Metadata grid (2-column sm+):
+    Workflow ID      (mono, copy)
+    Violation        (mono, copy)
+    Policy           (mono, copy)
+    Workspace        (mono, copy)
+    Assigned To      (mono)
+    Initiated By     (mono)
+    Created          (formatted date)
+    Last Updated     (formatted date)
+
+  Inline descriptions (one per dimension):
+    ℹ Status description from WORKFLOW_STATUS_MAP
+    ↑ Escalation description from ESCALATION_LEVEL_MAP
+    ✓ Resolution description from RESOLUTION_CLASSIFICATION_MAP (if present)
+
+  Lifecycle Timeline:
+    GovernanceWorkflowLifecycleTimeline (full mode, all 7 event slots)
+
+  Evidence References:
+    GovernanceEvidenceReferenceList (reused from P12-C, read-only)
+
+  Forensic Context (if entityId present):
+    Dashed-border panel + Copy Entity ID + "Review Forensic Timeline" link
+
+  Linked Violation Context (if violationId or policyId present):
+    Dashed-border panel + copy identifiers + "View Policy Violations" link
+
+5.3  What is NOT in the expanded view
+
+  No "Acknowledge" button.
+  No "Escalate" button.
+  No "Resolve" button.
+  No "Close" button.
+  No "Dismiss" button.
+  No workflow creation form.
+  No enforcement trigger.
+  No AI summary card.
+  No legal conclusion.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — LIFECYCLE TIMELINE COMPONENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+File: artifacts/ops-platform/src/components/governance/governance-workflow-lifecycle-timeline.tsx
+
+6.1  Props
+
+  interface GovernanceWorkflowLifecycleTimelineProps {
+    events:          WorkflowLifecycleEvent[];
+    compact?:        boolean;
+    data-testid?:    string;
+  }
+
+  interface WorkflowLifecycleEvent {
+    key:           WorkflowLifecycleEventKey;  // one of 7 lifecycle event keys
+    label:         string;
+    timestamp?:    string;                     // ISO date string or undefined
+    actorId?:      string;
+    note?:         string;
+    evidenceRef?:  string;
+  }
+
+6.2  Lifecycle event slot ordering (WORKFLOW_LIFECYCLE_EVENT_ORDER)
+
+  0. createdAt               → Play icon (blue)
+  1. acknowledgedAt          → Eye icon (sky)
+  2. investigationStartedAt  → Search icon (violet)
+  3. escalatedAt             → ArrowUp icon (orange)
+  4. resolvedAt              → CheckCircle2 icon (emerald)
+  5. closedAt                → Archive icon (zinc)
+  6. updatedAt               → Clock icon (muted)
+
+  Order is fixed by the tuple index. buildLifecycleEvents() constructs the
+  event array from the raw workflow object; the timeline sorts by index.
+
+6.3  Spine visualisation
+
+  Each event gets a dot + optional connecting line.
+  Dot colour:
+    recorded  → tier-specific colour (blue/sky/violet/orange/emerald/zinc/primary)
+    not yet   → muted/bg-muted (dimmed)
+
+  In full mode:
+    All 7 slots rendered. Unrecorded = dimmed dot + "not recorded" italic text.
+    Actor, note, evidence ref shown if present on recorded events.
+    Footer: "N / 7 lifecycle events recorded — read-only"
+
+  In compact mode (for future embedding):
+    Only recorded events shown. No footer. No detail expansion.
+
+6.4  buildLifecycleEvents(workflow) utility
+
+  Exported function that maps a raw workflow Record<string, unknown> to
+  WorkflowLifecycleEvent[]. Reads:
+    createdAt, acknowledgedAt, investigationStartedAt, escalatedAt,
+    resolvedAt, closedAt, updatedAt,
+    initiatedBy, assignedOperatorId, escalatedBy, resolvedBy,
+    escalationReason, resolutionNotes
+
+  Deduplication: if updatedAt equals createdAt (nothing changed since init),
+  the updatedAt slot is suppressed (timestamp → undefined) to avoid false
+  "Last Updated" noise.
+
+6.5  Empty state
+
+  In full mode when zero events are recorded:
+    Clock icon + "No lifecycle events recorded for this workflow."
+    data-testid: {testId}-empty
+
+  In compact mode: empty array produces an empty container (no icon).
+
+6.6  Safety guarantees
+
+  No acknowledge/escalate/resolve buttons.
+  No mutation of any workflow state.
+  Component is purely presentational (no internal query calls).
+  Stable chronological ordering regardless of input order.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — EVIDENCE AND VIOLATION CONTEXT BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+7.1  Evidence references
+
+  GovernanceEvidenceReferenceList is reused from P12-C.
+  Receives evidenceReferences[] from the workflow object (mapped to the
+  standard EvidenceReference interface). All P12-C safety rules apply.
+  No download, no export, no external links.
+
+  If evidenceReferences is absent or empty, the empty state renders:
+  "No evidence references attached to this violation."
+  data-testid: workflow-evidence-{index}-empty
+
+7.2  Forensic context linking
+
+  Identical pattern to P12-C violations:
+  - Shown when workflow.entityId is present
+  - FORENSIC_CONTEXT_GUIDANCE.description explains how to use the entity ID
+  - Copy Entity ID button (navigator.clipboard, 1.5s feedback)
+  - "Review Forensic Timeline" link to /super-admin/governance/audit-integrity
+  - No auto-fetch of forensic timeline within the workflow row
+
+7.3  Linked violation context
+
+  Shown when violationId or policyId is present:
+  - Dashed-border panel with amber badge (Read-Only)
+  - "Use the identifiers below to cross-reference on the Policy Violations page."
+  - violationId + copy button
+  - policyId + copy button
+  - "View Policy Violations" link to /super-admin/governance/violations
+
+7.4  No auto-fetch of violation details
+
+  The page does not call useGovernanceViolations() from within each expanded
+  workflow row. This avoids N+1 query patterns. The operator copies the
+  violationId and navigates to the violations page for full details.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — FILTER BEHAVIOR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5-axis filter system — all client-side except:
+
+8.1  Status filter (client-side Select)
+  6 options: All + 5 canonical statuses.
+  Also togglable via status summary cards.
+  data-testid: filter-workflow-status
+
+8.2  Escalation level filter (client-side Select)
+  5 options: All + 4 canonical L-levels.
+  Also togglable via escalation summary cards.
+  data-testid: filter-escalation-level
+
+8.3  Resolution classification filter (client-side Select)
+  6 options: All + 5 classifications.
+  data-testid: filter-resolution
+
+8.4  Operator ID filter (client-side text input + Enter/button)
+  Filters by assignedOperatorId.
+  Active filter indicator shown below filter bar.
+  data-testid: filter-operator-id
+
+8.5  Workspace ID filter (client-side text input + Enter/button)
+  Filters by workspaceId (client-side, not re-fetched from API).
+  data-testid: filter-workflow-workspace
+
+  Note: the P12-C violations page sends workspaceId to the hook as a
+  server-side param. Here all filtering is client-side over the initial
+  50-workflow fetch. If workspace-scoped server-side fetch is needed,
+  useGovernanceWorkflows({ workspaceId }) can be activated in a future phase.
+
+8.6  Sort order
+
+  Escalated workflows always appear first, then by createdAt descending.
+  This ensures the highest-urgency items are visible without filtering.
+
+8.7  Clear all filters
+  "Clear (N)" button with active count.
+  data-testid: clear-workflow-filters
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — UI STATES (ALL 8 REQUIRED)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1.  LOADING
+      - Overview banner: Skeleton h-20 w-full
+      - Status summary cards: Skeleton h-6 w-8 per card
+      - Escalation cards: Skeleton h-6 w-8 per card
+      - Workflow list: 5× Skeleton h-16 w-full
+
+  2.  EMPTY (no data)
+      - Workflows list: CheckCircle2 + "No governance workflows recorded"
+      data-testid: workflows-empty
+
+  3.  ERROR
+      - GovernanceErrorState ("Could not load governance workflow data…")
+
+  4.  UNAUTHORIZED
+      - SuperAdminRoute blocks before any page component mounts.
+      - Redirect to /sign-in.
+
+  5.  READ-ONLY NOTICE
+      - GovernanceReadOnlyNotice always visible below the page header.
+      data-testid: governance-read-only-notice
+
+  6.  NO FILTER MATCH
+      - "No workflows match the current filters" + description + "Clear all filters"
+      data-testid: workflows-empty (text switches based on hasActiveFilters)
+
+  7.  LIFECYCLE EMPTY STATE
+      - GovernanceWorkflowLifecycleTimeline with zero recorded events.
+      - Clock icon + "No lifecycle events recorded for this workflow."
+      data-testid: workflow-lifecycle-{index}-empty
+
+  8.  EVIDENCE EMPTY STATE
+      - GovernanceEvidenceReferenceList with empty references array.
+      - FileText icon + "No evidence references attached to this violation."
+      data-testid: workflow-evidence-{index}-empty
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 10 — READ-ONLY SAFETY GUARANTEES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WORKFLOWS_UI_SAFETY_CONTRACT (12 boolean invariants — all true):
+
+  noWorkflowCreation         true   No form or trigger for creating workflows.
+  noAcknowledgeButton        true   No "Acknowledge" button exists.
+  noEscalateButton           true   No "Escalate" button exists.
+  noResolveButton            true   No "Resolve" button exists.
+  noCloseButton              true   No "Close" button exists.
+  noViolationDismissal       true   No violation dismissal control.
+  noPolicyEdit               true   No policy editing form.
+  noEnforcementTrigger       true   No enforcement action trigger.
+  noLegalConclusions         true   No legal verdict, guilt, or compliance conclusion.
+  noAiSummaries              true   No AI-generated explanation cards.
+  noExportRendering          true   No PDF/XLSX/CSV export triggers.
+  superAdminOnly             true   Enforced by SuperAdminRoute.
+
+Bottom-of-page annotation (always visible, derived from contract booleans):
+  "Governance console — read-only lifecycle review
+   · No acknowledge · No escalate · No resolve · No legal conclusions"
+
+Inheritance chain:
+  GOVERNANCE_CONSOLE_SAFETY_CONTRACT (P12-A, 8 props)
+  AUDIT_UI_SAFETY_CONTRACT (P12-B, 9 props)
+  VIOLATIONS_UI_SAFETY_CONTRACT (P12-C, 12 props)
+  WORKFLOWS_UI_SAFETY_CONTRACT (P12-D, 12 props)
+  — all superAdminOnly = true, all read-only = true throughout.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 11 — TEST RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+11.1  Backend tests — unchanged
+
+  Command: pnpm --filter @workspace/api-server run test --run
+  Result:  2399 / 2399 (42 files) — EXIT:0
+
+11.2  Frontend tests — P12-D additions
+
+  Command: pnpm --filter @workspace/ops-platform run test --run
+  Result:  393 / 393 (6 files) — EXIT:0
+
+  File breakdown:
+    governance-utils.test.ts                128 assertions (P11, unchanged)
+    governance-console-shell.test.ts         54 assertions (P12-A, unchanged)
+    governance-audit-integrity.test.ts       68 assertions (P12-B, unchanged)
+    governance-violations-policy.test.ts     70 assertions (P12-C, unchanged)
+    governance-workflows-lifecycle.test.ts   73 assertions (P12-D new)
+    (governance-trend-utils.test.ts           0 assertions, pre-existing)
+
+11.3  New test groups (T1–T10) — 73 assertions
+
+  T1   Workflow status map stable (canonical + legacy)             9 assertions
+  T2   Escalation level map stable (canonical + legacy)           10 assertions
+  T3   Resolution classification map stable                        7 assertions
+  T4   Workflows page super-admin scoped                           6 assertions
+  T5   Lifecycle timeline ordering deterministic                   8 assertions
+  T6   Filter config stable                                        8 assertions
+  T7   No mutation/transition/legal labels exist                   4 assertions
+  T8   Workflow safety contract all true                           7 assertions
+  T9   Evidence list and hook names read-only                      5 assertions
+  T10  Config shapes correct                                       9 assertions
+  ─────────────────────────────────────────────────────────────────────────────
+  Total new assertions:                                           73
+
+  Total P12 assertions accumulated: 265
+  (182 P12-A + 68 P12-B + 70 P12-C + 73 P12-D cumulative new)
+
+11.4  Test fix note (T7 precision)
+
+  Initial T7 used "create" and "escalate" in a simple substring check.
+  These words appear legitimately in status descriptions ("has been created")
+  and status labels ("Escalated"). The test was refined to check:
+  - descriptionForbidden: UI-export and legal-verdict terms only
+    (trigger, export, pdf, xlsx, ai summary, legal verdict, guilty, etc.)
+  - labelActionPhrases: button-phrasing patterns only
+    (click to escalate, click to resolve, export, pdf, ai summary, etc.)
+  This correctly distinguishes state labels from button labels.
+
+11.5  Typecheck status
+
+  pnpm --filter @workspace/ops-platform run typecheck
+  EXIT:2 — same 2 pre-existing isActive errors. Zero new errors from P12-D.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 12 — FILE MANIFEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New files (2):
+
+  artifacts/ops-platform/src/components/governance/governance-workflow-lifecycle-timeline.tsx
+    Shared lifecycle timeline component.
+    Exports: GovernanceWorkflowLifecycleTimeline, buildLifecycleEvents()
+    Sub-components: LifecycleNode, LifecycleIcon
+    7-slot spine with chronological ordering from WORKFLOW_LIFECYCLE_EVENT_ORDER
+    Full mode: all slots + detail; Compact mode: recorded only, no detail
+    No mutation controls.
+
+  artifacts/ops-platform/src/lib/__tests__/governance-workflows-lifecycle.test.ts
+    73 assertions across T1–T10.
+    Pure node-environment tests — no React/DOM imports.
+    Imports only from governance-console-config.ts.
+
+Modified files (2):
+
+  artifacts/ops-platform/src/lib/governance-console-config.ts
+    Added: WORKFLOW_STATUS_MAP (9 entries: 5 canonical + 4 legacy)
+    Added: WORKFLOW_STATUS_ORDER (5-entry canonical order tuple)
+    Added: ESCALATION_LEVEL_MAP (8 entries: 4 canonical + 4 legacy)
+    Added: ESCALATION_LEVEL_ORDER (4-entry canonical order tuple)
+    Added: RESOLUTION_CLASSIFICATION_MAP, ALL_RESOLUTION_CLASSIFICATION_KEYS
+    Added: WORKFLOW_STATUS_FILTER_OPTIONS, ESCALATION_LEVEL_FILTER_OPTIONS,
+           RESOLUTION_CLASSIFICATION_FILTER_OPTIONS
+    Added: WORKFLOWS_UI_SAFETY_CONTRACT (12 boolean invariants)
+    Added: WORKFLOWS_EMPTY_STATE (3 text blocks)
+    Added: WORKFLOW_LIFECYCLE_EVENT_ORDER (7-entry event key tuple)
+
+  artifacts/ops-platform/src/pages/super-admin-governance-workflows.tsx
+    Full rewrite (P12-A placeholder → P12-D full workflow lifecycle review)
+    Sections: escalation banner, status summary cards (interactive),
+              escalation level summary cards (interactive),
+              workflow list (5-axis filter, expandable rows)
+    Local sub-components: WorkflowStatusBadge, EscalationBadge,
+                          ResolutionBadge, WorkflowRow, DetailField
+    Reuses: GovernanceWorkflowLifecycleTimeline, GovernanceEvidenceReferenceList,
+            GovernanceReadOnlyNotice, GovernanceSectionHeader, GovernanceErrorState
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 13 — REMAINING WORKFLOWS UI GAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What P12-D provides:
+  - Full status visual language (5 canonical + 4 legacy, 3 tiers, badge colours)
+  - Escalation level visual language (4 canonical + 4 legacy, 4 tiers)
+  - Resolution classification visual language (5 types, semantic tiers)
+  - Lifecycle timeline component (7 event slots, spine, icons, actor/note detail)
+  - 5-axis filter system (status, escalation, resolution, operator, workspace)
+  - Expandable workflow rows with full metadata + lifecycle + evidence
+  - Escalated-count banner promotion (orange highlight when escalated > 0)
+  - Cross-page linking: forensic context → Audit Integrity, violation context → Violations
+  - All 8 UI states implemented
+  - 12-property WORKFLOWS_UI_SAFETY_CONTRACT
+
+What P12-D does NOT provide (deferred):
+
+─────────────────────────────────────────────────────────────────────────────
+A)  WORKFLOW TRANSITION CONTROLS (READ-ONLY CONSTRAINT)
+─────────────────────────────────────────────────────────────────────────────
+  Acknowledge, escalate, and resolve buttons are intentionally absent.
+  If a future phase introduces controlled workflow transitions, it will
+  require explicit backend route design, operator attribution, and a
+  dedicated safety review before any mutation is exposed in the UI.
+
+─────────────────────────────────────────────────────────────────────────────
+B)  SERVER-SIDE WORKSPACE FILTER
+─────────────────────────────────────────────────────────────────────────────
+  Workspace filter is client-side over the 50-workflow fetch.
+  The hook accepts workspaceId already; the UI just needs to pass it.
+  Future: pass activeWorkspaceFilter to useGovernanceWorkflows({ workspaceId }).
+
+─────────────────────────────────────────────────────────────────────────────
+C)  PAGINATION
+─────────────────────────────────────────────────────────────────────────────
+  No pagination. Max 50 workflows. Future: offset/limit controls.
+
+─────────────────────────────────────────────────────────────────────────────
+D)  OPERATOR LOOKUP AUTOCOMPLETE
+─────────────────────────────────────────────────────────────────────────────
+  Operator filter is a free-text input. Future: debounced user search.
+
+─────────────────────────────────────────────────────────────────────────────
+E)  WORKFLOW DETAIL DEEP LINK
+─────────────────────────────────────────────────────────────────────────────
+  No /super-admin/governance/workflows/:id route. All detail is shown
+  inline via row expansion. Future: a dedicated workflow detail page with
+  a stable URL for bookmarking/sharing with other admins.
+
+─────────────────────────────────────────────────────────────────────────────
+F)  LIFECYCLE TIMELINE INLINE FORENSIC MINI-VIEW
+─────────────────────────────────────────────────────────────────────────────
+  The timeline shows escalatedAt/resolvedAt timestamps but does not embed
+  a GovernanceForensicTimeline. Future: "Show Audit Trail" lazy toggle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 14 — READINESS ASSESSMENT BEFORE GOVERNANCE ANALYTICS UI (P12-E)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE PLATFORM IS READY FOR P12-E (Governance Analytics UI) BECAUSE:
+
+  ✓ /super-admin/governance/analytics route exists and is protected
+  ✓ SuperAdminGovernanceAnalytics page is mounted and rendering
+  ✓ useGovernanceAnalytics() hook is wired and tested
+  ✓ useGovernanceTrends() hook is wired and tested
+  ✓ VIOLATION_SEVERITY_MAP + order available for chart axes
+  ✓ WORKFLOW_STATUS_MAP + ESCALATION_LEVEL_MAP available for chart groupings
+  ✓ All shared governance components available (ReadOnlyNotice, SectionHeader, ErrorState)
+  ✓ Navigation link active (BarChart2 icon, "Analytics")
+  ✓ Backend GET /platform/governance/analytics implemented (P11-F)
+  ✓ Backend GET /platform/governance/trends implemented (P11-F)
+  ✓ All backend tests pass (2399/2399)
+
+What P12-E will need to add (frontend-only):
+  - Trend chart visualisation (violations over time, by severity)
+  - Workflow resolution rate chart
+  - Escalation distribution bar/donut
+  - Policy coverage heatmap or matrix
+  - Time-range filter (7d / 30d / 90d / custom)
+  - All charts read-only — no drill-down mutations
+  - ANALYTICS_UI_SAFETY_CONTRACT
+
+No backend changes required for P12-E.
+No DB migrations required for P12-E.
+The entire P12-E scope is frontend-only.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOSURE STATEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 12-D is COMPLETE.
+
+  - 2 new files (lifecycle timeline component, test file)
+  - 2 modified files (config extended, workflows page fully rewritten)
+  - 0 backend changes
+  - 0 DB migrations
+  - 393/393 frontend tests passing (6 files, 73 new assertions)
+  - 2399/2399 backend tests passing
+  - Workflow status visual language: 5 canonical + 4 legacy, all rendering
+  - Escalation level visual language: 4 canonical + 4 legacy, all rendering
+  - Resolution classification: 5 types with semantic tiers, no legal wording
+  - Lifecycle timeline: 7 event slots, spine, per-event actor/note/evidence
+  - 5-axis filter system: status, escalation, resolution, operator, workspace
+  - Forensic context linking + violation context linking (read-only)
+  - 12-property WORKFLOWS_UI_SAFETY_CONTRACT — no acknowledge, no escalate,
+    no resolve, no close, no enforcement, no legal conclusions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+END OF WORKFLOW PHASE 12-D REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -1,0 +1,122 @@
+راجع forms.ts والـ EventBus architecture الحالية ثم نفّذ فقط هذه المهمة التحليلية بدون أي migration أو refactor فعلي حتى الآن.
+
+المهمة الحالية:
+تحليل وتصميم Forms Event Architecture قبل بدء forms migration.
+
+المشكلة الحالية:
+forms.ts يستخدم:
+- dynamic event names
+- legacy EVENTS
+- eventDispatcher.dispatch()
+
+بينما الـ EventBus الجديد يعتمد على:
+- canonical typed events
+- EVENT_TYPES
+- strict event contracts
+
+قبل migration لازم يتم حسم:
+كيف سيتم تمثيل forms داخل الـ canonical event architecture بدون خلق Event Chaos أو dynamic event explosion.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- forms.ts
+- أي form configuration/event mapping
+- eventDispatcher usage داخل forms
+- EVENT_TYPES الحالية
+- bridge.ts
+- activity.ts form listeners
+- notifications-bus.ts form listeners
+- registry.ts
+
+2- حلّل:
+كيف يتم توليد أسماء الأحداث حاليًا داخل forms.ts:
+- هل تأتي من DB؟
+- من config؟
+- من form type؟
+- من workflow config؟
+- من module mapping؟
+
+3- حدّد:
+ما هي أنواع الـ forms الحالية فعليًا:
+- leave requests
+- approvals
+- procurement
+- HR actions
+- dynamic forms
+- generic submissions
+
+4- قيّم الخيارين التاليين بعمق:
+
+الخيار A:
+Canonical event واحد:
+form.submitted
+
+ويحتوي payload غني:
+- formType
+- formKey
+- module
+- workflowType
+- schemaId
+- submissionCategory
+- entityReference
+
+الخيار B:
+لكل form نوع event مستقل:
+- leave.requested
+- procurement.requested
+- hr.warning.created
+- etc
+
+5- حلّل مخاطر:
+- event explosion
+- semantic duplication
+- workflow coupling
+- listener complexity
+- event ownership ambiguity
+- dynamic typing problems
+- registry scalability
+- workflow maintainability
+
+6- حدّد:
+ما هي الـ true business domain events
+وما هي مجرد generic form submissions.
+
+7- قيّم:
+هل بعض forms يجب أن تبقى:
+generic forms only
+
+بينما بعضها يجب أن يتحول إلى:
+official domain events.
+
+8- حلّل:
+كيف يمكن المحافظة على:
+- type safety
+- canonical contracts
+- workflow flexibility
+- dynamic forms support
+
+بنفس الوقت.
+
+9- لا تنفذ migration الآن.
+
+10- لا تغيّر أي routes أو payloads أو schema.
+
+11- إذا وجدت مشاكل معمارية خطيرة:
+وثّقها فقط بدون تنفيذ.
+
+12- في النهاية:
+أنشئ ملف TXT باسم:
+
+forms-event-architecture-review.txt
+
+ويحتوي:
+- التحليل الكامل
+- المقارنة بين الخيارين
+- recommended architecture
+- event taxonomy proposal
+- forms/domain boundary proposal
+- scalability analysis
+- migration strategy المقترحة
+- risks إذا تم اختيار architecture خاطئة
+- recommendation النهائية قبل بدء forms migration

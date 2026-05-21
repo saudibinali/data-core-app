@@ -1,0 +1,278 @@
+راجع:
+- workflow-phase-7a-report.txt
+- workflow-phase-8f-report.txt
+- workflow-phase-9b-report.txt
+- workflow-phase-9d-report.txt
+- workflow-phase-9f-report.txt
+خصوصًا:
+- scheduler governance
+- workload partitions
+- tenant containment
+- governance signals
+- observability events
+- enforcement bridge semantics
+
+ثم نفّذ فقط:
+P10-A — Reliability Domains & Failure Containment Foundations
+
+ولا تنفّذ:
+- distributed failover
+- active-active replication
+- Kubernetes HA orchestration
+- multi-region recovery
+- autoscaling infra
+- self-healing runtime
+
+عنوان المهمة:
+WORKFLOW PHASE 10-A — Reliability Domains & Failure Containment Foundations
+
+المهمة الحالية:
+تحويل:
+operational governance platform
+
+إلى:
+reliability-aware enterprise runtime architecture
+
+الهدف:
+تمكين:
+- reliability domain isolation
+- bounded failure propagation
+- runtime containment semantics
+- degradation-aware governance
+- resilience-readiness foundations
+
+بطريقة:
+deterministic failure-containment architecture
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT FAILURE SURFACES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workflow runtime
+- scheduler behavior
+- advisory systems
+- tenant partitions
+- enforcement bridge
+- observability stack
+
+حدّد:
+- أين failures تنتشر نظريًا
+- أين blast radius غير محدود
+- أين degradation غير مصنف
+- أين containment boundaries مفقودة
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN RELIABILITY DOMAIN MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+ReliabilityDomain
+
+ليحتوي:
+- domainId
+- domainType
+- affectedSubsystems
+- containmentLevel
+- degradationStatus
+- recoveryClassification
+- observabilityHealth
+- propagationRisk
+
+مع:
+deterministic containment semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — FAILURE CONTAINMENT ENGINE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+evaluateFailureContainment()
+
+بحيث:
+- يحدد blast radius
+- يصنف propagation risk
+- يكتشف subsystem degradation
+- يحدد containment boundaries
+- يمنع hidden cascading visibility
+
+لكن:
+بدون autonomous recovery.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — DEGRADATION CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+DegradationStatus
+
+يحتوي:
+- healthy
+- degraded
+- severely_degraded
+- containment_risk
+- critical
+
+اعتمد على:
+- scheduler pressure
+- observability failures
+- advisory storms
+- runtime backlog
+- isolation-health degradation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FAILURE PROPAGATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+FailurePropagationRisk
+
+يحتوي:
+- isolated
+- bounded
+- spreading
+- cascading
+
+مع:
+strict deterministic classification.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — RELIABILITY OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+كل reliability domains يجب:
+- تكون observable
+- deterministic
+- auditable
+- tenant-safe
+- containment-aware
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+reliability intelligence
+
+داخل:
+- governance dashboards
+- operational control plane
+- scheduler oversight
+- advisory systems
+
+لكن:
+بدون automated remediation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+reliability_domain_evaluated
+
+B)
+failure_containment_assessed
+
+C)
+failure_propagation_risk_detected
+
+D)
+runtime_degradation_classified
+
+كلها تحتوي:
+- domainId
+- degradationStatus
+- propagationRisk
+- containmentLevel
+- affectedSubsystems
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Reliability layer MUST:
+- remain READ-ONLY
+- never auto-recover
+- never restart runtimes
+- never mutate scheduler state
+- fail closed on ambiguity
+
+أي:
+reliability intelligence فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+reliability domains deterministic
+
+T2:
+blast radius classification stable
+
+T3:
+cascading failure risk detected correctly
+
+T4:
+degradation classification deterministic
+
+T5:
+containment boundaries stable
+
+T6:
+tenant-safe observability guaranteed
+
+T7:
+advisory storms influence degradation correctly
+
+T8:
+serialization ordering stable
+
+T9:
+no runtime mutation occurs
+
+T10:
+reliability layer remains read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- self-healing systems
+- automated failover
+- distributed recovery
+- autoscaling remediation
+- Kubernetes orchestration
+- runtime restart automation
+
+خلك:
+minimal deterministic reliability intelligence layer.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-10a-report.txt
+
+ويحتوي:
+- reliability domain architecture
+- failure containment semantics
+- degradation classification model
+- propagation risk model
+- observability additions
+- governance integration points
+- tests results
+- remaining resilience gaps
+- readiness assessment قبل recovery orchestration phase

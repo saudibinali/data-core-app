@@ -1,0 +1,358 @@
+WORKFLOW GOVERNANCE — PHASE 3: RUNTIME PROTECTION FOUNDATIONS
+Implementation Report
+Date: 2026-05-13
+Status: COMPLETE — All 6 protection layers (P3-A through P3-F) implemented, typecheck clean, server running.
+
+══════════════════════════════════════════════════════════════
+EXECUTIVE SUMMARY
+══════════════════════════════════════════════════════════════
+
+Phase 3 introduces six independent protection layers that harden the No-Code
+Workflow Platform against the four catastrophic runtime risks identified in the
+architecture review (workflow-governance-architecture-review.txt):
+
+  WG-01  Event loop (recursive workflow triggers)           ← P3-C + P3-B
+  WG-02  Approval steps stuck permanently                   ← P3-A validator
+  WG-03  Condition branching silently ignored                ← P3-A validator
+  WG-04  Delay steps fire instantly (no scheduling)         ← P3-A validator
+
+Additionally: WG-08 (notification fanout), WG-12 (round_robin), lifecycle
+integrity (soft-delete, draft→active gates).
+
+All Phase 3 changes are backward-compatible: existing seeded workflows
+automatically retain status='active' via the column default (7 confirmed active
+after migration), and the seeder explicitly sets status='active' for template
+workflows going forward.
+
+══════════════════════════════════════════════════════════════
+PROTECTION LAYERS IMPLEMENTED
+══════════════════════════════════════════════════════════════
+
+─── P3-A  GOVERNANCE VALIDATOR ──────────────────────────────────────────────
+File:  artifacts/api-server/src/lib/workflows/validator.ts  (NEW)
+
+Function: validateWorkflow(steps, triggerEvent) → ValidationResult
+
+BLOCKED step types (return ValidationError → block activation):
+
+  Code                             Risk  Description
+  ─────────────────────────────────────────────────────────────────────────
+  WG-02_APPROVAL_BLOCKED           WG-02  Approval step has no resume mechanism.
+                                         Engine is permanently stuck in
+                                         "waiting_approval" status.
+  WG-04_DELAY_BLOCKED              WG-04  Delay step is a no-op. Executes
+                                         instantly regardless of duration.
+  WG-03_CONDITION_BRANCHING_BLOCKED WG-03 Condition onTrue/onFalse routing
+                                         ignored by sequential executor.
+                                         (Condition steps with EMPTY branches
+                                         are allowed — useful for audit.)
+  WG-12_ROUND_ROBIN_BLOCKED        WG-12  round_robin assigneeType falls through
+                                         to null → silent skip.
+
+WARNINGS (allow activation with admin acknowledgment):
+  UNKNOWN_STEP_TYPE                Unknown step type → silent runtime skip
+  UNRESOLVED_RECIPIENT_TYPE        "department" recipient → no recipients resolved
+  MISSING_NOTIFICATION_CONTENT     Notification missing title or message
+  MISSING_TASK_TITLE               Task step missing title
+
+Test results:
+  validateWorkflow([notification step]) → valid=true, errors=0, warnings=0  ✓
+  validateWorkflow([approval, delay])   → valid=false, errors=2:
+    WG-02_APPROVAL_BLOCKED, WG-04_DELAY_BLOCKED                             ✓
+
+─── P3-B  WORKSPACE EXECUTION RATE LIMIT ────────────────────────────────────
+File:  artifacts/api-server/src/lib/workflows/engine.ts
+
+Constant:  MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100
+
+Implementation:
+  Before entering the workflow trigger loop, the engine counts all executions
+  for the workspace created in the last 60 seconds:
+
+    SELECT count(*) FROM workflow_executions
+    WHERE workspace_id = ? AND started_at >= now() - '60 seconds'
+
+  If count >= 100: log structured warning + return (no error thrown).
+
+  Warning log fields:
+    workspaceId, eventType, recentExecutionCount, limitPerMinute
+
+Purpose: Second line of defence for indirect event loops (WG-01) where
+  workflow steps mutate state causing route handlers to emit new events
+  without chain metadata. Also prevents accidental execution storms from
+  high-volume workspaces.
+
+Design note: Suppresses silently (warn log only) so event dispatch does not
+  crash — eventDispatcher.emit() must never throw.
+
+─── P3-C  RECURSION CHAIN GUARD ─────────────────────────────────────────────
+File:  artifacts/api-server/src/lib/workflows/engine.ts
+
+Constants:  MAX_CHAIN_DEPTH = 5
+
+Implementation:
+  The engine extracts _executionChain from payload.data at the top of
+  handleEvent(). The chain is a string[] of event types that caused this
+  dispatch (propagated by future "emit event" step handlers in Phase 4).
+
+  Two guard checks before any DB work:
+
+  1. Loop detection: if (executionChain.includes(payload.event)) → reject
+     Log reason: "event_already_in_chain"
+
+  2. Depth limit: if (executionChain.length >= 5) → reject
+     Log reason: "max_chain_depth_exceeded"
+
+  Extended chain ([...executionChain, payload.event]) is stored in
+  executions.context._executionChain for future step handlers to propagate.
+
+  Warning log fields: workspaceId, eventType, executionChain, rejectionReason
+
+Engine queries updated:
+  BEFORE:  WHERE workspace_id=? AND trigger_event=? AND is_active=true
+  AFTER:   WHERE workspace_id=? AND trigger_event=? AND status='active'
+             AND deleted_at IS NULL
+
+  (Both primary tier and form.submitted hint tier updated.)
+
+─── P3-D  FANOUT CAP (notifications + approvals) ────────────────────────────
+Files:
+  artifacts/api-server/src/lib/workflows/steps/notification.ts
+  artifacts/api-server/src/lib/workflows/steps/approval.ts
+
+Constants:
+  MAX_NOTIFICATION_RECIPIENTS_PER_STEP = 50
+  MAX_APPROVER_NOTIFICATIONS = 50
+
+Implementation:
+  After recipient/approver resolution, before INSERT:
+
+    if (recipientIds.length > 50) {
+      logger.warn({ resolvedCount, cappedTo: 50, ... });
+      recipientIds = recipientIds.slice(0, 50);
+    }
+
+  Step output includes truncated=true + cappedTo when truncation occurred.
+  Step does NOT fail — delivers to capped subset, remaining steps execute.
+
+Purpose: Prevents WG-08 notification storms when role-targeted notifications
+  resolve to all members of a large workspace (e.g. "notify all admins" in
+  a 200-user tenant generates 200 notification rows per execution).
+
+─── P3-E  SOFT DELETE + EXECUTION HISTORY PRESERVATION ──────────────────────
+Files:
+  lib/db/src/schema/workflows.ts         — new columns
+  artifacts/api-server/src/routes/workflows.ts  — soft delete implementation
+
+New DB columns (workflow_definitions):
+  status      TEXT NOT NULL DEFAULT 'active'    — lifecycle state
+  deleted_at  TIMESTAMP WITH TIME ZONE          — NULL = not deleted
+  archived_at TIMESTAMP WITH TIME ZONE          — set when archived
+
+Index:
+  idx_wf_def_status ON (workspace_id, status)  — engine query optimization
+
+DELETE /workflows/:id behavior:
+  BEFORE:  Hard delete (DELETE FROM workflow_definitions WHERE id=?)
+  AFTER:   Soft delete:
+             UPDATE SET status='archived', is_active=false,
+                        deleted_at=now(), archived_at=now()
+
+  - Idempotent: already-archived → returns 204 without re-updating
+  - Hard delete intentionally removed: execution history (workflow_executions)
+    is audit data; cascade would destroy it permanently
+
+GET /workflows filter:    WHERE deleted_at IS NULL
+GET /workflows/:id filter: WHERE deleted_at IS NULL → 404 on archived
+Engine query filter:       WHERE status='active' AND deleted_at IS NULL
+
+Test results:
+  DELETE /workflows/27 → 204                               ✓
+  GET /workflows/27 (after delete) → 404                   ✓
+  Workflow absent from GET /workflows list                  ✓
+  2nd DELETE (idempotent) → 204                            ✓
+
+─── P3-F  DRAFT/ACTIVATE LIFECYCLE GATES ────────────────────────────────────
+Files:
+  artifacts/api-server/src/routes/workflows.ts
+  lib/api-spec/openapi.yaml               — 2 new endpoints + 4 new schemas
+
+NEW ENDPOINTS:
+
+  POST /api/workflows/:id/validate
+    Auth: workflow.manage
+    Action: runs validateWorkflow(), returns ValidationResult
+    Side effects: NONE (read-only)
+    Response: { workflowId, status, valid, errors[], warnings[] }
+
+  POST /api/workflows/:id/activate
+    Auth: workflow.manage
+    Action:
+      1. Load workflow (must not be archived)
+      2. Run validateWorkflow()
+      3. If invalid → 422 { error, workflowId, valid:false, errors[] }
+      4. If valid   → UPDATE status='active', is_active=true → 200
+    Idempotent: already-active → 200 { alreadyActive: true, ... }
+
+MODIFIED BEHAVIOR:
+
+  POST /workflows:
+    BEFORE: creates with is_active=true (or per request body)
+    AFTER:  always creates with status='draft', is_active=false
+    Reason: Prevents accidentally live workflows from firing before review.
+
+  PATCH /workflows/:id:
+    Added pre-check: fetch current status before updates.
+    Blocked if status='active'  → 422 WORKFLOW_IMMUTABLE_ACTIVE
+    Blocked if deleted_at != null → 422 WORKFLOW_ARCHIVED
+    Added status transitions via PATCH (deactivation only):
+      draft → deprecated, deprecated → draft, active → deprecated
+    Activation (→ active) requires POST /activate (runs validation first).
+    Removed is_active from PATCH body (use /activate instead).
+
+Test results:
+  POST /workflows → status=draft, isActive=false                           ✓
+  POST /workflows/:id/validate (safe steps) → valid=true, errors=0         ✓
+  POST /workflows/:id/activate (safe steps) → status=active                ✓
+  PATCH active workflow → 422 WORKFLOW_IMMUTABLE_ACTIVE                     ✓
+  POST /workflows/:id/validate (approval+delay) → valid=false, errors=2    ✓
+  POST /workflows/:id/activate (blocked steps) → HTTP 422                  ✓
+
+══════════════════════════════════════════════════════════════
+OPENAPI + CODEGEN CHANGES
+══════════════════════════════════════════════════════════════
+
+lib/api-spec/openapi.yaml — new entries:
+
+  Endpoints:
+    POST /workflows/{id}/validate   operationId: validateWorkflow
+    POST /workflows/{id}/activate   operationId: activateWorkflow
+
+  Schemas:
+    WorkflowDefinition  — added: status (enum), archivedAt, deletedAt
+    WorkflowValidationResult — new: { workflowId, status, valid, errors[], warnings[] }
+    WorkflowValidationError  — new: { code, message, stepIndex?, stepName?, stepType? }
+    WorkflowValidationWarning — new: same shape as Error
+    UpdateWorkflowBody  — replaced isActive with status (enum: draft|deprecated)
+
+Generated artifacts (pnpm --filter @workspace/api-spec run codegen):
+  lib/api-zod/src/generated/api.ts           — updated Zod schemas
+  lib/api-client-react/src/generated/       — updated React Query hooks
+    New hooks: useValidateWorkflow(), useActivateWorkflow()
+
+══════════════════════════════════════════════════════════════
+FILES CHANGED
+══════════════════════════════════════════════════════════════
+
+  CREATED:
+    artifacts/api-server/src/lib/workflows/validator.ts
+
+  MODIFIED:
+    lib/db/src/schema/workflows.ts
+      + status column (text, default 'active')
+      + deleted_at column (timestamp, nullable)
+      + archived_at column (timestamp, nullable)
+      + idx_wf_def_status index
+    artifacts/api-server/src/lib/workflows/engine.ts
+      + count, gte, isNull imports
+      + MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE = 100 (P3-B)
+      + MAX_CHAIN_DEPTH = 5 (P3-C)
+      + P3-C chain guard (loop + depth checks) at top of handleEvent()
+      + P3-B rate limit (COUNT query before execution loop)
+      + extendedChain stored in execution context._executionChain
+      + Engine queries: status='active' AND deleted_at IS NULL
+    artifacts/api-server/src/lib/workflows/steps/notification.ts
+      + MAX_NOTIFICATION_RECIPIENTS_PER_STEP = 50
+      + Fanout cap + truncation warning before INSERT
+    artifacts/api-server/src/lib/workflows/steps/approval.ts
+      + MAX_APPROVER_NOTIFICATIONS = 50
+      + Fanout cap + truncation warning before INSERT
+    artifacts/api-server/src/routes/workflows.ts
+      + isNull import from drizzle-orm
+      + validateWorkflow import
+      + GET /workflows: isNull(deletedAt) filter, status/archivedAt/deletedAt in SELECT
+      + POST /workflows: status='draft', isActive=false defaults
+      + POST /workflows/:id/validate (new)
+      + POST /workflows/:id/activate (new)
+      + GET /workflows/:id: isNull(deletedAt) filter, status/archivedAt/deletedAt in SELECT
+      + PATCH /workflows/:id: pre-check status, immutable-active guard
+      + DELETE /workflows/:id: soft delete (was hard delete)
+    artifacts/api-server/src/seed/workflows.ts
+      + status: 'active' added to INSERT values
+    lib/api-spec/openapi.yaml
+      + POST /workflows/{id}/validate endpoint
+      + POST /workflows/{id}/activate endpoint
+      + WorkflowDefinition: status, archivedAt, deletedAt fields
+      + WorkflowValidationResult schema
+      + WorkflowValidationError schema
+      + WorkflowValidationWarning schema
+      + UpdateWorkflowBody: status field (replaces isActive)
+
+  AUTO-GENERATED (do not edit):
+    lib/api-zod/src/generated/api.ts
+    lib/api-client-react/src/generated/**
+
+══════════════════════════════════════════════════════════════
+VERIFICATION
+══════════════════════════════════════════════════════════════
+
+  pnpm --filter @workspace/db run push        → [✓] Changes applied
+  pnpm --filter @workspace/api-spec run codegen → [✓] Orval + typecheck:libs
+  pnpm --filter @workspace/api-server run typecheck → [✓] No errors
+  API server restart                           → [✓] Running
+
+  Active seeded workflows preserved:           active_workflows = 7
+  All 6 P3 endpoint/logic tests passed         [✓]
+
+══════════════════════════════════════════════════════════════
+ARCHITECTURE CONSTRAINTS PRESERVED
+══════════════════════════════════════════════════════════════
+
+  ✓  No queues, Redis, or external dependencies added
+  ✓  No approval resume logic (blocked at validator, not faked)
+  ✓  EventBus architecture and bridge direction unchanged
+  ✓  Diagnostics APIs (Phase 2) untouched
+  ✓  Contract-first API: all new endpoints in openapi.yaml first
+  ✓  Backward compatible: existing active workflows continue working
+
+══════════════════════════════════════════════════════════════
+RISKS REMAINING (Phase 4+)
+══════════════════════════════════════════════════════════════
+
+  WG-02  Approval resume:   Blocked at validator. Needs Phase 5 (approvals table
+           + explicit resume endpoint + engine re-entry mechanism).
+
+  WG-03  DAG execution:     Condition branching blocked at validator. Needs
+           Phase 4 (replace for-loop executor with graph traversal using
+           nextSteps from step output).
+
+  WG-04  Delay scheduling:  Blocked at validator. Needs Phase 5 (persistent
+           timer queue or scheduled task runner).
+
+  WG-05  Execution timeout: No per-execution wall-clock limit. A long-running
+           step can block the event handler indefinitely. Needs Phase 4
+           (AbortController + Promise.race timeout per step).
+
+  WG-06  Concurrent execution:  No mutex on workflowId — two identical events
+           in rapid succession both trigger. Needs Phase 4 (advisory lock or
+           deduplication window).
+
+  WG-07  Context size:  No limit on JSONB context column size. Needs Phase 4
+           (context truncation + size limit check before INSERT).
+
+  WG-08  Notification fanout:  Capped at 50 (P3-D). Still unbounded if 50 is
+           exceeded frequently. Phase 4: per-step recipient budget + bulk
+           notification grouping.
+
+  WG-09  Missing step handler: Unknown step types silently skip (warned in
+           validator). Phase 4: explicit registry check + fail-fast.
+
+  WG-11  isActive/status desync:  Now synced by activate + PATCH + soft-delete
+           routes. Phase 4: DB constraint or trigger to enforce sync invariant.
+
+  WG-13  Execution state machine: No enforcement of valid status transitions
+           on workflow_executions. Phase 4: validate status before UPDATE.
+
+══════════════════════════════════════════════════════════════
+END OF REPORT
+══════════════════════════════════════════════════════════════

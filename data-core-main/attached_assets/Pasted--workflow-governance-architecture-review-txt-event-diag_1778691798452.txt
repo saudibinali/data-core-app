@@ -1,0 +1,297 @@
+راجع:
+- workflow-governance-architecture-review.txt
+- event-diagnostics-phase-2-report.txt
+- event-observability-phase-0-1-report.txt
+
+ثم نفّذ فقط:
+PHASE 3 — Governance Foundations
+
+بدون الدخول في:
+- approval resume
+- delay scheduling
+- advanced orchestration
+- workflow redesign
+
+عنوان المهمة:
+WORKFLOW GOVERNANCE PHASE 3 — Runtime Protection Foundations
+
+المهمة الحالية:
+إغلاق الكوارث التشغيلية الحرجة داخل الـ No-Code Workflow Platform
+قبل أي Customer Workflow Rollout.
+
+الهدف:
+منع:
+- recursive event loops
+- unsafe workflow publishing
+- notification storms
+- tenant resource starvation
+- execution history loss
+- live workflow corruption
+
+مع الحفاظ على:
+- architecture الحالية
+- EventBus الحالية
+- workflow runtime الحالي
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — P3-A
+BLOCK UNSAFE STEP TYPES AT PUBLISH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ:
+POST /api/workflows/:id/validate
+
+وحوّل publish flow ليستخدمه داخليًا.
+
+المطلوب:
+أي workflow يحتوي:
+- approval step
+- condition branching
+- delay step
+- round_robin assignment
+
+يتم:
+BLOCK عند publish
+
+مع errors واضحة structured.
+
+أمثلة:
+- "Approval steps are not production-ready yet (WG-02)"
+- "Delay steps are disabled until scheduling engine exists"
+- "Condition branching is temporarily disabled pending DAG execution support"
+
+المطلوب:
+- validation errors structured
+- warnings support
+- no runtime silent failures
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — P3-B
+WORKSPACE EXECUTION RATE LIMIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+engine.ts
+
+قبل إنشاء executions:
+
+أضف:
+MAX_EXECUTIONS_PER_MINUTE_PER_WORKSPACE
+
+الافتراضي:
+100
+
+المطلوب:
+- configurable constant
+- count recent executions خلال آخر 60 ثانية
+- إذا تجاوز الحد:
+  - لا تنشئ execution
+  - سجّل structured warning
+  - لا ترمِ exception
+  - لا تكسر event dispatch
+
+أضف:
+workspaceId
+workflowId
+eventType
+recentExecutionCount
+
+إلى logs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — P3-C
+RECURSION / EVENT LOOP GUARD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+هذه أهم مهمة بالمشروع الحالي.
+
+المطلوب:
+إضافة:
+executionChain
+
+إلى:
+event metadata / payload propagation
+
+الهدف:
+منع:
+workflow → event → workflow → event loops
+
+المطلوب:
+
+A)
+أضف chain propagation داخل:
+- workflow-triggered emits
+- bridge
+- dispatcher integration
+
+B)
+قبل بدء execution جديدة:
+
+إذا:
+- chain يحتوي نفس event الحالي
+أو:
+- chain length > MAX_CHAIN_DEPTH
+
+يتم:
+- رفض execution
+- structured warning log
+- no throw
+- no crash
+
+الافتراضي:
+MAX_CHAIN_DEPTH = 5
+
+المطلوب:
+logs تحتوي:
+- workspaceId
+- workflowId
+- eventType
+- executionChain
+- rejectionReason
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — P3-D
+NOTIFICATION FANOUT CAP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+داخل:
+notification step executor
+
+أضف:
+MAX_NOTIFICATION_RECIPIENTS_PER_STEP
+
+الافتراضي:
+50
+
+إذا recipientIds > limit:
+- slice(limit)
+- structured warning log
+
+المطلوب:
+- لا يفشل step
+- لا يرمي exception
+- warning واضح
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — P3-E
+SOFT DELETE + ARCHIVE LIFECYCLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المطلوب:
+workflow_definitions
+
+إضافة:
+- status
+- archivedAt nullable
+- deletedAt nullable
+
+الحالات:
+- draft
+- active
+- deprecated
+- archived
+
+المطلوب:
+- workflows المحذوفة لا تُحذف فعليًا
+- preserve execution history
+- منع cascade history destruction
+
+لا تنفذ:
+- full versioning
+- steps_snapshot
+- rollback system
+
+هذه مؤجلة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — P3-F
+MINIMAL DRAFT/ACTIVE GOVERNANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المطلوب:
+- PATCH edit مسموح فقط لـ draft
+- active workflows immutable
+- activation flow واضح
+
+أضف:
+POST /api/workflows/:id/activate
+
+المطلوب:
+- validate أولًا
+- status → active
+- deactivate previous active version إذا لزم
+- no version tables حاليًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — SAFETY LOGGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف structured logs واضحة لـ:
+- loop rejection
+- throttling
+- publish validation failure
+- notification truncation
+- activation attempts
+
+كلها:
+warn level
+
+لا تستخدم:
+info spam
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- queues
+- Redis
+- approval resume
+- DAG execution
+- scheduler
+- retry engines
+- workflow version tables
+- simulation APIs
+- OpenTelemetry
+- external governance systems
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — PRESERVE ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تغيّر:
+- EventBus architecture
+- diagnostics APIs
+- leave domain
+- bridge direction
+- Promise.allSettled behavior
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — COMMENTS & DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف comments واضحة تشرح:
+- why unsafe steps are blocked
+- why recursion protection exists
+- why workflows are immutable when active
+- difference between governance vs execution
+- why soft delete required for auditability
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-governance-phase-3-report.txt
+
+ويحتوي:
+- جميع التعديلات
+- validation behavior
+- recursion protection behavior
+- throttling behavior
+- notification cap behavior
+- workflow lifecycle behavior
+- schema changes
+- any remaining catastrophic risks
+- readiness assessment قبل Phase 4

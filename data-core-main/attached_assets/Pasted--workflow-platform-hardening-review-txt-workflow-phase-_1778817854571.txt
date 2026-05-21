@@ -1,0 +1,277 @@
+راجع:
+- workflow-platform-hardening-review.txt
+- workflow-phase-7a-report.txt
+- workflow-phase-8e-report.txt
+- workflow-phase-8f-report.txt
+خصوصًا:
+- workspace-scoped semantics
+- governance APIs
+- comparative intelligence
+- advisory signals
+- analytics query boundaries
+- existing tenant filtering patterns
+
+ثم نفّذ فقط:
+P9-A — Multi-Tenant Isolation & Workspace Boundary Hardening Foundations
+
+ولا تنفّذ:
+- distributed sharding
+- multi-region infra
+- cross-workspace federation
+- tenant autoscaling
+- organization hierarchy federation
+- distributed queue orchestration
+
+عنوان المهمة:
+WORKFLOW PHASE 9-A — Multi-Tenant Isolation & Workspace Boundary Hardening Foundations
+
+المهمة الحالية:
+تحويل:
+workspace-aware platform behavior
+
+إلى:
+formally hardened multi-tenant isolation architecture
+
+الهدف:
+تمكين:
+- strict tenant isolation
+- workspace-boundary enforcement
+- analytics isolation guarantees
+- governance isolation correctness
+- tenant-safe operational scaling
+
+بطريقة:
+deterministic tenant-boundary enforcement layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT TENANT MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- workspaceId propagation
+- workflow APIs
+- governance endpoints
+- analytics queries
+- observability events
+- advisory infrastructure
+
+حدّد:
+- أين workspace scoping implicit فقط
+- أين isolation يعتمد على conventions
+- أين cross-workspace leakage ممكن نظريًا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN TENANT ISOLATION MODEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TenantIsolationContext
+
+ليحتوي:
+- workspaceId
+- tenantBoundaryId
+- requestScopeId
+- isolationLevel
+- actorId
+- evaluationContext
+
+مع:
+strict deterministic semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — ISOLATION ENFORCEMENT LAYER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+enforceTenantIsolation()
+
+بحيث:
+- يتحقق من workspace ownership
+- يمنع cross-workspace access
+- يرفض orphan analytics access
+- يمنع governance leakage
+- يضمن query-boundary correctness
+
+لكن:
+بدون runtime mutation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ANALYTICS ISOLATION HARDENING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- comparative intelligence
+- governance signals
+- trend APIs
+- rollup queries
+- historical analytics
+
+وتأكد:
+كل analytics:
+- tenant-scoped بالكامل
+- deterministic boundaries
+- no shared aggregation leakage
+- no workspace crossover
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — OBSERVABILITY ISOLATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+تأكد:
+structured events تحتوي دائمًا:
+- workspaceId
+- requestScopeId
+- tenantBoundaryId
+
+وامنع:
+- ambiguous events
+- orphan telemetry
+- cross-tenant observability mixing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — TENANT RISK CLASSIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم:
+TenantIsolationRiskAssessment
+
+يحتوي:
+- low / moderate / high / critical
+- leakageRisk
+- orphanAccessRisk
+- analyticsBoundaryRisk
+- observabilityIsolationRisk
+
+مع:
+deterministic assessment semantics.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — GOVERNANCE INTEGRATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ادمج:
+tenant isolation intelligence
+
+داخل:
+- governance APIs
+- analytics APIs
+- advisory systems
+- operational consoles
+
+لكن:
+بدون federation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Structured events مطلوبة:
+
+A)
+tenant_isolation_enforced
+
+B)
+tenant_boundary_violation_blocked
+
+C)
+tenant_analytics_scope_validated
+
+D)
+tenant_observability_scope_validated
+
+كلها تحتوي:
+- workspaceId
+- tenantBoundaryId
+- requestScopeId
+- actorId
+- isolationLevel
+- action
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Tenant isolation layer MUST:
+- remain deterministic
+- never silently fallback
+- never auto-correct boundaries
+- fail closed on ambiguity
+- never allow implicit tenant crossover
+
+أي:
+strict enterprise isolation semantics فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+cross-workspace workflow access blocked
+
+T2:
+analytics queries remain tenant-scoped
+
+T3:
+governance signals isolated correctly
+
+T4:
+orphan request rejected safely
+
+T5:
+missing workspace context fails closed
+
+T6:
+observability events always scoped
+
+T7:
+tenant boundary enforcement deterministic
+
+T8:
+comparative intelligence isolated per workspace
+
+T9:
+historical analytics remain isolated
+
+T10:
+no implicit tenant crossover possible
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- distributed tenant federation
+- cross-workspace analytics
+- org-level aggregation
+- multi-region replication
+- tenant autoscaling
+- dynamic shard orchestration
+
+خلك:
+minimal deterministic tenant isolation infrastructure.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-9a-report.txt
+
+ويحتوي:
+- tenant isolation architecture
+- boundary enforcement model
+- analytics isolation guarantees
+- observability isolation semantics
+- tenant risk assessment model
+- governance integration points
+- observability additions
+- tests results
+- remaining multi-tenant scaling gaps
+- readiness assessment قبل workload partitioning phase

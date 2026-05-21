@@ -1,0 +1,244 @@
+WORKFLOW PHASE 5-E REPORT
+Immutable Publish Governance & Activation Safety
+=================================================
+Completed: 2026-05-14
+Tests: 492/492 passing (40 new tests added this phase)
+Typecheck: clean (zero errors)
+Codegen: clean (orval regenerated, libs compiled)
+
+
+1. OBJECTIVE
+────────────
+Replace the lightweight POST /workflows/:id/activate toggle with a full
+immutable publish pipeline. Every activation now:
+  (a) Runs the full governance validation (all 4 engine passes + per-step checks).
+  (b) Writes an immutable, append-only version row to `workflow_definition_versions`.
+  (c) Closes the previously active version row (sets deactivated_at = NOW()).
+  (d) Updates the definition atomically: status=active, version++, currentVersionId,
+      publishedAt, publishedBy.
+
+The version history table is append-only. Version rows are never deleted or
+overwritten — only `deactivated_at` and `deactivated_by` are set when a version
+is superseded or the workflow is deprecated.
+
+
+2. DATABASE SCHEMA (lib/db/src/schema/workflows.ts)
+────────────────────────────────────────────────────
+New table: `workflow_definition_versions`
+  - id                 SERIAL PRIMARY KEY
+  - definitionId       INTEGER NOT NULL → workflow_definitions(id) ON DELETE RESTRICT
+  - workspaceId        INTEGER NOT NULL → workspaces(id) ON DELETE CASCADE
+  - version            INTEGER NOT NULL
+  - steps              JSONB NOT NULL             ← frozen at publish time
+  - conditions         JSONB NOT NULL             ← frozen at publish time
+  - triggerEvent       TEXT NOT NULL              ← frozen at publish time
+  - name               TEXT NOT NULL              ← frozen at publish time
+  - nameAr             TEXT
+  - changeNotes        TEXT                       ← admin publish notes
+  - publishedBy        INTEGER
+  - publishedAt        TIMESTAMP NOT NULL DEFAULT NOW()
+  - deactivatedAt      TIMESTAMP                  ← NULL = currently active
+  - deactivatedBy      INTEGER
+  - validationSummary  JSONB                      ← full validation result
+
+  Unique index: (definitionId, version)   — prevents duplicate version numbers
+  Index:        (workspaceId, definitionId, deactivatedAt)
+
+New columns on `workflow_definitions`:
+  - version          INTEGER NOT NULL DEFAULT 0  ← monotonic publish counter
+  - currentVersionId INTEGER                     ← FK to versions (plain int, no circular FK)
+  - publishedAt      TIMESTAMP
+  - publishedBy      INTEGER
+
+Design note: `ON DELETE RESTRICT` on the definitionId FK prevents hard-deleting
+a workflow that has a version history. Soft-delete (status=archived, deletedAt set)
+remains the only safe removal path.
+
+
+3. API CHANGES (lib/api-spec/openapi.yaml)
+──────────────────────────────────────────
+POST /workflows/{id}/activate
+  - New request body: PublishWorkflowBody { changeNotes?: string }
+  - Response schema changed from WorkflowValidationResult → WorkflowPublishResult
+  - WorkflowPublishResult extends the validation result with: version, versionId,
+    publishedAt, publishedBy, changeNotes
+
+GET /workflows/{id}/versions   ← NEW ENDPOINT
+  - Returns WorkflowVersionHistory: workflowId, workflowName, versions[]
+  - Each WorkflowDefinitionVersion: id, version, triggerEvent, name, changeNotes,
+    publishedBy, publishedAt, deactivatedAt, deactivatedBy, validationSummary,
+    stepCount
+
+WorkflowDefinition schema updated:
+  - Added: version (integer, required), currentVersionId, publishedAt, publishedBy
+
+New component schemas:
+  - PublishWorkflowBody
+  - WorkflowPublishResult
+  - WorkflowDefinitionVersion
+  - WorkflowVersionHistory
+
+
+4. ROUTE HANDLER (artifacts/api-server/src/routes/workflows.ts)
+────────────────────────────────────────────────────────────────
+POST /workflows/:id/activate — full publish transaction:
+  1. Load definition (workspaceId scoped).
+  2. If status === 'active': return 200 { alreadyActive: true } (idempotent).
+  3. If status === 'archived': return 404.
+  4. Run validateWorkflow(steps, triggerEvent).
+  5. If errors.length > 0: emit `workflow_publish_blocked` audit log, return 422.
+  6. DB transaction:
+     a. If currentVersionId exists → close previous version row
+        (SET deactivatedAt = NOW(), deactivatedBy = req.userId)
+     b. INSERT workflow_definition_versions with full frozen snapshot +
+        validationSummary JSONB + changeNotes.
+     c. UPDATE workflow_definitions:
+        status = 'active', isActive = true, version = oldVersion + 1,
+        currentVersionId = newVersionId, publishedAt = NOW(), publishedBy = userId
+  7. Emit `workflow_publish_started` + `workflow_publish_completed` audit log events.
+  8. Return 200 WorkflowPublishResult with version metadata.
+
+PATCH /workflows/:id — deprecation path updated:
+  - When status transitions to 'deprecated': wraps in a transaction that also
+    closes the active version row (sets deactivatedAt, deactivatedBy) and clears
+    currentVersionId = null on the definition.
+  - Emits `workflow_deprecated` audit log event.
+
+GET /workflows/:id/versions — new endpoint:
+  - Returns all version rows for the definition, ordered by version DESC.
+  - Joins publishedBy → users table for publishedByName display field.
+  - Returns 404 if definition not found (workspaceId scoped).
+
+
+5. ENGINE UPDATE (artifacts/api-server/src/lib/workflows/engine.ts)
+────────────────────────────────────────────────────────────────────
+workflowVersion at execution INSERT:
+  Before P5-E: always null (commented "populated in P7-A").
+  After  P5-E: (def as unknown as { version?: number | null }).version ?? null
+  - def.version = 0 → legacy definition never re-published (pre-P5-E).
+  - def.version = N → version N was active at trigger time.
+  - NULL → pre-schema execution (DB column didn't exist yet).
+
+The observability log at execution creation also updated to record the live
+def.version value.
+
+
+6. AUDIT EVENTS
+───────────────
+workflow_publish_started   — emitted before the validation run (on every attempt)
+workflow_publish_completed — emitted after successful publish transaction
+workflow_publish_blocked   — emitted when validation errors block the publish
+workflow_deprecated        — emitted when PATCH status → 'deprecated' closes
+                             the active version row
+
+
+7. TEST COVERAGE (artifacts/api-server/src/lib/workflows/__tests__/)
+──────────────────────────────────────────────────────────────────────
+New file: publish-lifecycle.test.ts (40 tests)
+
+  PL-01  Version numbering semantics (4 tests)
+         - First publish: 0 → 1
+         - Monotonic increment
+         - Always positive
+         - Rollback creates higher version (forward-only log)
+
+  PL-02  Validation gates publish (7 tests)
+         - Valid single-step workflow is publishable
+         - Valid multi-step workflow is publishable
+         - Linear two-step: no topology errors
+         - WG-03_TRUE_ROUTE_SELF_LOOP blocks publish
+         - WG-03_TRUE_ROUTE_NOT_FOUND (OOB target) blocks publish
+         - High fanout: warning does not block publish
+         - Empty steps: EMPTY_STEPS error returned
+
+  PL-03  Publish metadata model (4 tests)
+         - changeNotes optional (null OK)
+         - Empty string changeNotes normalized to null
+         - publishedAt is a recent timestamp
+         - validationSummary captures full governance result
+
+  PL-04  Immutable publish artifact invariants (4 tests)
+         - Version row captures full definition state at publish time
+         - Version rows are append-only (only deactivatedAt/By change)
+         - Active status: exactly one open version row
+         - Deprecated status: zero open version rows
+
+  PL-05  Publish lifecycle state machine (6 tests)
+         - draft → deprecated allowed via PATCH
+         - deprecated → draft allowed via PATCH
+         - active → deprecated allowed via PATCH
+         - archived: no allowed transitions (terminal)
+         - active → active not a PATCH transition (use POST /activate)
+         - draft → active not a PATCH transition (use POST /activate)
+
+  PL-06  Execution version linkage (3 tests)
+         - workflowVersion matches published def.version
+         - version=0 distinguishes legacy pre-P5-E definitions
+         - Execution linkage chain provides full audit trail
+
+  PL-07  Governance blocking scenarios (8 tests)
+         - WG-03_TRUE_ROUTE_SELF_LOOP blocks publish
+         - WG-03_TRUE_ROUTE_NOT_FOUND blocks publish
+         - WG-03_FALSE_ROUTE_SELF_LOOP blocks publish
+         - WG-03_FALSE_ROUTE_NOT_FOUND blocks publish
+         - WG-FAN-01 (high fanout) is a warning, not a blocker
+         - WG-ROUTE-02_CONVERGENT_BRANCHES is a notice, not a blocker
+         - WG-DEP-01_CONDITIONALLY_EXECUTED_STEP is a warning, not a blocker
+         - Multiple routing errors: each contributes independently
+
+  PL-08  Active workflow immutability (4 tests)
+         - PATCH transitions never include → active
+         - archived is terminal
+         - POST /activate only publishable from draft/deprecated
+         - POST /activate on active workflow: idempotent, no new version
+
+Total: 492/492 tests passing (452 existing + 40 new P5-E tests)
+
+
+8. INVARIANTS & CONTRACTS
+──────────────────────────
+I1  Version numbers are monotonically increasing per workflow.
+    Implementation: newVersion = currentVersion + 1 in the publish transaction.
+    Enforcement: UNIQUE(definitionId, version) DB constraint.
+
+I2  Version rows are append-only.
+    Implementation: no UPDATE on frozen fields (steps, conditions, triggerEvent,
+    name, version, publishedBy, publishedAt). Only deactivatedAt/By are ever set.
+    Enforcement: application-layer only (no DB trigger needed at this scale).
+
+I3  status='active' ↔ exactly one open version row (deactivatedAt IS NULL).
+    Enforcement: publish transaction closes previous row before writing new one.
+
+I4  status='deprecated' ↔ zero open version rows.
+    Enforcement: PATCH deprecation path closes the active version row atomically.
+
+I5  workflowVersion on executions = def.version at trigger time.
+    Purpose: allows historical audit queries to JOIN workflow_definition_versions
+    on (definitionId, version) to recover the exact published config used.
+
+I6  Publish is blocked if validation returns any errors.
+    The `valid` flag from validateWorkflow() is the gate. Warnings and notices
+    are recorded in validationSummary but do not block.
+
+
+9. WHAT'S NOT YET DONE (DEFERRED)
+───────────────────────────────────
+- Frontend UI for version history (GET /workflows/:id/versions not yet wired in
+  the React app — deferred to a future UI phase).
+- Version rollback endpoint (POST /workflows/:id/versions/:versionId/restore) —
+  out of scope for P5-E; the data model supports it.
+- `publishedByName` join in GET /versions only works if the users table has the
+  correct workspaceId. Cross-workspace super_admin publishes will show null name.
+- Approval step resume (WG-02) remains blocked — approval steps still trigger a
+  hard validation error until Phase 5-F implements the resume mechanism.
+
+
+10. MIGRATION NOTE
+──────────────────
+Schema push required for new table and columns:
+  pnpm --filter @workspace/db run push
+
+Existing workflow_definitions rows get version=0 (DEFAULT) and
+currentVersionId=NULL, publishedAt=NULL. The engine correctly reads these as
+"pre-P5-E, never published under the new model" and stores workflowVersion=0
+on new executions triggered from them.

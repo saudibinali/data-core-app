@@ -1,0 +1,268 @@
+راجع:
+- workflow-phase-11g-final-report.txt
+- workflow-phase-11f-report.txt
+- workflow-phase-11e-report.txt
+
+خصوصًا:
+- final governance API surface
+- governance topology routes
+- evidence package routes
+- readiness routes
+- super-admin boundaries
+- read-only / append-only / human-governed boundaries
+- final safety constraints
+
+ثم نفّذ فقط:
+P12-A — Governance Dashboard Shell & Navigation Foundations
+
+ولا تنفّذ:
+- backend logic changes
+- DB migrations
+- PDF/XLSX export rendering
+- regulator integrations
+- AI compliance summaries
+- automatic enforcement
+- policy mutation
+- workflow auto-resolution
+
+عنوان المهمة:
+WORKFLOW PHASE 12-A — Governance Dashboard Shell & Navigation Foundations
+
+المهمة الحالية:
+تحويل:
+Phase 11 governance backend readiness
+
+إلى:
+frontend governance operations console shell
+
+الهدف:
+تمكين:
+- governance console entry point
+- admin navigation structure
+- governance dashboard shell
+- route-level access control
+- loading / empty / error states
+- read-only governance review UX foundations
+
+بطريقة:
+frontend-only governance shell layer
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — REVIEW CURRENT FRONTEND STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+راجع:
+- admin console routes
+- existing dashboard layouts
+- existing route guards
+- existing API client patterns
+- existing empty/loading/error state components
+- existing role/super-admin checks
+
+حدّد:
+- أين أفضل مكان لإضافة Governance Console
+- كيف تربطها بالـ Admin Console
+- كيف تحافظ على نفس Design System
+- كيف تمنع ظهورها لغير super-admin
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — DESIGN GOVERNANCE CONSOLE NAVIGATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+صمّم navigation structure مثل:
+
+Governance
+- Overview
+- Audit Integrity
+- Policy Violations
+- Workflows
+- Analytics
+- Topology & Readiness
+- Evidence Packages
+
+مع:
+- sidebar/menu integration
+- active route highlighting
+- breadcrumbs إذا موجودة
+- consistent naming
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — GOVERNANCE DASHBOARD SHELL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ Governance Dashboard Shell يحتوي:
+- page header
+- summary cards placeholders
+- section cards
+- quick links
+- readiness status placeholder
+- recent governance activity placeholder
+
+لكن:
+بدون charts عميقة الآن.
+بدون export buttons الآن إلا disabled placeholder إذا لزم.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — ROUTE FOUNDATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف frontend routes فقط مثل:
+
+/admin/governance
+/admin/governance/audit-integrity
+/admin/governance/violations
+/admin/governance/workflows
+/admin/governance/analytics
+/admin/governance/topology
+/admin/governance/evidence-packages
+
+كل route:
+- super-admin only
+- يستخدم layout موحد
+- يعرض placeholder محترم
+- يوضح أنها read-only review area
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — ACCESS CONTROL UX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+طبّق:
+- hide navigation item for non-super-admin
+- route guard يمنع الوصول المباشر
+- unauthorized state واضح
+- لا تكشف بيانات governance في client لغير المصرح
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — API CLIENT STUBS / READINESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف فقط client stubs أو hooks جاهزة للربط لاحقًا مثل:
+
+useGovernanceOverview()
+useGovernanceReadiness()
+useGovernanceTopology()
+useGovernanceEvidencePackages()
+
+لكن:
+- لا تكسر build لو backend غير مربوط
+- لا تعمل fake mutation
+- لا تضف write actions
+- خليها read-only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — UI STATES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+كل صفحة لازم تدعم:
+- loading
+- empty
+- error
+- unauthorized
+- read-only notice
+
+حتى لو placeholder.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — OBSERVABILITY / FRONTEND TELEMETRY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+إذا عندكم frontend telemetry pattern:
+أضف events خفيفة مثل:
+- governance_console_viewed
+- governance_section_opened
+
+لكن:
+بدون إرسال بيانات حساسة.
+
+إذا ما عندكم pattern واضح:
+لا تضف telemetry جديدة.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9 — SAFETY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+مهم جدًا:
+
+Frontend governance shell MUST:
+- remain frontend-only
+- never expose governance data to unauthorized users
+- never add mutation controls
+- never trigger enforcement
+- never add export rendering
+- never fake compliance conclusions
+
+أي:
+read-only governance review shell فقط.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10 — TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أضف tests تغطي:
+
+T1:
+governance nav visible to super-admin
+
+T2:
+governance nav hidden from non-super-admin
+
+T3:
+direct route access blocked for unauthorized users
+
+T4:
+dashboard shell renders
+
+T5:
+section routes render placeholders
+
+T6:
+read-only notices visible
+
+T7:
+loading/empty/error states render
+
+T8:
+no mutation buttons/actions exist
+
+T9:
+API stubs are read-only
+
+T10:
+typecheck/build passes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11 — WHAT NOT TO BUILD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+لا تضف:
+- backend changes
+- database changes
+- export renderer
+- PDF/XLSX generation
+- AI summary cards
+- policy edit screens
+- violation resolution controls
+- workflow mutation controls
+- regulator submission UI
+
+خلك:
+minimal frontend governance console foundation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12 — FINAL REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+أنشئ ملف TXT باسم:
+
+workflow-phase-12a-report.txt
+
+ويحتوي:
+- governance console shell architecture
+- navigation structure
+- route foundations
+- access-control behavior
+- read-only UX guarantees
+- UI state handling
+- tests results
+- remaining frontend governance gaps
+- readiness assessment قبل Audit Integrity UI

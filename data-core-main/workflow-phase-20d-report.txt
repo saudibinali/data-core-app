@@ -1,0 +1,137 @@
+================================================================================
+WORKFLOW PHASE 20-D REPORT
+Workforce Self-Service Clocking & Geofence Foundation
+================================================================================
+Date: 2026-05-19
+Scope: P20-D (no P20-E)
+
+--------------------------------------------------------------------------------
+EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+P20-D delivers employee web self-service clocking with geofence and policy
+foundation (warning-first), enriched location metadata on canonical events,
+self-service APIs/UI, and reporting column extensions—without mobile apps,
+live GPS tracking, vendor SDKs, or biometric devices.
+
+--------------------------------------------------------------------------------
+SELF-SERVICE STATUS
+--------------------------------------------------------------------------------
+APIs:
+- GET /hr/workforce/me/status
+- GET /hr/workforce/me/today
+- GET /hr/workforce/me/history
+- POST /hr/workforce/clock-in | clock-out (enhanced)
+
+UI:
+- /self-service/attendance (hr-me-attendance.tsx)
+- Self-service hub quick link
+
+Status: GO
+
+--------------------------------------------------------------------------------
+GEOFENCE FOUNDATION STATUS
+--------------------------------------------------------------------------------
+Tables: attendance_geofences (circle radius, work_location_id link)
+Service: GeofenceValidationService (haversine + accuracy buffer)
+Admin APIs: GET/POST /hr/workforce/geofences
+Mode: Warning-first (no hard reject by default)
+
+Status: GO (circle only; no polygons/maps)
+
+--------------------------------------------------------------------------------
+POLICY SYSTEM STATUS
+--------------------------------------------------------------------------------
+Table: attendance_policies
+Fields: geofenceRequired, allowRemoteClock, suspiciousLocationAction,
+        minAccuracyMeters, graceMinutes, duplicateWindowSeconds
+Default seed on init per workspace
+Admin APIs: GET/POST /hr/workforce/policies
+
+Status: GO
+
+--------------------------------------------------------------------------------
+PRIVACY / SECURITY STATUS
+--------------------------------------------------------------------------------
+- Punch-time-only location (UI opt-in)
+- No background tracking
+- Workspace isolation on all queries
+- Warnings in raw payload (employee-visible via status API)
+- Access logging hooks on clock actions
+- Manager location export not expanded (by design)
+
+Status: GO (foundation); PARTIAL (no dedicated audit table)
+
+--------------------------------------------------------------------------------
+REPORTING COMPATIBILITY
+--------------------------------------------------------------------------------
+hr.attendance.period: unchanged read path (hr_attendance)
+Added export columns: Source, Geofence Flag
+
+Status: GO
+
+--------------------------------------------------------------------------------
+WARNING SYSTEM STATUS
+--------------------------------------------------------------------------------
+Codes: out_of_geofence, low_accuracy, duplicate_clock, suspicious_velocity,
+       missing_clock_out (status API)
+Notifications: attendance_clock_flag / attendance_clock_warning
+
+Status: GO
+
+--------------------------------------------------------------------------------
+SMOKE TEST RESULTS
+--------------------------------------------------------------------------------
+File: routes/__tests__/workforce-self-service.smoke.test.ts
+
+Unit: haversine, default policy (always runs)
+Integration: me/status, clock in/out, geofence warn (requires DATABASE_URL + 0008)
+
+Run: DATABASE_URL=... pnpm --filter @workspace/api-server vitest run workforce-self-service.smoke
+
+--------------------------------------------------------------------------------
+READINESS MATRIX
+--------------------------------------------------------------------------------
+| Area                           | Status   |
+|--------------------------------|----------|
+| Self-service attendance        | GO       |
+| Geofence foundation            | GO       |
+| Attendance policies            | GO       |
+| Workforce self-service readiness | PARTIAL |
+
+PARTIAL notes:
+- No mobile/offline/vendor paths
+- No map admin UI for geofence setup
+- Policy hard-reject mode available but not default
+
+--------------------------------------------------------------------------------
+REMAINING BLOCKERS
+--------------------------------------------------------------------------------
+1. Migration 0008 required in target environments
+2. Geofences must be created via API (no map UI)
+3. work_locations table has no lat/lng (geofences hold coordinates)
+4. Integration tests skip without DATABASE_URL
+
+--------------------------------------------------------------------------------
+CONFIRMED EXCLUSIONS
+--------------------------------------------------------------------------------
+- No mobile app
+- No biometric implementation
+- No vendor SDK integrations
+- No payroll redesign
+- No destructive migration
+- No live / background GPS tracking
+- No Redis/BullMQ redesign
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT PHASE
+--------------------------------------------------------------------------------
+P20-E — Vendor Connectors & Workforce Integration Hub
+
+--------------------------------------------------------------------------------
+DOCUMENTATION
+--------------------------------------------------------------------------------
+- p20-d-self-service-geofence-foundation.md
+
+================================================================================
+END OF REPORT
+================================================================================

@@ -1,0 +1,190 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║         PHASE 13-G — TENANT HEALTH, RISK SIGNALS & OPERATIONAL              ║
+║                      MONITORING — COMPLETION REPORT                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Date:    2026-05-16
+Phase:   P13-G (Tenant Health, Risk Signals & Operational Monitoring)
+Status:  ✅ COMPLETE — All tests passing
+
+────────────────────────────────────────────────────────────────────────────────
+SAFETY CONTRACT
+────────────────────────────────────────────────────────────────────────────────
+TENANT_HEALTH_SAFETY_CONTRACT (12 properties, all true):
+
+  superAdminOnly                  true  — health endpoints require requireSuperAdmin
+  readOnly                        true  — GET-only; zero mutations introduced
+  noAutoWorkspaceSuspension       true  — no automated suspend/lock/disable actions
+  recommendationsOnly             true  — recommended actions are advisory only
+  noBillingOperations             true  — no payment or billing logic
+  noEmailTriggers                 true  — no automated emails or notifications
+  noDataDeletion                  true  — no tenant data removed by health logic
+  failsClosedOnMissingData        true  — unknown status on missing subscription
+  auditLogged                     true  — health reads are logged via req.log
+  noDestructiveTenantActions      true  — zero destructive operations
+  noEnforcementActions            true  — enforcement is explicitly excluded
+  contractVersion                 "1.0.0-P13-G"
+
+────────────────────────────────────────────────────────────────────────────────
+NEW FILES CREATED
+────────────────────────────────────────────────────────────────────────────────
+
+Backend intelligence library:
+  artifacts/api-server/src/lib/tenant-health-intelligence.ts
+    • TenantHealthStatus          (7 statuses: healthy → critical → unknown)
+    • TenantHealthRiskLevel       (6 levels:   none → critical)
+    • TenantHealthSignalCode      (18 signal codes)
+    • RecommendedTenantHealthAction (9 values)
+    • TenantHealthInput           (typed input shape)
+    • deriveTenantHealthSignals   (builds active signal list from input)
+    • deriveTenantHealthRiskLevel (maps signals → risk level)
+    • deriveTenantHealthStatus    (maps workspace+subscription+risk → status)
+    • deriveRecommendedTenantHealthAction (maps signals+risk → advisory action)
+    • deriveTenantHealthSummary   (builds human-readable summary string)
+    • buildTenantHealthWarnings   (builds warning list from signals)
+    • buildComponentHealthSummaries (6-component breakdown)
+    • deriveTenantHealthProfile   (top-level: combines all above)
+
+Frontend configuration library:
+  artifacts/ops-platform/src/lib/tenant-health-config.ts
+    • TENANT_HEALTH_STATUS_CONFIG      (7 entries with label/icon/badgeClass)
+    • TENANT_HEALTH_RISK_CONFIG        (6 entries)
+    • TENANT_HEALTH_SIGNAL_CONFIG      (18 entries with label/description/badgeClass)
+    • TENANT_HEALTH_ACTION_CONFIG      (9 entries)
+    • TENANT_HEALTH_SAFETY_CONTRACT    (12 properties, all true)
+    • TENANT_HEALTH_API_PATHS          (get() method → /api/platform/tenants/:id/health)
+    • TENANT_HEALTH_READ_HOOK_NAMES    (["useTenantHealth"])
+    • TENANT_HEALTH_EMPTY_STATE        (loading/noData/noSignals/safetyNotice strings)
+    • ALL_TENANT_HEALTH_SIGNAL_CODES   (18-element array)
+    • ALL_RECOMMENDED_TENANT_HEALTH_ACTIONS (9-element array)
+    • Type exports: TenantHealthStatus, TenantHealthRiskLevel,
+                    TenantHealthSignalCode, RecommendedTenantHealthAction
+
+Backend test file:
+  artifacts/api-server/src/lib/__tests__/tenant-health-intelligence.test.ts
+    T1  — healthy workspace: active subscription, no signals → "healthy" status
+    T2  — suspended workspace → "at_risk" with workspace_suspended signal
+    T3  — archived workspace → "inactive" with workspace_archived signal
+    T4  — expired subscription → "at_risk" with subscription_expired signal
+    T5  — grace period active → "attention" with grace_period_active signal
+    T6  — usage exceeded limit → "attention" with usage_exceeded_limit signal
+    T7  — usage approaching limit → "attention" with usage_approaching_limit signal
+    T8  — governance warnings → governance_warning_present signal
+    T9  — unknown subscription → subscription_unknown signal + fails closed
+    T10 — high renewal urgency → renewal_high_risk signal
+    T11 — medium renewal urgency → renewal_attention signal
+    T12 — critical risk level: suspended + expired → "critical" status
+    T13 — recommended action: monitor for healthy
+    T14 — recommended action: review_renewal_status for renewal_high_risk
+    T15 — summary string present and non-empty
+    T16 — 6-component breakdown present (lifecycle/subscription/renewal/
+           usage/entitlements/governance)
+
+Frontend test file:
+  artifacts/ops-platform/src/lib/__tests__/tenant-health-config.test.ts
+    T17 — TENANT_HEALTH_SAFETY_CONTRACT: all 12 properties are true
+    T18 — TENANT_HEALTH_STATUS_CONFIG: 7 entries, all have label/icon/badgeClass
+    T19 — TENANT_HEALTH_SIGNAL_CONFIG: 18 entries, all have label/description/badgeClass
+    T20 — TENANT_HEALTH_ACTION_CONFIG: 9 entries, all have label/description/badgeClass
+
+────────────────────────────────────────────────────────────────────────────────
+MODIFIED FILES
+────────────────────────────────────────────────────────────────────────────────
+
+artifacts/api-server/src/lib/tenant-registry.ts
+  • deriveRiskSignalSummary return type extended with 5 new P13-G fields:
+      healthStatus, healthRiskLevel, healthRecommendedAction,
+      healthWarningCount, operationalWarningCount
+  • Inline derivation: builds TenantHealthInput from available signals, then
+    calls deriveTenantHealthSignals / deriveTenantHealthRiskLevel /
+    deriveTenantHealthStatus / deriveRecommendedTenantHealthAction
+  • Imports added: deriveTenantHealthSignals, deriveTenantHealthRiskLevel,
+    deriveTenantHealthStatus, deriveRecommendedTenantHealthAction,
+    TenantHealthInput from tenant-health-intelligence
+
+artifacts/api-server/src/routes/tenants.ts
+  • Phase header updated: P13-G entry added to @phase jsdoc block
+  • Imports added: deriveTenantHealthProfile, TenantHealthInput
+  • NEW: GET /platform/tenants/:tenantId/health
+      — requireAuth + requireSuperAdmin enforced
+      — Fetches workspace, subscription, entitlement overrides, raw usage
+      — Derives entitlementProfile, usageProfile, renewalProfile in order
+      — Derives subscriptionStatusStr via deriveSubscriptionStatus
+      — Builds TenantHealthInput from all intelligence layers
+      — Calls deriveTenantHealthProfile → returns healthProfile
+      — Logs: actorId, tenantId, healthStatus, riskLevel, recommendedAction,
+              warningCount, signalCount via req.log.info
+      — Response: { healthProfile, componentSummaries, warnings, safetyNotice }
+      — No mutations, no suspension, no billing, no emails
+
+artifacts/ops-platform/src/lib/tenant-registry-hooks.ts
+  • Imports added: TENANT_HEALTH_API_PATHS, TENANT_HEALTH_READ_HOOK_NAMES,
+    TenantHealthStatus, TenantHealthRiskLevel, TenantHealthSignalCode,
+    RecommendedTenantHealthAction
+  • Re-exports: TENANT_HEALTH_READ_HOOK_NAMES added to barrel export
+  • TenantRiskSignalSummary extended with 5 new fields:
+      healthStatus, healthRiskLevel, healthRecommendedAction,
+      healthWarningCount, operationalWarningCount
+  • NEW types: TenantHealthComponentSummary, TenantHealthProfileData,
+               TenantHealthData
+  • NEW hook: useTenantHealth(tenantId)
+      queryKey: ["platform", "tenants", tenantId, "health"]
+      staleTime: 30,000ms
+      enabled: tenantId !== null
+
+artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+  • Imports added: TENANT_HEALTH_STATUS_CONFIG, TENANT_HEALTH_RISK_CONFIG,
+    TENANT_HEALTH_SIGNAL_CONFIG, TENANT_HEALTH_ACTION_CONFIG,
+    TENANT_HEALTH_SAFETY_CONTRACT, TENANT_HEALTH_EMPTY_STATE,
+    TenantHealthSignalCode, TenantHealthStatus, TenantHealthRiskLevel,
+    RecommendedTenantHealthAction, useTenantHealth, Heart (lucide)
+  • Import-time safety contract guard (throws if any of 5 required properties false)
+  • NEW component: TenantHealthPanel({ tenant })
+      — Uses useTenantHealth hook
+      — Displays: health status badge, risk level badge, recommended action badge
+      — Component health grid (6 cards: lifecycle/subscription/renewal/
+                                       usage/entitlements/governance)
+      — Active health signal badges with descriptions
+      — Recommended action description panel
+      — Warnings list
+      — Safety notice footer (ShieldCheck icon)
+      — data-testid: tenant-health-panel, health-components, health-signals,
+                      health-warnings, health-safety-notice
+  • TenantDetailPanel: TenantHealthPanel wired in as 4th spanning section
+    (after UsagePanel and RenewalIntelligencePanel)
+  • Registry table header: "Health" column added (after "Risk")
+  • Registry table row: Health status badge cell added (after Risk badge)
+    — reads riskSignalSummary.healthStatus → TENANT_HEALTH_STATUS_CONFIG badge
+  • Detail row colSpan updated: 8 → 9
+
+────────────────────────────────────────────────────────────────────────────────
+TEST RESULTS
+────────────────────────────────────────────────────────────────────────────────
+
+Backend  (P13-G specific):  49 test files, 2939 tests — ALL PASSED ✅
+Frontend (P13-G specific):  16 test files,  924 tests — ALL PASSED ✅
+
+────────────────────────────────────────────────────────────────────────────────
+ARCHITECTURE NOTES
+────────────────────────────────────────────────────────────────────────────────
+
+• Pure derivation: tenant-health-intelligence.ts is side-effect-free and
+  deterministic. All state comes from the TenantHealthInput parameter.
+
+• Layered composition: health derives from signals produced by prior phases
+  (P13-C subscription, P13-E usage, P13-F renewal, P13-B lifecycle).
+
+• Fails closed: missing subscription data yields subscriptionStatus = "unknown",
+  which surfaces "subscription_unknown" signal and prevents silent green health.
+
+• No enforcement path: the health system has no write surface. The UI renders
+  informational badges and advisory actions only. The safety contract is verified
+  at module load time via import-time throw guard.
+
+• Component breakdown: 6 component health cards give admins actionable clarity
+  on which dimension (lifecycle / subscription / renewal / usage /
+  entitlements / governance) is degraded.
+
+────────────────────────────────────────────────────────────────────────────────
+END OF REPORT
+────────────────────────────────────────────────────────────────────────────────

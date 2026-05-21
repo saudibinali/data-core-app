@@ -1,0 +1,174 @@
+================================================================================
+WORKFLOW PHASE 16-A — SUBSCRIPTION STATE MODEL
+================================================================================
+Date: 2026-05-18
+Status: COMPLETE (P16-A only — do not start P16-B)
+
+================================================================================
+1. SUBSCRIPTION MODEL
+================================================================================
+
+Table: workspace_subscriptions (lib/db/src/schema/workspace-subscriptions.ts)
+
+Fields:
+  - id, workspaceId (unique — one record per tenant/workspace)
+  - commercialAccountId (optional), activeContractTermId (optional)
+  - subscriptionCode, subscriptionName
+  - status: trial | active | grace_period | past_due | suspended | terminated | archived
+  - statusReason, startDate, endDate, renewalDate
+  - gracePeriodEndsAt, suspensionStartedAt, terminationDate
+  - planName, internalNotes
+  - createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - subscriptionCode unique per workspace (composite unique index)
+  - No hard delete — use archived status
+  - Coexists with legacy tenant_subscriptions (P13 metadata); P16-A is separate state model
+
+================================================================================
+2. STATUS LIFECYCLE (transition helper only — no enforcement)
+================================================================================
+
+Helper: artifacts/api-server/src/lib/workspace-subscription-transitions.ts
+
+Allowed:
+  trial → active | grace_period
+  active → grace_period | past_due | suspended | terminated
+  grace_period → active | past_due | suspended
+  past_due → active | suspended
+  suspended → active | terminated
+  terminated → archived
+
+Blocked:
+  archived → any
+  terminated → active (direct)
+  suspended → trial
+  past_due → trial
+
+================================================================================
+3. PERMISSIONS ADDED (35 total platform permissions)
+================================================================================
+
+  - platform.subscriptions.read
+  - platform.subscriptions.update
+  - platform.subscriptions.status.change
+
+Role matrix (additive — no redesign):
+  - root_platform_owner / platform_admin: all three
+  - finance_admin: read + update + status.change
+  - sales_admin: read only (documented decision — no update/status)
+  - auditor / read_only_operator: read only (auditor via platform.subscriptions.read)
+  - support_admin: read only
+  - workspace_support: none
+
+Legacy P13 permissions (subscriptions.read / subscriptions.update) unchanged.
+
+================================================================================
+4. BACKEND APIs (platform only)
+================================================================================
+
+Router: artifacts/api-server/src/routes/workspace-subscriptions.ts
+
+  GET    /platform/tenants/:tenantId/subscription     → platform.subscriptions.read
+  POST   /platform/tenants/:tenantId/subscription     → platform.subscriptions.update
+  PATCH  /platform/tenants/:tenantId/subscription     → platform.subscriptions.update (non-status)
+  PATCH  /platform/tenants/:tenantId/subscription/status → platform.subscriptions.status.change
+
+Not implemented (by design):
+  - DELETE subscription
+  - Tenant-side subscription APIs
+  - Payment / Stripe / checkout endpoints
+  - Enforcement endpoints
+
+================================================================================
+5. FRONTEND — SUBSCRIPTION STATE SECTION
+================================================================================
+
+Tab: Tenant Registry → Tenant → "Subscription & Entitlements" (subscription_entitlements)
+Component: artifacts/ops-platform/src/components/subscription/SubscriptionStatePanel.tsx
+
+Displays: code, name, status, plan, dates, grace/suspension/termination, linked
+commercial account & contract, internal notes.
+
+Actions (permission-gated):
+  - Create Subscription → platform.subscriptions.update
+  - Edit Subscription → platform.subscriptions.update
+  - Change Status (+ reason) → platform.subscriptions.status.change
+
+Hooks (React Query key ["platform","tenants",tenantId,"subscription"]):
+  - useTenantSubscription
+  - useCreateTenantSubscription
+  - useUpdateTenantSubscription
+  - useUpdateTenantSubscriptionStatus
+
+================================================================================
+6. VALIDATION
+================================================================================
+
+  - Tenant must exist
+  - commercialAccountId / activeContractTermId must belong to same tenant
+  - subscriptionCode required; unique per workspace
+  - startDate <= endDate; renewalDate within period (+ 90d buffer after endDate)
+  - gracePeriodEndsAt after endDate when status is grace_period
+  - Status change requires reason (min 10 chars)
+  - Forbidden payload keys: payment, Stripe, card, tax, ledger, etc.
+  - PATCH /subscription rejects inline status changes
+
+================================================================================
+7. AUDIT EVENTS
+================================================================================
+
+  - workspace_subscription_created
+  - workspace_subscription_updated
+  - workspace_subscription_status_changed
+  - workspace_subscription_status_change_blocked
+
+Metadata: actorId, workspaceId/tenantId, subscriptionId, previousStatus, nextStatus,
+reason, changedFields, timestamp. No secrets stored.
+
+================================================================================
+8. SAFETY GUARANTEES (SUBSCRIPTION_STATE_SAFETY_CONTRACT — all true)
+================================================================================
+
+  subscriptionStateOnly, noSubscriptionEnforcement, noModuleAccessBlocking,
+  noTenantLoginBlocking, noElectronicPayment, noStripe, noCheckout, noCardStorage,
+  noPaymentGateway, noInvoiceGenerationEngine, noTaxCalculation, noZatcaIntegration,
+  noAccountingLedger, noEmailSending, noDestructiveWorkspaceActions,
+  noCustomPermissions, permissionGated, auditSubscriptionChanges
+
+Config: artifacts/ops-platform/src/lib/subscription-state-config.ts
+
+================================================================================
+9. TEST RESULTS
+================================================================================
+
+api-server (targeted P16-A + permission updates):
+  - workspace-subscription-transitions.test.ts — PASS
+  - workspace-subscriptions.test.ts — PASS
+  - platform-permissions.test.ts — PASS (35 permissions)
+  - commercial-permissions.test.ts — PASS
+
+ops-platform:
+  - phase-16a-subscription-state.test.ts — PASS
+  - platform-access.test.ts — PASS (35 permissions for root)
+
+================================================================================
+10. INTENTIONAL LIMITATIONS (for P16-B — NOT STARTED)
+================================================================================
+
+P16-B next phase: Entitlement & Feature Access Model
+
+Left for P16-B and later:
+  - Module enable/disable enforcement from subscription state
+  - Feature entitlements tied to subscription plan
+  - Workspace access blocking / login suspension enforcement
+  - Automated dunning, renewal workflows, email notifications
+  - Electronic payment, invoicing engine, tax/ZATCA, accounting ledger
+  - Entitlements UI sections under Subscription & Entitlements tab
+
+P16-A delivers state storage, transitions, platform APIs, audit trail, and
+read/write UI only — no operational enforcement.
+
+================================================================================
+END OF PHASE 16-A REPORT
+================================================================================

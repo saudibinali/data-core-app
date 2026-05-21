@@ -1,0 +1,129 @@
+Encoding Mojibake Cleanup Fix Report
+=====================================
+Date: 2026-05-18
+Scope: artifacts/ops-platform, artifacts/api-server, lib/db, lib/api-client-react (source trees)
+
+SUMMARY
+-------
+Removed UTF-8 mojibake and normalized UI-facing punctuation to plain ASCII across
+377 source files. Added a guard test and a reusable fix script (Unicode escapes only).
+No business logic, schema, or UI layout changes. P16-D not started.
+
+ROOT CAUSE
+----------
+UTF-8 punctuation (smart quotes, em/en dashes, ellipsis, box-drawing) was either:
+1) Mis-decoded as Windows-1252 mojibake (e.g. U+00E2 U+20AC U+2122 for apostrophe), or
+2) Stored as Unicode punctuation (U+2014, U+2026) where ASCII was preferred for UI.
+
+PATTERNS FOUND AND REPLACED
+---------------------------
+Mojibake (UTF-8 read as Windows-1252):
+  U+00E2 U+20AC U+2122  ->  '     (right single quote / apostrophe)
+  U+00E2 U+20AC U+02DC  ->  '     (left single quote)
+  U+00E2 U+20AC U+0153  ->  "     (left double quote)
+  U+00E2 U+20AC U+009D  ->  "     (right double quote)
+  U+00E2 U+20AC U+00A6  ->  ...   (ellipsis)
+  U+00E2 U+20AC U+201C  ->  -     (en dash mojibake)
+  U+00E2 U+20AC U+201D  ->  -     (em dash mojibake)
+  U+00E2 U+201D U+20AC  ->  -     (box-drawing mojibake)
+  U+00C2 U+00B7         ->  " - " (middle dot mojibake)
+  U+00C2 U+00A0         ->  space (nbsp mojibake)
+  U+FFFD                ->  (removed replacement char)
+
+Unicode punctuation normalized to ASCII (UI + comments):
+  U+2014 em dash        ->  -
+  U+2013 en dash        ->  -
+  U+2018/U+2019 quotes  ->  ' / "
+  U+201C/U+201D quotes  ->  " / "
+  U+2026 ellipsis       ->  ...
+
+KEY TENANT REGISTRY / CONSOLE FILES
+-----------------------------------
+artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+  - UI strings: "Applying...", "Saving...", "Loading entitlements...", arrows "->"
+  - Comment separators normalized to ASCII hyphens
+artifacts/ops-platform/src/lib/tenant-admin-console-config.ts
+  - Tab descriptions: em dashes -> hyphen (e.g. "State only - no enforcement.")
+artifacts/ops-platform/src/components/tenant/TenantConsoleTabBar.tsx
+artifacts/ops-platform/src/lib/i18n.ts
+  - All "Saving..." / ellipsis UI strings use ASCII "..."
+
+NEW / UPDATED TOOLING
+---------------------
+scripts/fix-mojibake.cjs
+  - Bulk fix/check; all literals use \\u escapes (no forbidden tokens in file)
+artifacts/ops-platform/src/lib/__tests__/encoding-mojibake-guard.test.ts
+  - Vitest guard scans scoped trees; excludes fix script and self
+
+FILES CHANGED
+-------------
+Total: 379 files (377 auto-fixed + 2 new/rewritten tooling files)
+
+Breakdown by tree (auto-fix run):
+  artifacts/ops-platform/src     ~150 files
+  artifacts/api-server/src       ~200 files
+  lib/db/src                     ~25 files
+  lib/api-client-react/src       ~2 files
+
+Representative high-impact paths:
+  artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+  artifacts/ops-platform/src/lib/tenant-admin-console-config.ts
+  artifacts/ops-platform/src/lib/i18n.ts
+  artifacts/ops-platform/src/components/subscription/*.tsx
+  artifacts/ops-platform/src/components/commercial/*.tsx
+  artifacts/api-server/src/seed/*.ts
+  lib/db/src/schema/*.ts
+
+GUARD TEST
+----------
+File: artifacts/ops-platform/src/lib/__tests__/encoding-mojibake-guard.test.ts
+Forbidden tokens (same as fix script):
+  apostrophe, left/right double-quote, ellipsis, en/em dash mojibake,
+  left single-quote mojibake, partial euro sequence, stray U+00C2, U+FFFD
+
+TESTS RUN
+---------
+cd artifacts/ops-platform
+  pnpm exec vitest run src/lib/__tests__/encoding-mojibake-guard.test.ts \
+    src/lib/__tests__/tenant-console-tab-navigation.test.ts \
+    src/lib/__tests__/tenant-admin-console-config.test.ts \
+    src/lib/__tests__/tenant-registry.test.ts
+  Result: 4 files, 107 tests passed
+
+cd artifacts/api-server
+  pnpm exec vitest run src/lib/__tests__/tenant-registry.test.ts \
+    src/lib/__tests__/workspace-quota-catalog.test.ts
+  Result: 2 files, 86 tests passed
+
+node scripts/fix-mojibake.cjs --check
+  Result: No forbidden mojibake tokens remain in scanned trees.
+
+GREP / SEARCH VERIFICATION (ZERO FORBIDDEN TOKENS)
+--------------------------------------------------
+Patterns searched project-wide in *.{ts,tsx,txt,json,sql}:
+  â€™ â€œ â€ â€“ â€” â€˜ â€¦ (literal mojibake) -> 0 matches
+  Saving… Applying… (Unicode ellipsis in UI) -> 0 matches in ops-platform/src
+
+Programmatic scan (Unicode escape sequences) across:
+  artifacts/ops-platform/src, artifacts/api-server/src, lib/db/src
+  -> 0 violations
+
+VISUAL VERIFICATION
+-----------------
+Vite dev server (localhost:3000) received HMR updates for super-admin-tenants.tsx
+after cleanup. Tenant Registry detail page should show:
+  - Plain ASCII apostrophes and hyphens in labels/descriptions
+  - "Applying..." / "Saving..." instead of mojibake or Unicode ellipsis
+  - No "â€™", "â€œ", "â€", or "" replacement glyphs
+
+Recommend confirming in browser: /super-admin/tenants (expand a tenant row).
+
+BUSINESS LOGIC
+--------------
+No business logic was changed. Only string literals, comments, and documentation
+text within source files were normalized. No database schema migrations.
+P16-D (Grace Period & Suspension Rules) was not started.
+
+UTF-8 ENCODING
+--------------
+All modified files written with fs.writeFileSync(..., "utf8").

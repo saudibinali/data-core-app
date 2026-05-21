@@ -1,0 +1,576 @@
+================================================================================
+  ARCHITECTURE TICKET 02 — Event Contracts Architecture
+  lib/core-events  |  @workspace/core-events
+  Internal Operations Platform — Monorepo
+  تاريخ التنفيذ: مايو 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. NAMING CONVENTION — القرار والمبرر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الاختيار النهائي:  entity.action  (مستويان، فاصلة نقطية)
+                   entity.sub_action  للأفعال المركبة (snake_case، ليس مستوى ثالث)
+
+── أمثلة صحيحة ──────────────────────────────────────────────────────────────
+  ticket.created          ✓  entity=ticket,  action=created
+  ticket.updated          ✓  entity=ticket,  action=updated
+  ticket.status_changed   ✓  entity=ticket,  action=status_changed (مركب)
+  form.submitted          ✓  entity=form,    action=submitted
+  approval.created        ✓  entity=approval, action=created
+  leave.requested         ✓  entity=leave,   action=requested
+  workflow.executed       ✓  entity=workflow, action=executed
+
+── أمثلة خاطئة (لا تُستخدم) ─────────────────────────────────────────────────
+  forms.form.submitted    ✗  3 مستويات — قديم/legacy
+  ticket.statusChanged    ✗  camelCase لا يُستخدم
+  tickets.create          ✗  جمع + مضارع
+  ticket.status.changed   ✗  3 مستويات بدلاً من snake_case
+
+── سبب اختيار entity.action ────────────────────────────────────────────────
+  1. يطابق 95% من الأحداث الموجودة حالياً في api-server — أقل مساحة للـ migration
+  2. يُقرأ بشكل طبيعي في workflow builder UI: "عندما [ticket] يُنشأ [created]"
+  3. متسق مع أنماط الصناعة (Stripe webhooks، GitHub events webhook naming)
+  4. مستويان يبقيان flat وقابلَين للبحث دون غموض 3 مستويات
+  5. entity.sub_action (snake_case) يمنع الحاجة لمستوى ثالث دون فقدان الوضوح
+
+── الاختيارات الأخرى التي رُفضت ─────────────────────────────────────────────
+  domain.entity.action   ← يُنتج أسماء طويلة جداً؛ وملكية الحدث محددة بحقل module
+  entity.action.detail   ← 3 مستويات تُعقّد pattern matching في workflow engine
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. BASE EVENT ARCHITECTURE — بنية المغلف الأساسية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الملف: lib/core-events/src/types.ts
+
+2.1 EventMetadata
+──────────────────
+  correlationId    string (UUID)   — يربط سلسلة أحداث مرتبطة ببعضها
+  causationId?     string (UUID)   — معرّف الحدث الذي سبّب هذا الحدث
+  schemaVersion    number          — رقم إصدار الـ payload لتطور بدون كسر
+  source?          string          — الخدمة المُطلِقة ("api-server", "worker")
+  idempotencyKey?  string          — يمنع المعالجة المكررة عند الـ retry
+
+  مثال:
+  {
+    correlationId: "f3a1b2c4-...",
+    causationId: "a0b1c2d3-...",  // workflow.executed يشير للحدث المُفعِّل
+    schemaVersion: 1,
+    source: "api-server"
+  }
+
+2.2 ActorContext
+─────────────────
+  userId?      number | undefined  — معرّف المستخدم (undefined لأحداث النظام)
+  role?        string              — دور المستخدم وقت الحدث (للـ audit، ثابت حتى لو تغيّر)
+  sessionId?   string              — معرّف الجلسة (لربط الأحداث من نفس الـ session)
+  ipAddress?   string              — عنوان IP (للأحداث الأمنية الحساسة)
+
+  مثال — حدث من مستخدم:    { userId: 42, role: "admin", sessionId: "sess_..." }
+  مثال — حدث من النظام:     { }  (كائن فارغ — لا userId)
+
+2.3 WorkspaceContext
+─────────────────────
+  workspaceId      number          — المعرّف الأساسي للـ workspace (إلزامي)
+  workspaceSlug?   string          — slug وقت الحدث (ثابت حتى لو تغيّر لاحقاً)
+
+  ملاحظة: جميع الأحداث التجارية مرتبطة بـ workspace، ماعدا أحداث المنصة (super_admin)
+
+2.4 BaseEvent — المغلف الكامل
+───────────────────────────────
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  id          string          UUID مُعيَّن من الـ dispatcher              │
+  │  type        string          اسم الحدث — entity.action convention        │
+  │  module      string          الوحدة المالكة ("tickets", "hr", "approvals") │
+  │  workspace   WorkspaceContext  سياق العزل                                │
+  │  actor       ActorContext     من أطلق الحدث                               │
+  │  metadata    EventMetadata    correlation, causation, version, source      │
+  │  data        object           payload مُحدَّد النوع بـ TypedEvent           │
+  │  timestamp   ISOTimestamp    UTC، إلزامي، مُعيَّن من الـ dispatcher        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+2.5 TypedEvent<TType, TData>
+──────────────────────────────
+  نوع generic يجمع BaseEvent مع type string محددة وdata مُحدَّدة النوع:
+
+    type TypedEvent<TType extends string, TData extends object>
+      = Omit<BaseEvent, "type" | "data"> & { type: TType; data: TData }
+
+  مثال:
+    type TicketCreatedEvent = TypedEvent<"ticket.created", TicketCreatedPayload>
+
+  يمكّن narrowing آمن في switch:
+    switch (event.type) {
+      case "ticket.created":
+        event.data.ticketId  // ← TypeScript يعرف النوع هنا ✓
+    }
+
+2.6 Primitive aliases
+──────────────────────
+  ISOTimestamp = string                — ISO-8601 datetime (UTC)
+  EventId      = string                — UUID v4
+  WorkspaceId  = number                — positive integer
+  UserId       = number | undefined    — undefined لأحداث النظام
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. EVENT CONTRACTS — العقود المُعرَّفة (10 أحداث)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الملف: lib/core-events/src/events.ts
+
+── 3.1  ticket.created ──────────────────────────────────────────────────────
+  الحالة:   يطابق الاسم الموجود — لا تعارض
+  Publisher: api-server/src/routes/tickets.ts
+
+  TicketCreatedPayload {
+    ticketId         number
+    title            string
+    ticketType       string   "bug"|"feature"|"support"|"task"|"other"
+    priority         string   "low"|"medium"|"high"|"urgent"
+    status           string   "open"|"in_progress"|"pending"|"resolved"|"closed"
+    createdByUserId  number
+    assigneeId?      number | null
+    departmentId?    number | null
+    category?        string | null
+  }
+
+── 3.2  ticket.updated ──────────────────────────────────────────────────────
+  الحالة:   يطابق الاسم الموجود — لا تعارض
+  ملاحظة:   عند تغيير الحالة فقط → أطلق ticket.status_changed بدلاً منه (أو إضافةً)
+  Publisher: api-server/src/routes/tickets.ts
+
+  TicketUpdatedPayload {
+    ticketId          number
+    changes           Record<string, unknown>   حقول تغيّرت → قيمها الجديدة
+    updatedByUserId   number
+    previousValues?   Record<string, unknown>   snapshot قبل التعديل (للـ audit diff)
+  }
+
+── 3.3  ticket.status_changed ───────────────────────────────────────────────
+  الحالة:   جديد — غير موجود في EVENTS map الحالية
+  المشكلة:  الكود الحالي يستخدم ticket.updated وticket.closed بدلاً منه
+  التوصية:  أطلق ticket.status_changed إضافةً لـ ticket.updated عند تغيير الحالة
+  Publisher: api-server/src/routes/tickets.ts
+
+  TicketStatusChangedPayload {
+    ticketId          number
+    fromStatus        string   الحالة القديمة
+    toStatus          string   الحالة الجديدة
+    changedByUserId   number
+    comment?          string   ملاحظة اختيارية مع التغيير
+  }
+
+── 3.4  form.submitted ──────────────────────────────────────────────────────
+  الحالة:   canonical جديد — يعوّض الاسم القديم "forms.form.submitted"
+  التعارض:  الاسم القديم في registry.ts يستخدم 3 مستويات (غير متسق)
+  التوصية:  استخدم "form.submitted" للكود الجديد؛ احتفظ بـ "forms.form.submitted" في
+            registry حتى Ticket 03 لتجنب كسر الـ workflows المحفوظة
+  Publisher: api-server/src/routes/forms.ts (مستقبلاً)
+
+  FormSubmittedPayload {
+    submissionId       number
+    formId             number
+    formName           string
+    owningModule       string   "hr"|"tickets"|"general"
+    submittedByUserId  number
+    departmentId?      number | null
+    answers            Record<string, unknown>   ديناميكي حسب schema النموذج
+  }
+
+── 3.5  approval.created ────────────────────────────────────────────────────
+  الحالة:   canonical — يعوّض الاسم الموجود "approval.requested"
+  التعارض:  "approval.requested" موجود في EVENTS map؛ "approval.created" هو الكانوني
+  المبرر:   "created" يتسق مع باقي الأحداث؛ "requested" صيغة passive
+  التوصية:  استخدم "approval.created" للكود الجديد، وثّق "approval.requested" كـ legacy
+  Publisher: api-server/src/routes/approvals.ts
+
+  ApprovalCreatedPayload {
+    approvalId          number
+    entityType          string   "ticket"|"hr.leave_request"|"form_submission"
+    entityId            number
+    entityLabel?        string
+    requestedByUserId   number
+    assignedToUserId    number
+    requestNote?        string
+    departmentId?       number | null
+  }
+
+── 3.6  approval.completed ──────────────────────────────────────────────────
+  الحالة:   جديد كمفهوم موحَّد — لا يوجد في EVENTS map الحالية
+  التعارض:  الكود الحالي يستخدم حدثين منفصلَين: "approval.approved" + "approval.rejected"
+  التوصية:  أطلق approval.completed إضافةً (ليس بدلاً) من الحدثين الموجودَين
+            → ليتمكن المستمع الواحد من معالجة كلا النتيجتَين بـ outcome condition
+  Publisher: api-server/src/routes/approvals.ts
+
+  ApprovalCompletedPayload {
+    approvalId          number
+    entityType          string
+    entityId            number
+    entityLabel?        string
+    outcome             "approved" | "rejected"   ← discriminant field
+    decidedByUserId     number
+    requestedByUserId   number
+    responseNote?       string
+    resolutionTimeMs?   number   مدة من الطلب للقرار بالـ milliseconds
+  }
+
+── 3.7  leave.requested ─────────────────────────────────────────────────────
+  الحالة:   يطابق الاسم الموجود — لا تعارض في الاسم
+  تحذير:    الاسم مُسجَّل مرتين في registry.ts — انظر §4 Naming Conflicts
+  Publisher: api-server/src/routes/hr.ts (مستقبلاً)
+
+  LeaveRequestedPayload {
+    leaveRequestId   number
+    employeeUserId   number
+    leaveType        string   "annual"|"sick"|"unpaid"|"maternity"|"emergency"|"other"
+    startDate        string   ISO-8601 date
+    endDate          string   ISO-8601 date
+    daysRequested    number
+    departmentId?    number | null
+    employeeNote?    string
+  }
+
+── 3.8  employee.created ────────────────────────────────────────────────────
+  الحالة:   يطابق الاسم الموجود — لا تعارض
+  ملاحظة:   "employee" = "user" في هذا المشروع؛ يُستخدم "employee" لتوافق مصطلحات HR
+  Publisher: api-server/src/routes/admin.ts أو /users.ts
+
+  EmployeeCreatedPayload {
+    employeeUserId  number
+    employeeNumber  string
+    fullName        string
+    role            string   "admin"|"manager"|"member"
+    departmentId?   number | null
+    email?          string | null
+    position?       string | null
+    isDirectCreate  boolean   true = admin أنشأ مباشرةً / false = invitation flow
+  }
+
+── 3.9  notification.created ────────────────────────────────────────────────
+  الحالة:   جديد — لا يوجد في EVENTS map الحالية
+  الغرض:    تفعيل SSE push بعد إدراج إشعار في DB دون polling
+  تحذير:    مستمعو هذا الحدث يجب ألا يُنشئوا إشعارات أخرى (loop risk)
+  Publisher: notification insertion service أو listener داخلي
+
+  NotificationCreatedPayload {
+    notificationId    number
+    recipientUserId   number
+    severity          string   "info"|"success"|"warning"|"error"
+    title             string
+    sourceModule      string   "tickets"|"approvals"|"hr"
+    sourceEntityId?   number | null
+    actionUrl?        string | null
+    channels          string[]  قنوات الإرسال المستخدمة
+  }
+
+── 3.10  workflow.executed ───────────────────────────────────────────────────
+  الحالة:   جديد — لا يوجد في EVENTS map الحالية
+  الغرض:    meta-automation — "أخطرني عند فشل workflow X"
+  تحذير:    يجب عدم استخدامه كـ trigger لـ workflows أخرى دون cycle detection
+  Publisher: api-server/src/lib/workflows/engine.ts
+  ملاحظة:   metadata.causationId يجب أن يُشير لـ id الحدث المُفعِّل للـ workflow
+
+  WorkflowExecutedPayload {
+    workflowExecutionId  number
+    workflowId           number
+    workflowName         string
+    status               "completed" | "failed" | "cancelled"
+    failedAtStepId?      string | null
+    failedAtStepLabel?   string | null
+    errorMessage?        string | null
+    durationMs           number   elapsed milliseconds
+    totalSteps           number
+    completedSteps       number
+  }
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NAMING CONFLICTS — التعارضات الموثَّقة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+كل التعارضات التالية موثَّقة فقط — لم يتغيّر أي كود موجود في هذه التذكرة.
+
+CONFLICT-01: event field  مقابل  type field
+────────────────────────────────────────────
+  الموجود:  EventPayload.event = "ticket.created"   (في api-server/src/lib/events/types.ts)
+  الكانوني: BaseEvent.type     = "ticket.created"   (في core-events/src/types.ts)
+  الأثر:    المسمى مختلف — الـ dispatcher الحالي يستخدم payload.event في DB insert
+  الحل:     في Ticket 03، عند ربط الـ dispatcher بـ BaseEvent، تُعاد تسمية الحقل
+
+CONFLICT-02: approval.requested  مقابل  approval.created
+──────────────────────────────────────────────────────────
+  الموجود:  EVENTS.APPROVAL_REQUESTED = "approval.requested"
+  الكانوني: EVENT_TYPES.APPROVAL_CREATED = "approval.created"
+  المبرر للتغيير: "created" متسق مع entity.created pattern؛ "requested" هو صيغة passive
+  الحل:     في Ticket 03، أضف approval.created للـ EVENTS واعتبر approval.requested legacy
+
+CONFLICT-03: approval.approved + approval.rejected  مقابل  approval.completed
+───────────────────────────────────────────────────────────────────────────────
+  الموجود:  حدثان منفصلان:  "approval.approved"  +  "approval.rejected"
+  الكانوني: حدث موحَّد:     "approval.completed"  مع  outcome: "approved"|"rejected"
+  المبرر:   في workflow builder، المستخدم يريد: "عند اكتمال الموافقة (أيًا كانت النتيجة)"
+            الحدثان المنفصلان يجبرانه على تكرار الـ trigger مرتين
+  الحل:     أطلق الثلاثة معاً — Ticket 03 يُضيف approval.completed
+
+CONFLICT-04: forms.form.submitted  مقابل  form.submitted
+──────────────────────────────────────────────────────────
+  الموجود:  "forms.form.submitted"  (3 مستويات — في registry.ts)
+  الكانوني: "form.submitted"        (2 مستويات — المعيار الجديد)
+  المشكلة:  "forms.form.submitted" يخرق convention المعتمدة
+  الحل:     في Ticket 03، أضف "form.submitted" للـ registry وضع "forms.form.submitted"
+            كـ legacy alias للـ workflows المحفوظة مسبقاً
+
+CONFLICT-05: top-level workspaceId  مقابل  WorkspaceContext
+──────────────────────────────────────────────────────────────
+  الموجود:  EventPayload.workspaceId = number  (حقل مباشر على الـ payload)
+  الكانوني: BaseEvent.workspace = WorkspaceContext { workspaceId, workspaceSlug? }
+  الأثر:    بنية مختلفة — dispatcher.dispatch() يقرأ payload.workspaceId
+  الحل:     في Ticket 03، adapter يحوّل workspace.workspaceId ← workspaceId
+
+CONFLICT-06: top-level triggeredBy  مقابل  ActorContext
+─────────────────────────────────────────────────────────
+  الموجود:  EventPayload.triggeredBy = number | undefined  (حقل مباشر)
+  الكانوني: BaseEvent.actor = ActorContext { userId?, role?, sessionId?, ipAddress? }
+  الأثر:    بنية مختلفة — listeners يقرأون payload.triggeredBy
+  الحل:     في Ticket 03، adapter يحوّل actor.userId ← triggeredBy
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. DUPLICATE CONCEPTS — المفاهيم المكررة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DUP-001: leave.requested مُسجَّل مرتين في registry.ts (BUG)
+──────────────────────────────────────────────────────────────
+  الموقع:   artifacts/api-server/src/lib/events/registry.ts
+  السطور:   ~ hr module entry  +  forms module entry
+  المشكلة:  نفس الاسم "leave.requested" بـ schema مختلف ونفس الـ eventName column
+            يُنتج onConflictDoUpdate الذي يكتب فوق الأول بالثاني
+  الأثر:    سجل HR leave في DB يعرض schema النموذج من forms module (schema خاطئ)
+  الحل:     في Ticket 03، احذف الـ entry المكرر في forms module
+            الـ leave.requested الصحيح هو في hr module
+
+DUP-002: WorkflowCondition موجود في مكانين
+───────────────────────────────────────────
+  المكان 1: api-server/src/lib/workflows/types.ts  (WorkflowCondition)
+  المكان 2: core-workflows/src/types.ts             (WorkflowTriggerCondition)
+  المشكلة:  نفس المفهوم باسمين مختلفين
+  الحل:     في Ticket 03 (أو 04)، api-server يستورد من core-workflows
+
+DUP-003: StepType موجود في مكانين
+───────────────────────────────────
+  المكان 1: api-server/src/lib/workflows/types.ts  (StepType)
+  المكان 2: core-workflows/src/types.ts             (WorkflowStepType)
+  المشكلة:  نفس enum باسمين مختلفين (WorkflowStepType أوضح)
+  الحل:     في Ticket 03 (أو 04)، api-server يستورد من core-workflows
+
+DUP-004: ISOTimestamp معرَّف في 3 packages
+──────────────────────────────────────────
+  core-events، core-approvals، core-notifications، core-audit كل منها تعرّف
+  ISOTimestamp = string  بشكل مستقل (قرار مقصود في Ticket 01 للاستقلالية الكاملة)
+  الحل:     عند graduation الـ packages، تستورد جميعها من @workspace/core-events
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. PAYLOAD STRUCTURE SUMMARY — ملخص بنية الـ payload
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+جميع الأحداث العشرة تدعم:
+
+  ┌─ TypedEvent envelope ──────────────────────────────────────────────────────┐
+  │  id            string (UUID)      Timestamps: ISOTimestamp (UTC, mandatory) │
+  │  type          string             Correlation: metadata.correlationId (UUID)│
+  │  module        string             Causation:   metadata.causationId? (UUID) │
+  │  timestamp     ISOTimestamp       Schema:      metadata.schemaVersion num   │
+  │                                                                             │
+  │  workspace:                       actor:                                    │
+  │    workspaceId  number             userId?      number                      │
+  │    workspaceSlug? string           role?        string                      │
+  │                                    sessionId?   string                      │
+  │                                    ipAddress?   string                      │
+  │                                                                             │
+  │  data: <SpecificPayload>  ← الحقول المُعرَّفة لكل event type أعلاه         │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+6.1 Typed Payloads — جميع الحقول المُحدَّدة وليس Record<string, unknown>
+───────────────────────────────────────────────────────────────────────────
+  كل payload interface يعرّف حقولاً صريحة — TypeScript يرفض حقولاً خاطئة عند الإطلاق.
+  استخدم satisfies keyword:
+    data: { ticketId: 5, title: "..." } satisfies TicketCreatedPayload
+
+6.2 Optional fields pattern
+────────────────────────────
+  الحقول الاختيارية تستخدم  field?: Type | null
+  (وليس  field?: Type فقط)  لأن DB تُعيد null وليس undefined
+
+6.3 Discriminated union narrowing
+───────────────────────────────────
+  AnyTypedEvent union + switch(event.type) يُعطي type-safe narrowing تلقائياً
+  IsEventTypeFn type signature تُمكّن type guard functions في المستقبل
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. EVENT MAP / REGISTRY — الخريطة والسجل
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الملف: lib/core-events/src/constants.ts
+
+7.1 EVENT_TYPES constant object
+──────────────────────────────────
+  TICKET_CREATED:        "ticket.created"
+  TICKET_UPDATED:        "ticket.updated"
+  TICKET_STATUS_CHANGED: "ticket.status_changed"
+  FORM_SUBMITTED:        "form.submitted"
+  APPROVAL_CREATED:      "approval.created"
+  APPROVAL_COMPLETED:    "approval.completed"
+  LEAVE_REQUESTED:       "leave.requested"
+  EMPLOYEE_CREATED:      "employee.created"
+  NOTIFICATION_CREATED:  "notification.created"
+  WORKFLOW_EXECUTED:     "workflow.executed"
+
+  كلها  as const  → أنواع literal strings لا strings عامة
+
+7.2 EventTypeMap interface
+───────────────────────────
+  يربط كل اسم حدث بـ payload interface المقابل:
+    "ticket.created"       → TicketCreatedPayload
+    "ticket.updated"       → TicketUpdatedPayload
+    "ticket.status_changed"→ TicketStatusChangedPayload
+    "form.submitted"       → FormSubmittedPayload
+    "approval.created"     → ApprovalCreatedPayload
+    "approval.completed"   → ApprovalCompletedPayload
+    "leave.requested"      → LeaveRequestedPayload
+    "employee.created"     → EmployeeCreatedPayload
+    "notification.created" → NotificationCreatedPayload
+    "workflow.executed"    → WorkflowExecutedPayload
+
+7.3 AnyTypedEvent union
+────────────────────────
+  discriminated union من جميع الـ TypedEvent aliases.
+  يُمكّن exhaustive switch narrowing بدون type assertions.
+
+7.4 LEGACY_EVENT_NAMES map
+───────────────────────────
+  خريطة read-only: الأسماء القديمة → الأسماء الكانونية
+  "approval.requested"  → "approval.created"
+  "approval.approved"   → "approval.completed"  (outcome=approved)
+  "approval.rejected"   → "approval.completed"  (outcome=rejected)
+  "forms.form.submitted"→ "form.submitted"
+
+7.5 IsEventTypeFn — type guard signature
+──────────────────────────────────────────
+  نوع فقط — لا runtime implementation في هذه التذكرة.
+  الـ implementation ستُضاف في api-server في Ticket 03.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. CREATED FILES — الملفات الجديدة والمُعدَّلة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+lib/core-events/
+├── src/
+│   ├── types.ts      [تم إعادة كتابته]  BaseEvent, EventMetadata, ActorContext,
+│   │                                    WorkspaceContext, TypedEvent, EventListenerFn,
+│   │                                    EventRegistryEntry, primitives
+│   │
+│   ├── events.ts     [جديد]            10 typed payload interfaces + TypedEvent aliases
+│   │
+│   ├── constants.ts  [جديد]            EVENT_TYPES, EventTypeMap, AnyTypedEvent,
+│   │                                    LEGACY_EVENT_NAMES, IsEventTypeFn
+│   │
+│   └── index.ts      [تم تحديثه]       exports جميع الأنواع والثوابت الجديدة
+│
+└── README.md         [تم تحديثه]       convention documentation + usage examples
+
+إجمالي: 3 ملفات جديدة/معادة كتابة + تحديثَين
+
+8.1 ما لم يُلمَس (بالتأكيد)
+──────────────────────────────
+  ✓ artifacts/api-server/src/lib/events/types.ts       — لم يُعدَّل
+  ✓ artifacts/api-server/src/lib/events/dispatcher.ts  — لم يُعدَّل
+  ✓ artifacts/api-server/src/lib/events/registry.ts    — لم يُعدَّل
+  ✓ artifacts/api-server/src/lib/events/listeners/     — لم يُعدَّل
+  ✓ جميع routes                                        — لم تُعدَّل
+  ✓ جميع database schemas                             — لم تُعدَّل
+  ✓ business logic صفر تغييرات
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. VERIFICATION — التحقق من الصحة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm run typecheck:libs   → ✅ نظيف، 0 أخطاء
+  خطأ تم إصلاحه:           TypedEvent constraint من Record<string, unknown>
+                            إلى extends object — لأن TypeScript strict mode لا
+                            يقبل interfaces كـ index signatures مباشرةً
+  تأثير على runtime        → ✅ صفر — types-only package، لا imports حالية
+  تأثير على API routes     → ✅ صفر
+  تأثير على DB schema      → ✅ صفر
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. SUGGESTIONS FOR TICKET 03 — اقتراحات التذكرة القادمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TICKET 03 المقترح: Wire core-events into api-server
+
+الهدف الرئيسي: ربط الـ dispatcher الحالي بالعقود الجديدة دون كسر أي behavior.
+
+── المهام المقترحة (مرتبة بالأولوية) ────────────────────────────────────────
+
+T03-A: أضف @workspace/core-events كـ dependency لـ api-server (أساسي)
+  package.json: "@workspace/core-events": "workspace:*"
+  tsconfig.json: أضف reference لـ core-events
+  التحقق: pnpm run typecheck:libs && pnpm --filter @workspace/api-server run typecheck
+
+T03-B: أضف EVENT_TYPES الجديدة للـ EVENTS constant (بدون حذف القديمة)
+  أضف:   TICKET_STATUS_CHANGED، NOTIFICATION_CREATED، WORKFLOW_EXECUTED
+  أضف:   APPROVAL_CREATED بجانب APPROVAL_REQUESTED (كلاهما موجود مرحلياً)
+  أضف:   FORM_SUBMITTED بجانب "forms.form.submitted" في registry
+  لا تحذف الأسماء القديمة — stale workflows تحتاجها
+
+T03-C: إصلاح BUG-001 — حذف الـ duplicate "leave.requested" في registry.ts
+  احذف الـ entry الثاني (module: "forms") من REGISTRY array
+  الصحيح هو module: "hr" مع schema الـ hr module
+  أضف "form.submitted" entry جديد للـ forms module بدلاً منه
+
+T03-D: أضف isEventType() type guard كـ runtime function
+  الملف: api-server/src/lib/events/guards.ts
+  المحتوى:
+    export const isEventType: IsEventTypeFn = (event, eventType) =>
+      event.type === eventType;
+
+T03-E: أضف ticket.status_changed emission للـ ticket route
+  عند تغيير الحالة، أطلق ثلاثة أحداث:
+    dispatch(EVENTS.TICKET_UPDATED, ...)        // backward compat
+    dispatch(EVENT_TYPES.TICKET_STATUS_CHANGED, ...) // new canonical
+    (اختياري) dispatch("ticket.closed") إذا كانت الحالة closed (backward compat)
+
+T03-F: أضف approval.completed emission للـ approval route
+  عند approve أو reject:
+    dispatch("approval.approved")  أو  dispatch("approval.rejected")  // backward compat
+    dispatch(EVENT_TYPES.APPROVAL_COMPLETED, { outcome: "approved"|"rejected", ... })
+
+T03-G: (متوسطة الأولوية) ربط BaseEvent بـ EventPayload تدريجياً
+  خيار A: أنشئ adapter function:
+    function toBaseEvent(payload: EventPayload, id: string): BaseEvent { ... }
+  خيار B: اجعل EventPayload يمتد BaseEvent (migration أكبر)
+  التوصية: خيار A أولاً — أبطأ لكن أكثر أماناً
+
+T03-H: (منخفضة الأولوية) إضافة notification.created + workflow.executed للـ EVENTS map
+  notification.created: يُطلق بعد insert في notificationsTable
+  workflow.executed: يُطلق في WorkflowEngine بعد انتهاء الـ execution
+
+── ما لا يجب فعله في Ticket 03 ─────────────────────────────────────────────
+  ✗ لا تحذف EVENTS القديمة (stale workflows في DB قد تشير إليها)
+  ✗ لا تُغيّر EventPayload.event → type مباشرةً (كسر للـ dispatcher والـ listeners)
+  ✗ لا تُغيّر schema العمود في DB بدون migration
+  ✗ لا تربط core-events بـ core-approvals أو core-notifications بعد (Ticket 06)
+
+
+================================================================================
+  نهاية التقرير — Architecture Ticket 02
+================================================================================

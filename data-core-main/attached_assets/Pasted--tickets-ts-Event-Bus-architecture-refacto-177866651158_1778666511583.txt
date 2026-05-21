@@ -1,0 +1,125 @@
+راجع tickets.ts والـ Event Bus architecture الحالية ثم نفّذ فقط هذه المهمة المعمارية بدون أي refactor خارج نطاقها.
+
+المهمة الحالية فقط:
+هجرة ticket.updated و ticket.closed flows من eventDispatcher.dispatch() والـ inline side-effects إلى appEventBus.emit() باستخدام الـ bridge architecture الحالية.
+
+هذه أول migration معقدة داخل النظام.
+المطلوب تنفيذها بشكل conservative ودقيق جدًا بدون كسر أي behavior.
+
+المطلوب بالتفصيل:
+
+1- راجع:
+- tickets.ts PATCH /tickets/:id
+- activity.ts listeners
+- notifications-bus.ts listeners
+- legacy notifications.ts listeners
+- bridge.ts
+- EVENT_TYPES الحالية
+- أي inline activity inserts
+- أي inline notification inserts
+- أي SSE emitToUser calls
+
+2- استبدل:
+eventDispatcher.dispatch(EVENTS.TICKET_UPDATED)
+
+بـ:
+appEventBus.emit(EVENT_TYPES.TICKET_UPDATED)
+
+مع Typed Payload نظيف ومنظم.
+
+3- استبدل:
+eventDispatcher.dispatch(EVENTS.TICKET_CLOSED)
+
+بـ:
+appEventBus.emit(EVENT_TYPES.TICKET_STATUS_CHANGED)
+
+أو أي Typed Event مناسب موجود بالـ contracts الحالية.
+
+4- أنشئ normalized changes map واضح داخل payload.
+
+المطلوب:
+- changes
+- previousValues
+- updatedByUserId
+- entityLabel/title إذا كان مناسب
+- status transitions
+- assignment transitions
+
+5- فعّل listeners الجاهزة الموجودة داخل:
+- activity.ts
+- notifications-bus.ts
+
+الخاصة بـ:
+- ticket.updated
+- ticket.status_changed
+
+6- احذف فقط الـ inline side-effects التي أصبحت مغطاة بالكامل عبر listeners الجديدة.
+
+مثل:
+- activityLogsTable inserts المرتبطة بـ ticket.updated
+- notificationsTable inserts الخاصة بالassignment
+- SSE emits المرتبطة بنفس الإشعار
+
+لكن:
+لا تحذف أي behavior غير مغطى بالـ listeners الجديدة.
+
+7- إذا كان legacy notifications.ts يحتوي listeners أصبحت تسبب duplicate behavior:
+احذف فقط listeners الخاصة بـ:
+- TICKET_UPDATED
+- TICKET_CLOSED
+إذا أصبحت البدائل الجديدة تعمل بالكامل.
+
+ولا تلمس:
+- EMPLOYEE_CREATED
+- أي listeners أخرى خارج نطاق المهمة.
+
+8- تأكد من:
+- عدم وجود duplicate notifications
+- عدم وجود duplicate activity logs
+- عدم وجود circular event loops
+- عدم فقدان أي workflow triggers
+- عدم كسر workspace_event_logs
+
+9- حافظ على:
+appEventBus → bridge → eventDispatcher
+كالمسار الرسمي.
+
+10- لا تغيّر:
+- comments flows
+- CC handlers
+- calendar module
+- messages module
+- forms module
+- DB schema
+
+11- أضف comments واضحة تشرح:
+- migration status
+- source of truth
+- listener ownership
+- legacy compatibility boundaries
+
+12- إذا اكتشفت حالات معقدة داخل ticket.updated:
+لا تعمل rewrite.
+بل:
+- وثّقها
+- اعزلها
+- وأضف TODO architecture notes
+
+13- أضف lightweight tracing/logging إذا كان مفيد لتتبع:
+- ticket.updated propagation
+- status change propagation
+- assignment notifications
+
+14- في النهاية:
+أنشئ ملف TXT باسم:
+
+architecture-ticket-06B-report.txt
+
+ويحتوي:
+- flow قبل وبعد migration
+- جميع listeners التي أصبحت فعالة
+- أي inline logic تم حذفه
+- أي legacy listeners تم حذفها
+- أي remaining coupling داخل tickets.ts
+- أي edge cases أو risks مكتشفة
+- readiness للمرحلة التالية

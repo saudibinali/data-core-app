@@ -1,0 +1,153 @@
+PHASE 13-C COMPLETION REPORT
+Subscription Metadata, Trial Windows & Renewal Lifecycle Foundations
+Generated: 2026-05-16
+================================================================================
+
+SUMMARY
+-------
+Phase 13-C is complete. All deliverables implemented, typechecks clean, and
+all tests passing.
+
+  Backend tests:   2646 passed  (45 test files)  — +77 from P13-B baseline of 2569
+  Frontend tests:    777 passed  (12 test files)  — +51 from P13-B baseline of 726
+
+DELIVERABLES
+------------
+
+1. DB SCHEMA — lib/db/src/schema/tenant-subscriptions.ts (NEW)
+   - Table: tenant_subscriptions
+   - Unique FK: workspaceId → workspaces(id) CASCADE DELETE
+   - Columns: planCode, subscriptionStatus, billingPeriodStart,
+              billingPeriodEnd, renewalDueAt, trialStartedAt, trialEndsAt,
+              gracePeriodStartedAt, gracePeriodEndsAt, cancelledAt, suspendedAt,
+              metadataJson, reason, updatedBy, createdAt, updatedAt
+   - No payment, invoice, card, or tax fields anywhere
+   - Migration applied: pnpm --filter @workspace/db run push ✓
+
+2. BACKEND PURE LIB — artifacts/api-server/src/lib/subscription-lifecycle.ts (NEW)
+   - Types: PlanCode (5), SubscriptionStatus (8)
+   - Constants: PLAN_CODE_MAP, ALL_PLAN_CODES, ALL_SUBSCRIPTION_STATUSES
+   - Constants: RENEWAL_WARNING_DAYS = 14, REASON_MIN_LENGTH = 10
+   - deriveSubscriptionStatus(sub, now) — priority: cancelled → suspended →
+     trialing → grace_period → expired → renewal_due → active → unknown
+   - isRenewalApproaching / isGracePeriodActive / isSubscriptionExpired
+   - calculateDaysUntilEnd / calculateDaysPastDue
+   - validateSubscriptionMetadataUpdate — validates reason, confirmation,
+     planCode, subscriptionStatus, all date fields, period ordering,
+     and impossible combinations (active + cancelledAt)
+   - buildSubscriptionAuditPayload — eventType: subscription_metadata_updated
+
+3. TENANT REGISTRY — artifacts/api-server/src/lib/tenant-registry.ts (UPDATED)
+   - Added RawSubscriptionRow interface
+   - Added planName, planTier, renewalDueAt fields to PlatformTenantProfile
+   - buildTenantProfile accepts optional 4th param subscription? — backward compat
+   - deriveRiskSignalSummary now accepts subscription for real signal computation
+   - renewalApproaching / gracePeriodActive / subscriptionExpired from date math
+
+4. API ROUTES — artifacts/api-server/src/routes/tenants.ts (UPDATED)
+   - GET  /platform/tenants/:tenantId/subscription
+     Returns isConfigured + all subscription fields + derivedStatus
+     Returns isConfigured=false (not 404) when no record exists
+   - PATCH /platform/tenants/:tenantId/subscription
+     Validates body via validateSubscriptionMetadataUpdate
+     Upserts subscription via INSERT ... ON CONFLICT DO UPDATE
+     Audit-logs to activity_logs (event: subscription_metadata_updated)
+     Returns { subscription, tenant, auditEvent }
+   Both routes: requireAuth + requireSuperAdmin, metadata only, no payment logic
+
+5. FRONTEND CONFIG — artifacts/ops-platform/src/lib/subscription-lifecycle-config.ts (NEW)
+   - PLAN_CODE_CONFIG: 5 plan codes with name, tier, order, badgeClass
+   - SUBSCRIPTION_STATUS_CONFIG: 8 statuses with label, description, tier, classes
+   - deriveSubscriptionStatusFromFields — client-side replica of backend logic
+   - isSubscriptionFormValid / getSubscriptionFormError — form validation
+   - SUBSCRIPTION_API_PATHS: get() + update() path builders
+   - SUBSCRIPTION_MUTATION_HOOK_NAMES: ["useUpdateTenantSubscription"] (exactly 1)
+   - SUBSCRIPTION_SAFETY_CONTRACT: 14 properties, all true
+
+6. FRONTEND HOOKS — artifacts/ops-platform/src/lib/tenant-registry-hooks.ts (UPDATED)
+   - PlatformTenantProfile updated: planName, planTier, renewalDueAt added
+   - useTenantSubscription(tenantId) — GET hook, returns TenantSubscriptionData
+   - useUpdateTenantSubscription() — PATCH mutation (1 mutation hook, total)
+     On success: invalidates ["platform","tenants"] + subscription-specific key
+
+7. FRONTEND UI — artifacts/ops-platform/src/pages/super-admin-tenants.tsx (UPDATED)
+   - SubscriptionManagementPanel component added (before TenantDetailPanel)
+   - Shows read-only subscription summary: plan badge, status badge, dates,
+     renewal signal (approaching / grace / expired / none)
+   - "Edit Subscription Metadata" button opens a Dialog modal
+   - Modal fields: plan select, status override select, all 9 date inputs,
+     reason textarea (min 10 chars), confirmation checkbox
+   - Dates pre-populated from current tenant.* fields on modal open
+   - Success banner on completion; error display on mutation failure
+   - Wired into TenantDetailPanel as md:col-span-3 section below lifecycle controls
+
+8. BACKEND TESTS — artifacts/api-server/src/lib/__tests__/subscription-lifecycle.test.ts (NEW)
+   T1   deriveSubscriptionStatus: deterministic / stable output (5 cases)
+   T2   trialing derivation (4 cases)
+   T3   renewal_due derivation (5 cases)
+   T4   grace_period derivation (5 cases)
+   T5   expired derivation (5 cases)
+   T6   cancelled/suspended precedence (4 cases)
+   T7   date period validation (7 cases)
+   T8   impossible combinations (4 cases)
+   T9   safety field requirements (4 cases incl. no forbidden keys)
+   T10  confirmation required (3 cases)
+   T11  buildSubscriptionAuditPayload: changedFields (3 cases)
+   T12  eventType = subscription_metadata_updated (3 cases incl. no forbidden words)
+   T13  buildTenantProfile reflects subscription (9 cases)
+   T14  deriveRiskSignalSummary subscription signals (5 cases)
+   T15  PLAN_CODE_MAP stable entries (6 cases)
+   T16  ALL_SUBSCRIPTION_STATUSES 8 statuses, no duplicates (5 cases)
+
+9. FRONTEND TESTS — artifacts/ops-platform/src/lib/__tests__/subscription-lifecycle.test.ts (NEW)
+   T1   SUBSCRIPTION_STATUS_CONFIG: 8 statuses, required fields (5 cases)
+   T2   PLAN_CODE_CONFIG: 5 plan codes, required fields (5 cases)
+   T3   deriveSubscriptionStatusFromFields: active derivation (3 cases)
+   T4   trialing derivation (2 cases)
+   T5   grace_period derivation (3 cases)
+   T6   isSubscriptionFormValid: empty/short reason (3 cases)
+   T7   returns false for unconfirmed (2 cases)
+   T8   returns true for fully valid form (3 cases)
+   T9   SUBSCRIPTION_SAFETY_CONTRACT: all properties true (1 case)
+   T10  SUBSCRIPTION_SAFETY_CONTRACT: exactly 14 properties (4 cases)
+   T11  SUBSCRIPTION_MUTATION_HOOK_NAMES: exactly 1 entry (1 case)
+   T12  correct hook name (2 cases)
+   T13  getSubscriptionFormError: correct messages (4 cases)
+   T14  No payment/invoice/charge/tax wording in configs (3 cases)
+   T15  SUBSCRIPTION_API_PATHS: correct path format (5 cases)
+   T16  deriveSubscriptionStatusFromFields: deterministic (4 cases)
+
+SAFETY CONTRACT COMPLIANCE
+---------------------------
+- No payment processing, invoice generation, or charge collection
+- No tax, card, or payment data in any table or API
+- No automatic workspace suspension from subscription state
+- No entitlement enforcement (planned for P13-D)
+- No email/legal/billing portal notifications
+- All writes require reason (≥10 chars) + confirmation=true
+- Invalid dates fail closed (INVALID_DATE code returned)
+- All changes audit-logged to activity_logs before response
+- Routes protected by requireAuth + requireSuperAdmin
+- SUBSCRIPTION_SAFETY_CONTRACT: 14 properties, all true ✓
+- SUBSCRIPTION_MUTATION_HOOK_NAMES: exactly 1 entry ✓
+
+BREAKING CHANGES
+----------------
+None. All changes are additive:
+- buildTenantProfile: optional 4th parameter (backward compatible)
+- PlatformTenantProfile: 3 new optional fields (planName, planTier, renewalDueAt)
+- New table tenant_subscriptions (additive, no FK to existing columns changed)
+
+PRE-EXISTING IGNORED ERRORS (as documented)
+-------------------------------------------
+- super-admin-governance-audit.tsx: TS2322 (pre-existing)
+- super-admin-governance-violations.tsx: TS2503 (pre-existing)
+- workflow-detail.tsx / workflows.tsx: TS2353 isActive (pre-existing)
+
+NEXT PHASE READINESS
+--------------------
+P13-D (Entitlement Enforcement & Module Access Control) can now consume:
+- tenant_subscriptions.planCode → module access gates
+- deriveSubscriptionStatus(sub, now) → access level derivation
+- TenantSubscriptionData from useTenantSubscription() → frontend gates
+================================================================================

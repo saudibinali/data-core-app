@@ -1,0 +1,290 @@
+================================================================================
+ARCHITECTURE TICKET 06-A — ticket.created MIGRATION REPORT
+Date: 2026-05-13
+Status: COMPLETE
+================================================================================
+
+## Objective
+Migrate the ticket.created event flow from direct eventDispatcher.dispatch() to
+appEventBus.emit(), making it the first ticket event to fully use the new
+canonical bus architecture with the bridge layer.
+
+================================================================================
+
+## Flow: BEFORE (pre-Ticket 06-A)
+
+  tickets.ts  POST /tickets
+    │
+    ├─ [1] db.insert(activityLogsTable)  ← INLINE, synchronous, blocks HTTP response
+    │        action: "ticket_created"
+    │
+    ├─ [2] res.status(201).json(full)
+    │
+    └─ [3] void eventDispatcher.dispatch({ event: EVENTS.TICKET_CREATED, ... })
+                │
+                ├──▶ workspace_event_logs (DB write)
+                ├──▶ WorkflowEngine ("*" wildcard listener)
+                └──▶ notifications.ts listener
+                         │
+                         └──▶ db.insert(notificationsTable)  "ticket_assigned"
+                              (no SSE push — emitToUser() was NOT called here)
+
+  appEventBus.subscribe(EVENT_TYPES.TICKET_CREATED) in activity.ts       — IDLE
+  appEventBus.subscribe(EVENT_TYPES.TICKET_CREATED) in notifications-bus.ts — IDLE
+
+================================================================================
+
+## Flow: AFTER (post-Ticket 06-A)
+
+  tickets.ts  POST /tickets
+    │
+    ├─ [1] res.status(201).json(full)          ← unblocked (no inline activity insert)
+    │
+    └─ [2] void appEventBus.emit({
+                 type:      EVENT_TYPES.TICKET_CREATED,
+                 module:    "tickets",
+                 workspace: { workspaceId: req.workspaceId! },
+                 actor:     { userId: req.userId, role: req.userRole },
+                 metadata:  { idempotencyKey: `ticket-created-${ticket.id}` },
+                 data: {
+                   ticketId, title, ticketType: "general", priority,
+                   status, createdByUserId, assigneeId, departmentId
+                 },
+               })
+                 │
+                 │  [concurrent fan-out via Promise.allSettled]
+                 │
+                 ├──▶ activity.ts listener (EVENT_TYPES.TICKET_CREATED)  ✅ ACTIVE
+                 │         └──▶ db.insert(activityLogsTable)
+                 │               action: "ticket_created", ticketId, userId, metadata: title
+                 │
+                 ├──▶ notifications-bus.ts listener (EVENT_TYPES.TICKET_CREATED)  ✅ ACTIVE
+                 │         └──▶ db.insert(notificationsTable)  type: "ticket_assigned"
+                 │               + emitToUser(assigneeId, "notification")  ← SSE push  ✅ NEW
+                 │
+                 └──▶ bridge.ts (subscribeToAll)  → eventDispatcher.dispatch()
+                           │
+                           ├──▶ workspace_event_logs (DB write)           ✅
+                           └──▶ WorkflowEngine ("*" wildcard listener)    ✅
+
+================================================================================
+
+## Listeners Activated (Ticket 06-A)
+
+  Listener              │ File               │ Status    │ Writes to
+  ──────────────────────┼────────────────────┼───────────┼──────────────────────
+  ticket.created        │ activity.ts        │ ✅ ACTIVE │ activity_logs
+  ticket.created        │ notifications-bus.ts│ ✅ ACTIVE │ notifications + SSE
+
+  Previously idle — activated because tickets.ts now calls appEventBus.emit().
+
+================================================================================
+
+## Legacy Listeners Removed
+
+  File                         │ Listener                     │ Reason
+  ─────────────────────────────┼──────────────────────────────┼─────────────────
+  notifications.ts (line 47-69)│ eventDispatcher.on(          │ Would duplicate
+                               │   EVENTS.TICKET_CREATED, ...) │ "ticket_assigned"
+                               │                              │ notification.
+                               │                              │ Replaced by
+                               │                              │ notifications-bus.ts
+
+  The removed listener wrote the same "ticket_assigned" row that notifications-bus.ts
+  now writes. Keeping both would produce two notifications per ticket creation.
+  The legacy listener also lacked SSE push (emitToUser was not called).
+  The new listener has both: DB insert + SSE push.
+
+  Kept in notifications.ts (untouched):
+    - eventDispatcher.on(EVENTS.TICKET_CLOSED, ...)   ← still needed, not migrated
+    - eventDispatcher.on(EVENTS.EMPLOYEE_CREATED, ...) ← still needed, not migrated
+
+================================================================================
+
+## What Was Removed from tickets.ts
+
+  1. Inline activityLogsTable insert (was synchronous, before HTTP response):
+       await db.insert(activityLogsTable).values({
+         ticketId: ticket!.id,
+         userId:   req.userId,
+         action:   "ticket_created",
+         metadata: ticket!.title,
+       });
+     Replaced by: activity.ts listener fires asynchronously after response.
+     Net change: activity log is now written AFTER the HTTP 201 response
+     (not before). This is intentional and correct — it's a background side effect.
+
+  2. Direct eventDispatcher.dispatch() call with EVENTS.TICKET_CREATED:
+     Replaced by: appEventBus.emit(EVENT_TYPES.TICKET_CREATED)
+     The bridge automatically forwards to eventDispatcher → workspace_event_logs
+     + WorkflowEngine. No behavior change for those systems.
+
+================================================================================
+
+## New Capability: SSE Push on Ticket Creation
+
+  Before: No SSE push when a ticket was created (legacy notifications.ts listener
+          did NOT call emitToUser — it used notifyUsers() which only does DB insert).
+
+  After: notifications-bus.ts calls emitToUser(assigneeId, "notification") after
+         the DB insert. The assignee's browser receives a real-time notification
+         count update without polling.
+
+  This is a new user-facing behavior (strictly additive — no regression risk).
+
+================================================================================
+
+## Duplicate Risk Analysis
+
+  Risk 1: Duplicate activity_logs row (ticket_created)
+    Mitigation: inline insert REMOVED from tickets.ts in the same commit.
+    The activity.ts IdempotencyGuard (5-minute TTL) provides a second layer.
+    Status: ZERO RISK
+
+  Risk 2: Duplicate notifications row (ticket_assigned)
+    Mitigation: notifications.ts TICKET_CREATED listener REMOVED in the same commit.
+    The notifications-bus.ts IdempotencyGuard provides a second layer.
+    Status: ZERO RISK
+
+  Risk 3: Double workspace_event_logs write
+    Context: appEventBus → bridge → eventDispatcher writes to workspace_event_logs.
+             The route no longer calls eventDispatcher.dispatch() directly.
+    Status: ZERO RISK (single write path)
+
+  Risk 4: Circular event loop
+    Context: appEventBus → bridge → eventDispatcher → notifications.ts/engine.ts.
+             None of those listeners emit back to appEventBus.
+    Status: ZERO RISK (verified — no reverse path)
+
+================================================================================
+
+## Payload Notes
+
+  TicketCreatedPayload.ticketType = "general" (hardcoded)
+    Reason: ticketsTable has no ticketType column; CreateTicketBody does not accept it.
+    Impact: activity.ts and notifications-bus.ts do not use ticketType — no functional effect.
+    WorkflowEngine may condition on triggerData.ticketType — would see "general" for all tickets.
+    TODO(schema): Add ticketType column to ticketsTable + CreateTicketBody when required.
+
+  actor.userId = req.userId (may be undefined if auth middleware doesn't set it)
+    Safe: ActorContext.userId is optional. The handler already guards !req.userId at top.
+
+  idempotencyKey = "ticket-created-<ticketId>"
+    Used by: activity.ts IdempotencyGuard + notifications-bus.ts IdempotencyGuard
+    Uniqueness: ticketId is a DB serial PK — globally unique within the workspace.
+
+================================================================================
+
+## Files Modified
+
+  MODIFIED:
+    artifacts/api-server/src/routes/tickets.ts
+      • import: added appEventBus, EVENT_TYPES
+      • removed: inline db.insert(activityLogsTable) for ticket_created
+      • removed: void eventDispatcher.dispatch(EVENTS.TICKET_CREATED) block
+      • added:   void appEventBus.emit(EVENT_TYPES.TICKET_CREATED) with typed payload
+      • added:   migration comments (source of truth, listener activation path)
+
+    artifacts/api-server/src/lib/events/listeners/notifications.ts
+      • removed: eventDispatcher.on(EVENTS.TICKET_CREATED, ...) listener block
+      • added:   replacement comment explaining removal reason
+      • unchanged: TICKET_CLOSED listener (still needed)
+      • unchanged: EMPLOYEE_CREATED listener (still needed)
+      • unchanged: notifyUsers() helper (still used by remaining listeners)
+      • unchanged: getAdminAndManagerIds() helper (still used by EMPLOYEE_CREATED)
+
+    artifacts/api-server/src/lib/events/listeners/activity.ts
+      • migration status table: ticket.created → ✅ MIGRATED (T06-A)
+      • per-listener comment: updated to ✅ ACTIVE with source/trigger/legacy details
+
+    artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+      • migration status table: ticket.created → ✅ MIGRATED (T06-A)
+      • per-listener comment: updated to ✅ ACTIVE (removed CRITICAL/TODO block)
+      • legacy systems note: TICKET_CREATED marked REMOVED
+
+  NOT MODIFIED (per task scope):
+    artifacts/api-server/src/lib/events/bridge.ts   — bridge unchanged
+    artifacts/api-server/src/lib/events/index.ts    — registration unchanged
+    artifacts/api-server/src/lib/events/app-bus.ts  — unchanged
+    artifacts/api-server/src/routes/tickets.ts
+      — TICKET_CLOSED flow: untouched (still uses eventDispatcher directly)
+      — TICKET_UPDATED flow: untouched (still uses eventDispatcher directly)
+      — comment threads, CC handlers, GET handlers: untouched
+    lib/db/src/schema/tickets.ts — DB schema unchanged
+
+================================================================================
+
+## Remaining Coupling in tickets.ts
+
+  tickets.ts still directly calls eventDispatcher.dispatch() for two events:
+
+  1. TICKET_CLOSED (EVENTS.TICKET_CLOSED)
+     Location: PATCH /tickets/:id, inside the `isClosed` branch
+     Listeners not yet reached: none (no bus listener for ticket.status_changed yet)
+     legacy still active: notifications.ts TICKET_CLOSED listener (creator notification)
+     ARCH-TODO comment: present
+
+  2. TICKET_UPDATED (EVENTS.TICKET_UPDATED)
+     Location: PATCH /tickets/:id, inside the else branch
+     Listeners not yet reached: ticket.updated notification (notifications-bus.ts ⏳)
+                                ticket.updated activity (activity.ts ⏳)
+     Inline activity inserts still present:
+       - status_changed: await db.insert(activityLogsTable) (line 226 approx)
+       - assigned:       await db.insert(activityLogsTable) (line 230 approx)
+     Inline notification insert still present for assignee change
+     ARCH-TODO comment: present
+
+  eventDispatcher is still imported in tickets.ts (needed for TICKET_CLOSED/UPDATED).
+  EVENTS constant is still imported in tickets.ts (needed for TICKET_CLOSED/UPDATED).
+  activityLogsTable is still imported (used by PATCH status_changed + assigned + CC handlers).
+
+================================================================================
+
+## Readiness for Ticket 06-B
+
+  Ticket 06-B scope: migrate ticket.updated + ticket.closed flows to appEventBus.
+
+  Preconditions — ALL MET:
+    ✅ appEventBus.subscribe(EVENT_TYPES.TICKET_UPDATED, ...) exists in activity.ts
+    ✅ appEventBus.subscribe(EVENT_TYPES.TICKET_UPDATED, ...) exists in notifications-bus.ts
+    ✅ bridge is active (eventDispatcher receives all bus events automatically)
+    ✅ ARCH-TODO comments in tickets.ts PATCH handler document exact migration steps
+
+  Steps for 06-B:
+    1. Replace eventDispatcher.dispatch(EVENTS.TICKET_CLOSED) with
+       appEventBus.emit(EVENT_TYPES.TICKET_STATUS_CHANGED, { toStatus: "closed|resolved", ... })
+       Note: TICKET_CLOSED has a legacy notifications.ts listener for creator notification.
+             Remove that listener ONLY after the new bus notification is verified.
+
+    2. Replace eventDispatcher.dispatch(EVENTS.TICKET_UPDATED) with
+       appEventBus.emit(EVENT_TYPES.TICKET_UPDATED, {
+         ticketId, changes: { ...changedFields }, updatedByUserId, previousValues
+       })
+       Note: Remove the inline activityLogsTable inserts (status_changed, assigned) — those
+             will be handled by activity.ts ticket.updated listener.
+             Remove inline notificationsTable insert for assignee change — handled by
+             notifications-bus.ts ticket.updated listener.
+
+    3. If both isClosed and regular update can happen, consider emitting BOTH
+       TICKET_STATUS_CHANGED (for specific listeners) and TICKET_UPDATED (for general).
+
+    4. After TICKET_CLOSED/UPDATED are migrated, check if eventDispatcher and EVENTS
+       are still needed in tickets.ts — remove imports if not.
+
+================================================================================
+
+## Typecheck Result
+
+  pnpm --filter @workspace/api-server run typecheck → 0 errors (confirmed twice)
+
+================================================================================
+
+## Server Startup Log (post-migration)
+
+  [09:55:26.441] INFO: [bridge] appEventBus → eventDispatcher bridge registered
+  [09:55:26.538] INFO: Server listening port: 8080
+  [09:55:26.568] INFO: Workflow Engine started — listening for events
+
+  Clean startup — no errors, no warnings.
+
+================================================================================

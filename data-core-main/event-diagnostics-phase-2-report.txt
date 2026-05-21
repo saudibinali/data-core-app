@@ -1,0 +1,534 @@
+EVENT DIAGNOSTICS PHASE 2 — Operational Visibility APIs
+=========================================================
+Date:    2026-05-13
+Status:  ✅ COMPLETE — 6 new endpoints, 1 new index, 0 TypeScript errors, server running
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6 new API endpoints added on top of the Phase 0/1 event platform.
+1 new DB index: idx_wf_exec_trigger on workflow_executions.trigger_event_log_id.
+No external telemetry systems. No queues. No replay engines. No redesign.
+All existing architecture preserved.
+
+Files changed (6):
+  lib/db/src/schema/workflows.ts              + idx_wf_exec_trigger index
+  artifacts/api-server/src/lib/sse.ts         + getConnectionCount(), workspace tracking, debug logs
+  artifacts/api-server/src/routes/stream.ts   + workspaceId forwarded to addConnection()
+  artifacts/api-server/src/routes/events.ts   + GET /events/failed, GET /events/:id
+  artifacts/api-server/src/routes/workflows.ts + GET /workflows/executions, /failed, /:id
+  artifacts/api-server/src/routes/health.ts   + GET /health/sse-connections
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1 — EVENT DETAIL API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/events/:id
+Auth:      requireAuth + requireWorkspaceAdmin
+Isolation: workspace_id equality check on workspace_event_logs
+
+Purpose:
+  Full event inspection for operational debugging. Returns the event row,
+  full payload + result (intentionally — single-row debug context), and
+  three enrichment layers fetched in parallel.
+
+Response structure:
+  {
+    event: {
+      id, workspaceId, eventName, module, triggeredBy, triggeredByName,
+      status, payload, result, error, retryCount, createdAt, processedAt,
+      busEventId,    ← extracted from payload._busEventId (set by bridge.ts)
+      requestId      ← extracted from payload._requestId  (set by routes)
+    },
+    enrichments: {
+      activity: [
+        { id, action, metadata, userId, userName, createdAt }   -- up to 50
+      ],
+      notifications: [
+        { id, userId, type, title, isRead, createdAt }          -- up to 50
+      ],
+      workflowExecutions: [
+        { id, workflowId, workflowName, workflowKey, status,
+          startedAt, completedAt, error }                        -- up to 20
+      ]
+    },
+    diagnostics: {
+      totalListenerDuration,   ← sum of all listener durationMs from result.listeners
+      failedListenersCount,    ← count of listeners where success = false
+      listenerCount,
+      notificationsCount,      ← len(enrichments.notifications)
+      activityCount,           ← len(enrichments.activity)
+      workflowCount            ← len(enrichments.workflowExecutions)
+    }
+  }
+
+Enrichment strategy:
+  1. Single indexed lookup: workspace_event_logs WHERE id = ? AND workspace_id = ?
+  2. Extract busEventId from payload->>'_busEventId' in-process (no extra query)
+  3. Promise.all() — 3 parallel queries (no N+1):
+     A. activity_logs WHERE bus_event_id = busEventId          [idx_activity_bus_event_id]
+     B. notifications WHERE bus_event_id = busEventId          [idx_notifications_bus_event_id]
+     C. workflow_executions WHERE trigger_event_log_id = id    [idx_wf_exec_trigger] ← new
+  4. Diagnostics computed from result.listeners[] in-process (0 extra queries)
+
+Why enrichment is server-side:
+  Three cross-table joins keyed by a UUID stored inside a JSONB column
+  (payload->>'_busEventId'). Computing this client-side would require 3+
+  round-trips AND the client knowing the internal busEventId format. Server-
+  side enrichment hides this implementation detail and is cheaper.
+
+Why raw payload is returned here but not in list views:
+  This is a single-row debug endpoint. Admins need the full event context for
+  debugging. List views omit payload/result to keep paginated responses small.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2 — WORKFLOW EXECUTIONS LIST API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/workflows/executions
+Auth:      requireAuth + requirePermission("workflow.view")
+Isolation: workspaceId filter on workflow_executions
+
+Query parameters (all optional):
+  status        — eq filter on workflow_executions.status
+  workflowId    — eq filter on workflowId (specific workflow definition)
+  triggeredBy   — eq filter on triggeredBy (userId)
+  dateFrom      — gte filter on startedAt (ISO 8601)
+  dateTo        — lte filter on startedAt (ISO 8601)
+  page, limit   — pagination (default: page=1, limit=30, max=100)
+
+Response structure:
+  {
+    data: [{
+      id, workspaceId, workflowId, workflowName, workflowKey, module,
+      triggerEventLogId,
+      triggerEventName,    ← from workspace_event_logs JOIN on triggerEventLogId
+      triggeredBy, triggeredByName,
+      status, currentStepIndex, totalSteps,
+      error,
+      startedAt, completedAt,
+      durationMs           ← EXTRACT(EPOCH FROM (completedAt - startedAt)) * 1000, or null
+    }],
+    total, page, limit
+  }
+
+No context JSONB in list view — omitted intentionally (can be large).
+Indexes used: idx_wf_exec_workspace, idx_wf_exec_status, idx_wf_exec_started,
+              idx_wf_exec_trigger (for event name join)
+
+Note on workspaceId filter:
+  For authenticated workspace users, scope is always the user's own workspace.
+  A super_admin cross-workspace execution view is deferred to Phase 3.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 — WORKFLOW EXECUTION DETAIL API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/workflows/executions/:id
+Auth:      requireAuth + requirePermission("workflow.view")
+Isolation: workspaceId equality check on workflow_executions
+
+Response structure:
+  {
+    execution: {
+      id, workspaceId, workflowId,
+      workflowName, workflowKey, workflowModule, workflowTriggerEvent,
+      status, currentStepIndex, totalSteps, error,
+      startedAt, completedAt, durationMs,
+      triggeredBy, triggeredByName,
+      triggerEventLogId,
+      triggerEventName, triggerEventModule, triggerEventStatus, triggerEventCreatedAt,
+      triggerBusEventId,   ← payload->>'_busEventId' from linked event log
+      triggerRequestId     ← payload->>'_requestId'  from linked event log
+    },
+    steps: [{
+      id, stepIndex, stepType, stepName,
+      status,
+      input, output,      ← full step input/output (admin debug endpoint)
+      error,
+      startedAt, completedAt,
+      durationMs          ← per-step computed duration in ms
+    }]
+  }
+
+Fetch strategy:
+  Promise.all() — execution row + steps in parallel (2 queries total, no N+1).
+
+Timeline reconstruction:
+  Steps sorted by stepIndex (not insertion order) — guarantees correct
+  timeline even if the engine inserts steps out of order during recovery.
+  durationMs computed per-step: EXTRACT(EPOCH FROM (completedAt - startedAt)) * 1000.
+
+Trigger event enrichment:
+  workspace_event_logs LEFT JOIN on triggerEventLogId.  Surfaces:
+  - triggerEventName: what event caused this execution
+  - triggerBusEventId: links back to the bus UUID (cross-reference to activity/notifications)
+  - triggerRequestId: links back to the original HTTP request (pino req.id)
+  Only key fields returned — not the full trigger event payload — to keep
+  response focused.  Callers can follow up with GET /events/:triggerEventLogId
+  if the full payload is needed.
+
+PII / sensitive field note:
+  input/output JSONB returned as-is.  These are admin-only debug APIs; no
+  redaction is applied.  If PII redaction is required in future, add a
+  redact() pass over input/output before returning.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4 — FAILED EVENTS VIEW API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/events/failed
+Auth:      requireAuth + requireWorkspaceAdmin
+Isolation: workspaceId filter on workspace_event_logs
+
+IMPORTANT — route ordering:
+  Registered before GET /events/:id in Express to prevent "failed" being
+  matched as the :id parameter.
+
+Query parameters (all optional):
+  eventName, module     — eq filters
+  dateFrom, dateTo      — gte/lte on createdAt (ISO 8601)
+  page, limit           — pagination (default: page=1, limit=50, max=100)
+
+Failure categories:
+  fully_failed    — workspace_event_logs.status = 'failed'
+                    (all listeners threw, or dispatch itself failed)
+  partial_failure — status = 'completed' AND at least one listener in
+                    result->'listeners' has success = false
+
+Detection SQL for partial_failure:
+  EXISTS (
+    SELECT 1 FROM jsonb_array_elements(result->'listeners') AS l
+    WHERE (l->>'success')::boolean = false
+  )
+
+Response structure:
+  {
+    data: [{
+      id, workspaceId, eventName, module,
+      triggeredBy, triggeredByName,
+      status, error, retryCount,
+      createdAt, processedAt,
+      listenerSummary: [{ name, success, durationMs, error? }],  ← from result.listeners
+      failureKind: "fully_failed" | "partial_failure",
+      failedListenerCount                                         ← computed in SQL
+    }],
+    total, page, limit
+  }
+
+No full payload returned in list view (can be large).
+Indexes used: idx_event_logs_workspace, idx_event_logs_status,
+              idx_event_logs_event_name, idx_event_logs_created_at
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5 — FAILED WORKFLOWS VIEW API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/workflows/executions/failed
+Auth:      requireAuth + requirePermission("workflow.view")
+Isolation: workspaceId filter on workflow_executions
+
+IMPORTANT — route ordering:
+  Registered before GET /workflows/executions and GET /workflows/executions/:id.
+  Also before GET /workflows/:id.
+
+Query parameters (all optional):
+  workflowId          — eq filter on workflowId
+  dateFrom, dateTo    — gte/lte on startedAt (ISO 8601)
+  page, limit         — pagination (default: page=1, limit=30, max=100)
+
+Status filter:
+  status IN ('failed', 'error') — includes both terminal failure states.
+  Executions in 'pending', 'running', 'completed' are excluded.
+
+Response structure:
+  {
+    data: [{
+      id, workspaceId, workflowId,
+      workflowName, workflowKey, module, triggerEvent,
+      triggerEventLogId,
+      triggeredBy, triggeredByName,
+      status, currentStepIndex, totalSteps,
+      error,
+      startedAt, completedAt,
+      durationMs,
+      lastFailedStep: {          ← inline subquery — avoids N+1 on list view
+        stepIndex, stepName, stepType, error
+      } | null
+    }],
+    total, page, limit
+  }
+
+lastFailedStep implementation:
+  Inline SQL scalar subquery per row:
+    SELECT jsonb_build_object('stepIndex', ...) FROM workflow_execution_steps
+    WHERE execution_id = ? AND status IN ('failed', 'error')
+    ORDER BY step_index DESC LIMIT 1
+  This is safe (bounded by LIMIT 1) and avoids a second round-trip.
+  Indexes used: idx_wf_step_execution, idx_wf_step_status
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6 — SSE DIAGNOSTICS API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Endpoint:  GET /api/health/sse-connections
+Auth:      requireAuth + requireSuperAdmin
+Scope:     Platform-wide (not workspace-scoped)
+
+Why super_admin only:
+  Connection counts are cross-workspace aggregates. A workspace admin must
+  not observe how many users in other workspaces are online. super_admin
+  has platform-wide visibility and is the correct scope.
+
+Response structure:
+  {
+    total:          <number>   -- sum of all active SSE Response objects (all tabs)
+    connectedUsers: <number>   -- distinct users with ≥1 active connection
+    perWorkspace: {
+      "<workspaceId>": <number>  -- connected USERS in that workspace (not connections)
+    },
+    note: "Snapshot of current in-process SSE connections. Resets on server restart."
+  }
+
+Important: perWorkspace counts USERS (not connections). A user with 3 open
+browser tabs counts as 1 in perWorkspace but 3 in total.
+
+No personal data exposed: no user IDs, names, IP addresses, or content.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7 — SSE STRUCTURED DEBUG LOGGING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Location: artifacts/api-server/src/lib/sse.ts
+
+Three debug events (all at logger.debug level — not info, not warn):
+
+  sse_connect:
+    { userId, workspaceId, totalConnections, event: "sse_connect" }
+
+  sse_disconnect:
+    { userId, workspaceId, totalConnections, event: "sse_disconnect" }
+
+  sse_emit:
+    { userId, workspaceId, eventType, delivered: bool, event: "sse_emit" }
+    delivered = true if at least one write() succeeded.
+    delivered = false if the user had no active connections.
+
+Log level rationale:
+  High-volume (one entry per SSE frame × connected users). Debug level means
+  they are silent in production unless debug logging is enabled. Use them in
+  development or targeted production debugging (LOG_LEVEL=debug).
+
+stream.ts change:
+  addConnection(req.userId, res, req.workspaceId ?? undefined)
+  Forwards workspaceId at connection time so sse.ts can track per-workspace
+  counts without inspecting opaque Response objects later.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8 — PERFORMANCE & QUERY SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+New DB index added:
+  idx_wf_exec_trigger ON workflow_executions(trigger_event_log_id)
+  Applied via: pnpm --filter @workspace/db run push ✅
+
+  This index is used by:
+  - GET /events/:id enrichment (C query: workflow_executions by logId)
+  - GET /workflows/executions/:id (joining workspace_event_logs on triggerEventLogId)
+
+Existing indexes leveraged:
+  idx_event_logs_workspace     — workspaceId filter on all event endpoints
+  idx_event_logs_status        — status filter and partial-failure EXISTS subquery
+  idx_event_logs_created_at    — date range filters on /events/failed
+  idx_event_logs_event_name    — eventName filter on /events/failed
+  idx_activity_bus_event_id    — activity enrichment by busEventId
+  idx_notifications_bus_event_id — notification enrichment by busEventId
+  idx_wf_exec_workspace        — workspace isolation on executions list
+  idx_wf_exec_status           — status filter on /workflows/executions
+  idx_wf_exec_started          — date range filters on executions
+  idx_wf_step_execution        — steps join by executionId
+  idx_wf_step_status           — status filter in lastFailedStep subquery
+
+No full-table scans:
+  All WHERE clauses use indexed columns. The partial-failure EXISTS subquery
+  (JSONB array scan) is bounded by rows already filtered by workspace_id and
+  status = 'completed' — acceptable for admin-only diagnostic views.
+
+Payload serialization:
+  List endpoints (GET /events, /events/failed, /workflows/executions, /failed)
+  omit payload/result/context JSONB columns.
+  Detail endpoints return full JSONB only for the single matched row.
+
+Pagination:
+  All list endpoints: limit/offset with configurable page size.
+  Default limits: 30–50. Hard cap: 100 rows per request.
+  Cursor-based pagination deferred to Phase 3 (needed only at very high volume).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AUDIT TRAIL vs DIAGNOSTICS — OWNERSHIP BOUNDARIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Layer 1 — HTTP Request:    pino-http logs (req.id, method, url, status)
+Layer 2 — Notifications:   notifications table (who was notified, delivery status)
+Layer 3 — Activity Trail:  activity_logs (human-readable "who did what" for UI)
+Layer 4 — Event Store:     workspace_event_logs (technical dispatch record)
+Layer 5 — Workflows:       workflow_executions + steps (automation state machine)
+
+Phase 2 diagnostics APIs live at Layer 4 and bridge into Layers 2, 3, 5.
+They are NOT replacements for the activity feed (Layer 3 — for users) or
+notification history (Layer 2 — for users). They are admin/operator tools
+for tracing system behavior.
+
+GET /events/:id           — Layer 4 detail, enriched by 2+3+5
+GET /events/failed        — Layer 4 failure view
+GET /workflows/executions — Layer 5 list with Layer 4 context
+GET /workflows/executions/failed — Layer 5 failure view
+GET /workflows/executions/:id   — Layer 5 detail with Layer 4 context
+GET /health/sse-connections     — Layer 1 infrastructure diagnostic
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WORKFLOW TRACEABILITY — END-TO-END TRACE EXAMPLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Given: a workflow execution that seems stuck or failed.
+
+Step 1 — Find the execution:
+  GET /api/workflows/executions?status=failed&dateFrom=2026-05-13T00:00:00Z
+  → Returns rows including { id: 7, triggerEventLogId: 23, triggerEventName: "leave.requested" }
+
+Step 2 — Inspect the execution detail:
+  GET /api/workflows/executions/7
+  → Returns:
+    execution.triggerBusEventId = "c3140829-0a00-420f-..."
+    execution.triggerRequestId  = "42"
+    steps[0] = { stepName: "notify_manager", status: "failed", error: "User not found" }
+
+Step 3 — Inspect the triggering event:
+  GET /api/events/23
+  → Returns:
+    event.payload._requestId = "42"     ← matches pino HTTP log req.id=42
+    event.result.listeners[0] = { name: "WorkflowEngine", success: true, durationMs: 2 }
+    enrichments.activity     = [{ action: "leave_requested", ... }]
+    enrichments.notifications = [{ type: "leave_request", userId: 5, ... }]
+    enrichments.workflowExecutions = [{ id: 7, status: "failed" }]
+    diagnostics.failedListenersCount = 0  ← event itself was fine; failure was in workflow step
+
+Step 4 — Check for other failed events today:
+  GET /api/events/failed?dateFrom=2026-05-13T00:00:00Z
+  → Shows any fully or partially failed events for the workspace
+
+Step 5 — Check HTTP log for request 42:
+  Correlate with pino log: { req: { id: 42, method: "POST", url: "/api/hr/leave-requests" } }
+
+Full trace: HTTP request 42 → event c3140829 → event log 23 → workflow execution 7 → step 0 failed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TypeScript:
+  pnpm run typecheck:libs                               → ✅ PASS (libs rebuilt)
+  pnpm --filter @workspace/api-server run typecheck     → ✅ PASS (0 errors)
+
+Database:
+  pnpm --filter @workspace/db run push                  → ✅ idx_wf_exec_trigger created
+
+Server startup:
+  [bridge] appEventBus → eventDispatcher bridge registered  ✅
+  Server listening port: 8080                               ✅
+  Database migrations complete                              ✅
+  Workflow Engine started                                   ✅
+  Platform modules / event registry / workflow templates seeded ✅
+
+Route ordering verified (events.ts):
+  /events/registry  →  /events  →  /events/failed  →  /events/:id
+  ✅ "failed" matched before :id
+
+Route ordering verified (workflows.ts):
+  /workflows  →  POST /workflows  →  /workflows/executions/failed
+  →  /workflows/executions  →  /workflows/executions/:id
+  →  /workflows/:id  →  PATCH/DELETE /workflows/:id  →  /workflows/:id/executions
+  ✅ "executions" matched before :id in both levels
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TECHNICAL DEBT REMAINING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TD-01: SSE connection counts reset on server restart.
+  The in-process Map is ephemeral. For persistent connection history, a
+  time-series counter in Redis/DB would be needed. Deferred — out of scope
+  for Phase 2 (no external systems).
+
+TD-02: perWorkspace SSE counts exclude super_admin connections.
+  super_admin users have no workspaceId, so they appear in total/connectedUsers
+  but NOT in perWorkspace. This is intentional — super_admin is platform-wide.
+  A separate "platform connections" count could be added if needed.
+
+TD-03: GET /events/:id activity enrichment uses a SQL alias workaround.
+  The LEFT JOIN on usersTable for activity actor name uses a raw SQL alias
+  (`u.full_name`) because Drizzle does not support aliased table joins in
+  the same query when usersTable is already joined for triggeredByName.
+  This works but is fragile. Fix: introduce a typed alias with Drizzle's
+  `alias()` function. Deferred to Phase 3 cleanup.
+
+TD-04: Partial failure detection uses a JSONB EXISTS subquery.
+  The SQL-level detection of partial failures (result->'listeners' with
+  success=false) is correct but bypasses Drizzle's type system. If the
+  result JSONB schema changes, this query silently returns wrong results.
+  Fix: add a dedicated `partial_failure` status written by the dispatcher.
+  Deferred to Phase 3 (requires dispatcher schema change).
+
+TD-05: GET /workflows/executions does not support super_admin cross-workspace.
+  Currently scoped to req.workspaceId (workspace users only). A super_admin
+  platform-wide execution view is deferred to Phase 3 alongside the
+  super_admin panel expansion.
+
+TD-06: No cursor-based pagination.
+  All list endpoints use limit/offset. At high volume (100k+ event logs),
+  deep offsets become slow. Cursor-based pagination (keyset on createdAt + id)
+  should be introduced in Phase 3 for the events and executions lists.
+
+TD-07: Step input/output JSONB returned unredacted.
+  Admin-only endpoints currently return raw step input/output. If PII (email,
+  national ID, salary) flows through workflow steps, a redact() pass should
+  be added. Deferred pending PII audit of workflow step data.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ADMIN UI READINESS ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The following Admin UI pages can be built directly on these APIs:
+
+READY NOW:
+  Event Log Browser
+    GET /api/events                           → paginated event list
+    GET /api/events/:id                       → event detail panel
+    GET /api/events/failed                    → failure queue view
+    Filters: eventName, module, status, date range
+
+  Workflow Execution Dashboard
+    GET /api/workflows/executions             → cross-workflow timeline
+    GET /api/workflows/executions/:id         → step-by-step timeline view
+    GET /api/workflows/executions/failed      → failure triage view
+    Filters: status, workflowId, triggeredBy, date range
+
+  Event → Workflow Trace View
+    Given event log ID:
+      GET /api/events/:id                     → workflowExecutions[0].id
+      GET /api/workflows/executions/:id       → full step timeline
+    One-click drill-down: event → execution → steps
+
+  Failed Events Queue
+    GET /api/events/failed                    → failureKind, failedListenerCount
+    Client can group by failureKind for separate "fully failed" / "partial" tabs
+
+  SSE Connection Monitor (super_admin)
+    GET /api/health/sse-connections           → total, connectedUsers, perWorkspace
+    Simple KPI widget in super_admin dashboard
+
+DEFERRED TO PHASE 3 (APIs not yet ready):
+  Dead-letter Queue view  — needs persistent retry state (Phase 3)
+  Real-time event stream  — needs SSE push for new event log rows (Phase 3)
+  Cross-workspace execution view  — needs super_admin scope on executions API
+  Cursor-based pagination  — needed for high-volume event log browsing

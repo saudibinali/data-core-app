@@ -1,0 +1,237 @@
+================================================================================
+WORKFLOW PHASE 15-B — Contract Terms & Renewal Commitments
+Final Implementation Report
+================================================================================
+Date: 2026-05-18
+Scope: Platform Administration only — commercial contract metadata per tenant.
+Out of scope: accounting, electronic payment, invoice generation, PDF upload (P15-C).
+
+================================================================================
+1) CONTRACT TERMS MODEL
+================================================================================
+
+Table: commercial_contract_terms
+Schema: lib/db/src/schema/commercial-contract-terms.ts
+Exported via: lib/db/src/schema/index.ts
+
+Fields:
+  - id (serial PK)
+  - workspaceId (tenant FK → workspaces.id)
+  - commercialAccountId (FK → commercial_accounts.id)
+  - contractNumber, contractTitle
+  - contractStartDate, contractEndDate, renewalDate
+  - renewalNoticeDays, contractTermMonths
+  - renewalType: manual | auto_renewal | non_renewing | under_negotiation
+  - renewalCommitmentStatus: not_started | pending_customer | pending_internal |
+    committed | declined | expired
+  - contractValue (numeric 14,2), currency
+  - billingCycle: monthly | quarterly | semi_annual | annual | custom
+  - paymentTerms: due_on_receipt | net_15 | net_30 | net_45 | net_60 | custom
+  - internalOwnerUserId (platform super_admin user, workspaceId null)
+  - customerDecisionMakerName, customerDecisionMakerEmail
+  - renewalNotes
+  - status: draft | active | expired | terminated | archived
+  - createdBy, updatedBy, createdAt, updatedAt
+
+Rules:
+  - Multiple contract terms per tenant allowed.
+  - When a contract is set to status=active, other active contracts for the same
+    workspace are demoted to archived (one preferred active contract per tenant).
+  - No contract file attachments in P15-B.
+  - No invoice rows, no payment fields.
+
+DB migration: run `pnpm --filter @workspace/db run push` after Postgres is up.
+
+================================================================================
+2) RENEWAL COMMITMENTS MODEL
+================================================================================
+
+Renewal commitment is tracked on each contract term via:
+  - renewalType — commercial renewal mechanism
+  - renewalCommitmentStatus — pipeline state for renewal decision
+  - renewalDate, renewalNoticeDays, contractTermMonths
+  - customerDecisionMakerName / customerDecisionMakerEmail
+  - renewalNotes (free text)
+  - internalOwnerUserId (platform owner)
+
+Status changes on the contract (draft/active/expired/terminated/archived) are
+separate from renewalCommitmentStatus and require a reason on the dedicated
+status endpoint.
+
+================================================================================
+3) PERMISSIONS ADDED
+================================================================================
+
+New codes (total platform permissions: 24):
+  - commercial.contracts.read
+  - commercial.contracts.update
+
+Backend: artifacts/api-server/src/lib/platform-permissions.ts
+Frontend: artifacts/ops-platform/src/lib/platform-permissions-config.ts
+         artifacts/ops-platform/src/lib/commercial-config.ts (COMMERCIAL_PERMISSION_CONFIG)
+
+Role matrix (no redesign — additive only):
+  read + update:
+    root_platform_owner, platform_admin, sales_admin, finance_admin
+  read only:
+    support_admin, auditor, read_only_operator
+  none:
+    workspace_support (no commercial.contracts.update per spec)
+
+Decision note — support_admin / read_only_operator:
+  Both receive commercial.contracts.read (read-only contract visibility), aligned
+  with support_admin already having commercial.accounts.read and read_only_operator
+  read-only posture. Neither receives commercial.contracts.update.
+
+Client gating:
+  - Section visibility: hasPlatformPermissionClient(..., "commercial.contracts.read")
+  - Actions: canPerformPlatformAction(..., "commercial.contracts.update")
+
+================================================================================
+4) BACKEND APIs
+================================================================================
+
+Router: artifacts/api-server/src/routes/commercial-contracts.ts
+Registered: artifacts/api-server/src/routes/index.ts
+
+Endpoints (prefix /api):
+  GET    /platform/tenants/:tenantId/commercial-contracts
+         Permission: commercial.contracts.read
+  GET    /platform/tenants/:tenantId/commercial-contracts/:contractId
+         Permission: commercial.contracts.read
+  POST   /platform/tenants/:tenantId/commercial-contracts
+         Permission: commercial.contracts.update
+  PATCH  /platform/tenants/:tenantId/commercial-contracts/:contractId
+         Permission: commercial.contracts.update
+  PATCH  /platform/tenants/:tenantId/commercial-contracts/:contractId/status
+         Permission: commercial.contracts.update (reason required, min 10 chars)
+
+No DELETE route (by design).
+
+================================================================================
+5) FRONTEND — COMMERCIAL TAB
+================================================================================
+
+Tenant Admin Console → Commercial tab:
+  - Existing P15-A: Commercial Account + Billing Contacts
+  - New P15-B section: Contract Terms & Renewal (العقود والتجديد)
+    Component: artifacts/ops-platform/src/components/commercial/ContractTermsSection.tsx
+    Wired in: artifacts/ops-platform/src/pages/super-admin-tenants.tsx (CommercialPanel)
+
+Displays: contractNumber, contractTitle, status, dates, renewalType,
+renewalCommitmentStatus, contractValue, currency, billingCycle, paymentTerms,
+internal owner id, decision maker, renewalNotes.
+
+Actions (commercial.contracts.update only):
+  - Add Contract Term
+  - Edit Contract Term
+  - Change Status (with reason)
+
+Hidden without commercial.contracts.read (entire section omitted).
+
+Hooks: artifacts/ops-platform/src/hooks/use-commercial-contracts.ts
+React Query keys:
+  ["platform", "tenants", tenantId, "commercial-contracts"]
+  ["platform", "tenants", tenantId, "commercial-contracts", contractId]
+
+================================================================================
+6) VALIDATION
+================================================================================
+
+  - Tenant must exist; commercial account must exist for tenant
+  - commercialAccountId must match tenant account on create
+  - Email format for customerDecisionMakerEmail
+  - Dates ISO YYYY-MM-DD; contractStartDate <= contractEndDate;
+    renewalDate within [start, end] when all present
+  - Enum validation for renewalType, renewalCommitmentStatus, billingCycle,
+    paymentTerms, status
+  - contractValue >= 0; renewalNoticeDays >= 0; contractTermMonths positive int
+  - currency whitelist (SAR, USD, EUR, GBP, AED, KWD, BHD, OMR, QAR)
+  - internalOwnerUserId must reference platform super_admin (workspaceId null)
+  - Status change requires reason (min 10 characters)
+
+================================================================================
+7) AUDIT EVENTS
+================================================================================
+
+Registered in: artifacts/api-server/src/lib/platform-audit-events.ts
+
+Events:
+  - commercial_contract_created
+  - commercial_contract_updated
+  - commercial_contract_status_changed
+  - commercial_contract_status_change_blocked (missing/short reason)
+
+Logged via activityLogsTable with metadata JSON:
+  actorId (userId), tenantId/workspaceId, commercialAccountId, contractId,
+  previousStatus, nextStatus, changedFields, reason, timestamp (created_at).
+
+No secrets stored in metadata.
+
+================================================================================
+8) SAFETY GUARANTEES (COMMERCIAL_SAFETY_CONTRACT)
+================================================================================
+
+Updated: artifacts/ops-platform/src/lib/commercial-config.ts
+
+All flags true, including P15-B additions:
+  noElectronicPayment, noStripe, noCheckout, noCardStorage, noAutoCharge,
+  noPaymentGateway, noInvoiceGenerationEngine, noTaxCalculation,
+  noZatcaIntegration, noAccountingLedger, noEmailSending,
+  noTenantSideBillingPortal, noUploadedInvoicePdfInP15B,
+  invoicePdfUploadDeferredToP15C, noPoTracking, noManualPaymentTracking,
+  noCollectionWorkflow, noCustomPermissions, permissionGated,
+  auditCommercialContractChanges, noDeleteContract
+
+UI/API explicitly exclude: invoice generation, PDF upload, payment, Stripe,
+ZATCA, email send, contract file upload, DELETE contract.
+
+================================================================================
+9) TEST RESULTS
+================================================================================
+
+api-server (pnpm run test): 60 files, 3409 tests — ALL PASSED
+ops-platform (pnpm run test): 25 files, 1225 tests — ALL PASSED
+
+P15-B focused tests:
+  - artifacts/api-server/src/routes/__tests__/commercial-contracts.test.ts
+  - artifacts/api-server/src/lib/__tests__/commercial-permissions.test.ts (6 commercial codes)
+  - artifacts/api-server/src/lib/__tests__/commercial-audit-events.test.ts (+4 events)
+  - artifacts/ops-platform/src/lib/__tests__/commercial-config.test.ts (safety + permissions)
+  - artifacts/ops-platform/src/lib/__tests__/commercial-tab-contracts.test.ts (gating + static safety)
+
+Count expectations updated globally: 24 permissions, 22 audit action codes.
+
+================================================================================
+10) LIMITATIONS INTENTIONALLY LEFT FOR P15-C
+================================================================================
+
+NOT built in P15-B (by design):
+  - Invoice record entity
+  - Uploaded invoice PDF storage
+  - Tenant-side invoice view/download portal
+  - PO tracking, manual payment tracking, collection workflow
+  - Electronic payment / Stripe / checkout / card storage
+  - Invoice generation engine, tax/ZATCA, accounting ledger
+  - Email sending, contract document upload
+  - DELETE contract API/UI
+  - Custom per-user permission overrides
+
+================================================================================
+11) NEXT PHASE — P15-C: Invoice Records & Uploaded Invoice PDFs
+================================================================================
+
+P15-C will add Invoice Records tied to commercial context. Important product rules:
+
+  - The platform will NOT generate accounting invoices.
+  - Official invoices are produced by the customer's external accounting system.
+  - Finance will UPLOAD the official invoice as a PDF (stored by the platform).
+  - Later, tenants will be able to view and download those uploaded invoices from
+    the tenant billing portal (portal itself is out of scope until that phase).
+
+P15-B contract terms provide the commercial/renewal context that P15-C invoice
+records will reference; no invoice PDF upload exists until P15-C.
+
+================================================================================
+END OF REPORT — PHASE 15-B COMPLETE
+================================================================================

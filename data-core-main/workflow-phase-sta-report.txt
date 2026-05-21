@@ -1,0 +1,60 @@
+================================================================================
+WORKFLOW PHASE P-STA — Platform Infrastructure Stabilization
+Generated: 2026-05-20
+Status: COMPLETE
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+P-STA strengthens platform infrastructure for SAP/SuccessFactors-style evolution:
+finance as a first-class workspace module, opt-in legacy write freezes (leave,
+payroll, attendance), workspace stabilization snapshot API + admin UI, and RBAC
+catalog updates. No new ERP domains, no GL posting, no data migrations.
+
+DELIVERABLES
+------------
+Backend:
+  - lib/platform/infrastructure-cutover.ts
+  - lib/platform/platform-stabilization-service.ts
+  - routes/workspace-stabilization.ts → GET /api/workspace/stabilization
+  - seed/modules.ts — finance module
+  - workspace-roles.ts — finance permission group
+  - hr.ts — legacy payroll/attendance freeze hooks
+  - leave-cutover-flags.ts — PLATFORM_STABILIZATION_ALL_WORKSPACES support
+
+Frontend:
+  - pages/finance-dashboard.tsx, /finance routes
+  - pages/platform-stabilization.tsx
+  - App.tsx — finance moduleKey, stabilization route
+  - hr-dashboard link to stabilization
+  - sidebar Scale icon
+
+Tests:
+  - p-sta-stabilization.smoke.test.ts (5 tests)
+
+Docs:
+  - p-sta-platform-stabilization.md
+
+READINESS
+---------
+Platform stabilization controls:     GO (opt-in)
+Finance module catalog:              GO
+Legacy freeze enforcement:           GO (env-gated)
+Stabilization observability:         GO
+HCM cutover completion:              PARTIAL (requires env + ops)
+
+SMOKE TESTS
+-----------
+p-sta-stabilization.smoke.test.ts: 5 passed (run with api-server npm test)
+
+CONFIRMATIONS
+-------------
+- No new ERP domain phases started
+- No destructive migration
+- No GL posting
+
+RECOMMENDED NEXT
+----------------
+P-HCM2 — Leave production cutover + employee-user linking
+
+================================================================================

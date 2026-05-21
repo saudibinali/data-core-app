@@ -1,0 +1,137 @@
+================================================================================
+WORKFLOW PHASE 18B — WORKSPACE HR MIGRATION DRIFT & BASELINE TESTS AUDIT
+================================================================================
+Date: 2026-05-19
+Type: AUDIT / DOCUMENTATION ONLY
+Status: COMPLETE
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+P18-B performed a read-only audit of Workspace/HR database migrations, schema,
+APIs, frontend, permissions, and tests. The system is NOT ready for hr.ts
+split, granular permissions, or new ERP domains. Canonical leave (leave_requests)
+is BLOCKED because baseline Drizzle migration 0000_sad_midnight.sql does NOT
+create leave_requests or leave_approval_steps while Drizzle schema and
+routes/leave.ts depend on them. Self-service leave UI still posts to legacy
+POST /hr/me/leave-requests (writes hr_employee_leaves). HR route test coverage
+is approximately 0%. Recommended next phase: P18-C — Leave Canonical Migration
+Plan (single phase); baseline tests should follow migration L1.
+
+================================================================================
+FILES CREATED
+================================================================================
+1.  p18-b-migration-drift-audit.md
+2.  p18-b-leave-migration-readiness.md
+3.  p18-b-hr-test-baseline-audit.md
+4.  p18-b-hr-route-complexity-audit.md
+5.  p18-b-workspace-hr-permission-gap-audit.md
+6.  p18-b-workspace-hr-data-ownership-audit.md
+7.  p18-b-refactor-readiness-decision.md
+8.  workflow-phase-18b-report.txt (this file)
+
+================================================================================
+MAJOR MIGRATION DRIFT FINDINGS
+================================================================================
+CRITICAL (production blocker for canonical leave):
+  - leave_requests, leave_approval_steps: in lib/db/src/schema/hr.ts, NOT in
+    lib/db/drizzle/0000_sad_midnight.sql
+
+CONFIRMED PRESENT in baseline migration:
+  - hr_leave_balances, hr_org_units, hr_employee_leaves, full payroll/attendance
+    HR table set
+
+MEDIUM:
+  - P16 workspace_subscriptions* tables: schema + apply-p16-tables.cjs only
+  - Single journal entry (0000) vs large schema surface
+  - employees.status / contract_type: text fields, catalog tables not enforced
+  - employees.leave_balances jsonb duplicates hr_leave_balances concept
+
+PLATFORM (out of HR but same drift pattern):
+  - users platform columns, tenant_subscriptions, workflow version tables not in 0000
+
+================================================================================
+LEAVE SYSTEM FINDINGS
+================================================================================
+- Canonical: routes/leave.ts (6+ handlers, db.transaction on state changes)
+- Legacy: hr.ts hr_employee_leaves paths including misleading POST /hr/me/leave-requests
+- Frontend hr-me-leave.tsx: legacy list + submit APIs
+- leave.ts registered in routes/index.ts but will fail on clean migrate DB
+- Bridge strategy documented in p18-b-leave-migration-readiness.md (5 phases, not executed)
+
+================================================================================
+TEST BASELINE FINDINGS
+================================================================================
+- No hr.test.ts, leave.test.ts, or phase-hr tests
+- ~0% coverage of hr.ts (~155 handlers) and leave.ts
+- Indirect coverage: workspace-entitlement*, workflow* tests only
+- Proposed minimal baseline: ~35-45 tests (foundation, employee, leave, payroll,
+  attendance, permission smoke) — see p18-b-hr-test-baseline-audit.md
+- leave.ts tests blocked until leave_requests migration exists
+
+================================================================================
+ROUTE COMPLEXITY FINDINGS
+================================================================================
+- hr.ts: ~4,159 lines, ~155 handlers, 27 DELETE endpoints, 0 db.transaction
+- leave.ts: ~1,007 lines, 4 db.transaction call sites
+- Giant handlers: payroll process, employee/attendance import preview
+- Proposed split files documented (no implementation):
+  hr-foundation, hr-employees, hr-leave, hr-payroll, hr-attendance, hr-services
+
+================================================================================
+PERMISSION FINDINGS
+================================================================================
+- Registry: hr.view, hr.manage, hr.services.manage
+- Gap: self_service.view used in App.tsx but not in workspace-roles registry
+- Many /hr/me/* and /hr/categories routes: requireAuth only (no permission)
+- Payroll process: requireWorkspaceAdmin (not hr.manage)
+- Coarse hr.manage covers payroll + attendance + employees
+
+================================================================================
+DATA OWNERSHIP FINDINGS
+================================================================================
+- All HR tables: workspace_id scoped (safe design)
+- hr.ts uses req.workspaceId consistently (static review)
+- Risky: tenant_subscriptions vs workspace_subscriptions dual commercial model
+- Unclear: departments (legacy) vs hr_org_units (canonical per P18-A)
+
+================================================================================
+REFACTOR READINESS (GO / PARTIAL / BLOCKED)
+================================================================================
+Split hr.ts:              PARTIAL  (boundaries clear; no tests)
+Canonical leave_requests: BLOCKED  (no migration; UI/API legacy)
+Granular HR permissions:  BLOCKED  (deferred; registry gaps)
+New ERP domains:          BLOCKED  (foundation unstable)
+
+================================================================================
+PRODUCTION BLOCKERS
+================================================================================
+1. leave_requests + leave_approval_steps missing from baseline migration
+2. Self-service leave on legacy API with canonical path name collision
+3. Zero HR automated tests before structural refactor
+4. (Workspace-wide) users/platform columns may be missing on journal-only DB
+
+================================================================================
+RECOMMENDED NEXT PHASE (ONE ONLY)
+================================================================================
+P18-C — Leave Canonical Migration Plan
+
+Rationale: Critical schema drift blocks leave.ts and production canonical leave;
+resolving migration + API/UI bridge unblocks notifications, balances integration,
+and future test work. HR baseline tests are urgent but secondary until L1 DB
+migration is defined.
+
+================================================================================
+FINAL CONFIRMATION
+================================================================================
+[x] No business logic changed
+[x] No migrations applied
+[x] No APIs added
+[x] No permissions added
+[x] No refactor performed
+[x] Audit/documentation only
+[x] P18-C not started
+
+================================================================================
+END OF PHASE 18B REPORT
+================================================================================

@@ -1,0 +1,508 @@
+================================================================================
+  ARCHITECTURE TICKET 05 — Notification Bridge to the Typed EventBus
+  lib/core-events  +  artifacts/api-server
+  Internal Operations Platform — Monorepo
+  تاريخ التنفيذ: مايو 2026
+================================================================================
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. CREATED & MODIFIED FILES — الملفات الجديدة والمُعدَّلة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CREATED:
+  artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+    └── 6 listeners على appEventBus لإنشاء notifications + SSE push
+        اثنان منهما نشطان (approval flows)، أربعة جاهزة (pending emitters)
+
+MODIFIED:
+  artifacts/api-server/src/lib/events/index.ts
+    └── أُضيف: import + استدعاء registerNotificationBusListeners()
+        أُحدِّث: comment يوثق حالة migration الكاملة
+
+  artifacts/api-server/src/routes/approvals.ts
+    └── حُذف: inline db.insert(notificationsTable) من POST /approvals
+        حُذف: inline db.insert(notificationsTable) من PATCH /approvals/:id
+        حُذف: استيراد notificationsTable (لم يعد مستخدماً)
+        أُحدِّث: comments توثق المسار الجديد
+
+NOT CHANGED:
+  artifacts/api-server/src/routes/tickets.ts       ← inline notif + SSE محفوظة
+  artifacts/api-server/src/routes/comments.ts      ← inline notif محفوظة
+  artifacts/api-server/src/routes/calendar.ts      ← inline notif محفوظة
+  artifacts/api-server/src/routes/messages.ts      ← inline notif محفوظة (3 inserts)
+  artifacts/api-server/src/lib/events/listeners/notifications.ts  ← لم يُلمَس
+  artifacts/api-server/src/lib/events/dispatcher.ts               ← لم يُلمَس
+  lib/db/src/schema/notifications.ts              ← لا تغيير للـ schema
+  أي كود UI / frontend                            ← لا تغيير
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NEW LISTENERS — الـ Listeners الجديدة التفصيلية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+الملف: artifacts/api-server/src/lib/events/listeners/notifications-bus.ts
+
+━━ Event → Notification Mapping التفصيلي ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Event Type          │ notif.type        │ Recipient(s)             │ ticketId   │ SSE  │ Status
+────────────────────│───────────────────│──────────────────────────│────────────│──────│────────────
+approval.created    │ "approval_request"│ assignedToUserId         │ entityId   │ YES  │ ✅ ACTIVE
+approval.completed  │ "approval_decision│ requestedByUserId        │ entityId   │ YES  │ ✅ ACTIVE
+ticket.created      │ "ticket_assigned" │ assigneeId (if exists)   │ ticketId   │ YES  │ ⏳ READY
+ticket.updated      │ "assigned"        │ new assigneeUserId       │ ticketId   │ YES  │ ⏳ READY
+employee.created    │ "employee_created"│ all workspace admins     │ null       │ YES  │ ⏳ READY
+form.submitted      │ "form_submitted"  │ TBD (placeholder)        │ null       │ YES  │ ⏳ READY
+
+  ✅ = ACTIVE (route emits به + listener ينشئ notification + SSE push)
+  ⏳ = READY (listener مسجّل ومُختبَر TS، لا route emitter بعد)
+
+━━ 2.1  approval.created → "approval_request" ── ✅ ACTIVE ━━━━━━━━━━━━━━━━━━━━
+
+  المُشغِّل:      approvals.ts POST /approvals
+  المستقبِل:      assignedToUserId (المنوط به اتخاذ القرار)
+  notif.type:     "approval_request"     ← مطابق للـ legacy inline insert
+  title:          "Approval Required"   ← مطابق للـ legacy inline insert
+  message:        "You have a new approval request"
+  ticketId:       entityId (عند entityType === "ticket")
+  SSE:            emitToUser(assignedToUserId, "notification")  ← جديد (لم يكن موجوداً)
+  حراسة:          entityType === "ticket" (يتجاهل HR leave)
+  dedup:          IdempotencyGuard.isNew(event.id)
+  self-guard:     غير مطبّق (approver ≠ requester بالضرورة — منع على مستوى business logic)
+
+━━ 2.2  approval.completed → "approval_decision" ── ✅ ACTIVE ━━━━━━━━━━━━━━━━
+
+  المُشغِّل:      approvals.ts PATCH /approvals/:id
+  المستقبِل:      requestedByUserId (من طلب الموافقة في الأصل)
+  notif.type:     "approval_decision"    ← مطابق للـ legacy inline insert
+  title:          "Approval Approved" | "Approval Rejected"   ← outcome-aware (مطابق)
+  message:        "Your approval request has been approved/rejected"
+  ticketId:       entityId
+  SSE:            emitToUser(requestedByUserId, "notification")  ← جديد
+  حراسة:          entityType === "ticket" + decidedBy ≠ requestedBy (self-decision guard)
+  dedup:          IdempotencyGuard.isNew(event.id)
+
+━━ 2.3  ticket.created → "ticket_assigned" ── ⏳ READY ━━━━━━━━━━━━━━━━━━━━━━━
+
+  المستقبِل:      assigneeId (فقط إذا كان موجوداً وغير منشئ التذكرة)
+  notif.type:     "ticket_assigned"   ← مطابق للـ legacy notifications.ts listener
+  حراسة self:     assigneeId === createdByUserId → تخطي (self-assignment guard)
+  CRITICAL:        لا تُفعِّل حتى تُحذف كتلة TICKET_CREATED من notifications.ts
+                  (وإلا: إشعار مزدوج للمُعيَّن)
+
+━━ 2.4  ticket.updated → "assigned" ── ⏳ READY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  المستقبِل:      event.data.changes.assigneeId (new assignee فقط)
+  notif.type:     "assigned"   ← مطابق لـ tickets.ts PATCH inline insert
+  title:          "Ticket Assigned to You"   ← مطابق
+  message:        "You have been assigned to ticket #${ticketId}"  ← رقم فقط (لا title)
+  حراسة:          changes.assigneeId must exist && ≠ updatedByUserId && ≠ oldAssigneeId
+  CRITICAL:        لا تُفعِّل حتى تُحذف inline insert + emitToUser من tickets.ts PATCH
+  NOTE:            tickets.ts PATCH يستدعي emitToUser حالياً — هذا سيُحذف مع المهاجرة
+
+━━ 2.5  employee.created → "employee_created" ── ⏳ READY ━━━━━━━━━━━━━━━━━━━━
+
+  المستقبِلون:    جميع المستخدمين active بدور admin/super_admin في نفس workspace
+                  (استعلام DB في وقت التنفيذ — نفس منطق legacy notifications.ts)
+  notif.type:     "employee_created"  ← مطابق للـ legacy
+  DB query:       SELECT id, role FROM users WHERE workspaceId = X AND status = 'active'
+  فلترة:          يستبعد actor.userId (لا يُخطِّر المنشئ بنفسه)
+  CRITICAL:        لا تُفعِّل حتى تُحذف كتلة EMPLOYEE_CREATED من notifications.ts
+
+━━ 2.6  form.submitted → placeholder ── ⏳ READY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Listener مسجّل لكنه no-op حالياً (logger.debug فقط)
+  سبب: لا يوجد قرار منتج واضح على المُستقبِلين (workspace admin? module manager?)
+  TODO(Ticket 06): تحديد recipient logic + إضافة emit في route النماذج
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. MIGRATED FLOWS — الـ Flows المُحوَّلة في هذه التذكرة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FLOW 1: POST /approvals — إنشاء طلب موافقة
+────────────────────────────────────────────
+
+  قبل Ticket 05:
+    [Route]
+      → db.insert(approvalsTable)
+      → void appEventBus.emit(APPROVAL_CREATED)    ← (من Ticket 04)
+      → await db.insert(notificationsTable, { type: "approval_request", ... })  ← inline
+      → res.status(201).json(full)
+
+  بعد Ticket 05:
+    [Route]
+      → db.insert(approvalsTable)
+      → void appEventBus.emit(APPROVAL_CREATED)    ← يُشغِّل كلا الـ listeners
+      → res.status(201).json(full)
+          ↕ (fire-and-forget — غير متزامن)
+    [listeners/activity.ts]
+      → db.insert(activityLogsTable, { action: "approval_requested" })
+    [listeners/notifications-bus.ts]
+      → db.insert(notificationsTable, { type: "approval_request", userId: assignedToUserId })
+      → emitToUser(assignedToUserId, "notification")   ← SSE push (جديد)
+
+  التغيير الوحيد في السلوك:
+    - قبل: notificationsTable insert كان await (قبل الـ response) — بدون SSE
+    - بعد:  notificationsTable insert غير متزامن (بعد الـ response بـ ms) + SSE push
+
+FLOW 2: PATCH /approvals/:id — اتخاذ قرار الموافقة
+─────────────────────────────────────────────────────
+
+  قبل Ticket 05:
+    [Route]
+      → db.update(approvalsTable)
+      → void appEventBus.emit(APPROVAL_COMPLETED)   ← (من Ticket 04)
+      → await db.insert(notificationsTable, { type: "approval_decision", ... })  ← inline
+      → res.json(full)
+
+  بعد Ticket 05:
+    [Route]
+      → db.update(approvalsTable)
+      → void appEventBus.emit(APPROVAL_COMPLETED)   ← يُشغِّل كلا الـ listeners
+      → res.json(full)
+          ↕ (fire-and-forget)
+    [listeners/activity.ts]
+      → db.insert(activityLogsTable, { action: "approval_completed", metadata: outcome })
+    [listeners/notifications-bus.ts]
+      → db.insert(notificationsTable, { type: "approval_decision", userId: requestedByUserId })
+      → emitToUser(requestedByUserId, "notification")   ← SSE push (جديد)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. DIRECT NOTIFICATION CALLS — ما زالت موجودة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+المسارات التالية تحتوي على inline db.insert(notificationsTable) وتعمل بشكل مستقل:
+
+4.1  tickets.ts — PATCH /tickets/:id (assignee change)
+──────────────────────────────────────────────────────
+  السطر ~216: await db.insert(notificationsTable).values({
+                userId: parsed.data.assigneeUserId,
+                type: "assigned",
+                title: "Ticket Assigned to You",
+                message: `You have been assigned to: ${ticket!.title}`,
+                ticketId: params.data.id,
+              });
+  يليه:       emitToUser(parsed.data.assigneeUserId, "notification");   ← SSE موجودة
+  سبب الإبقاء: ticket.updated لا يُطلَق من bus بعد
+  خطة الإزالة: Ticket 06 يُضيف appEventBus.emit(TICKET_UPDATED) + يحذف هذا الـ block
+
+4.2  comments.ts — POST /tickets/:ticketId/comments
+────────────────────────────────────────────────────
+  السطر ~70:  await db.insert(notificationsTable).values({
+                userId: ticket.createdByUserId,
+                type: "comment_added",
+                title: "New Comment on Your Ticket",
+                message: `A new comment was added to: ${ticket.title}`,
+                ticketId: params.data.ticketId,
+              });
+  حراسة:      ticket.createdByUserId !== req.userId (لا يُخطِّر المعلِّق بنفسه)
+  SSE:        غير موجودة (سيضيفها Ticket 06)
+  خطة الإزالة: يحتاج TICKET_COMMENTED event type جديد في core-events + Ticket 06
+
+4.3  calendar.ts — sendInvitations() + PATCH /calendar/events/:id
+──────────────────────────────────────────────────────────────────
+  السطر ~122: bulk insert للمدعوّين (type: "calendar")
+  السطر ~378: insert لتحديثات events (type: "calendar")
+  SSE:        غير موجودة
+  خطة الإزالة: خارج نطاق الـ bus migration الحالي (calendar module منفصل)
+  ملاحظة:     لا يوجد CALENDAR_EVENT_CREATED في EventTypeMap — يحتاج Ticket 06
+
+4.4  messages.ts — POST /messages + PATCH /messages/:id
+──────────────────────────────────────────────────────────
+  ثلاثة inserts مختلفة (أسطر ~230، ~295، ~420):
+    type: "message" — للمستقبلين الجدد عند إنشاء/تحديث الرسالة
+  SSE:        غير موجودة
+  خطة الإزالة: خارج نطاق الـ bus migration الحالي (messaging module منفصل)
+  ملاحظة:     يحتاج MESSAGE_SENT event type جديد في EventTypeMap — Ticket 06
+
+المجموع: 7 inserts inline لا تزال موجودة في 4 ملفات
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. LEGACY SYSTEMS — ما زالت مستخدمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1  notifications.ts — Legacy eventDispatcher Listener (نشط بالكامل)
+──────────────────────────────────────────────────────────────────────
+
+  الملف: artifacts/api-server/src/lib/events/listeners/notifications.ts
+  يُسجَّل على: eventDispatcher (النظام القديم)
+  يُعالِج ثلاثة أحداث:
+
+  TICKET_CREATED:
+    → يُخطِّر المُعيَّن (assigneeId) بـ "ticket_assigned"
+    → المُشغِّل: tickets.ts يستدعي eventDispatcher.dispatch({ event: "ticket.created" })
+    → يُكتب: db.insert(notificationsTable) بدون SSE
+    ملاحظة الهجرة: الـ listener الجديد (ticket.created في notifications-bus.ts) جاهز
+    لكنه خامل — انتظاراً لإضافة appEventBus.emit في tickets.ts
+
+  TICKET_CLOSED:
+    → يُخطِّر منشئ التذكرة (createdByUserId) بـ "ticket_closed"
+    → المُشغِّل: tickets.ts يستدعي eventDispatcher.dispatch({ event: "ticket.closed" })
+    → لا يوجد event type مقابل في EventTypeMap حالياً
+    ملاحظة الهجرة: يحتاج TICKET_CLOSED أو ticket.status_changed في Ticket 06
+    لا يوجد listener مقابل في notifications-bus.ts بعد
+
+  EMPLOYEE_CREATED:
+    → يُخطِّر المديرين (admins) بـ "employee_created"
+    → المُشغِّل: مكان الـ dispatch غير محدد بوضوح (admin.ts أو users.ts)
+    → يُكتب: db.insert(notificationsTable) للـ adminIds بدون SSE
+    ملاحظة الهجرة: الـ listener الجديد (employee.created في notifications-bus.ts)
+    جاهز ولكن خامل — ينتظر appEventBus.emit في المكان الصحيح
+
+  ملاحظة schema خطيرة:
+    notifications.ts القديم يحاول إدراج حقول: titleAr, messageAr, link
+    هذه الحقول غير موجودة في notificationsTable schema الحالي!
+    السبب: لم تنتج أخطاء TypeScript لأن الـ schema ربما كانت مختلفة في الماضي
+    النتيجة: Drizzle يتجاهل الحقول الزائدة صامتاً (لا DB error) — مشكلة latent
+    الحل المؤقت: الـ listener الجديد يستخدم فقط الحقول الـ 5 الصحيحة
+    TODO(Ticket 06): احذف titleAr/messageAr/link من notifications.ts القديم
+
+5.2  eventDispatcher — النظام القديم (نشط)
+────────────────────────────────────────────
+
+  الملف: artifacts/api-server/src/lib/events/dispatcher.ts
+  الوظيفة: يكتب لـ workspace_event_logs + يُشغِّل notifications.ts
+  يُستدعى من: tickets.ts (TICKET_CREATED, TICKET_CLOSED, TICKET_UPDATED)
+  لا يُستدعى من: approvals.ts، comments.ts، calendar.ts، messages.ts
+  الخطة: لا يُحذف — يبقى مع workspace_event_logs حتى تقرير معماري مستقل
+
+5.3  Workflow Engine Notifications (نشط — خارج النطاق)
+────────────────────────────────────────────────────────
+
+  artifacts/api-server/src/lib/workflows/steps/notification.ts
+  artifacts/api-server/src/lib/workflows/steps/approval.ts
+  تُنشئ notifications مباشرةً كخطوة workflow
+  خارج نطاق migration الـ bus الحالي — يبقى كما هو
+
+━━ مقارنة بين النظامين ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  │ المعيار              │ Legacy (dispatcher / inline)        │ New (appEventBus)              │
+  │──────────────────────│────────────────────────────────────│────────────────────────────────│
+  │ Type safety           │ ❌ Record<string,unknown>           │ ✅ TypedEvent<K, Payload>       │
+  │ SSE push              │ ⚠️ فقط في tickets.ts PATCH          │ ✅ جميع الـ listeners          │
+  │ Dedup protection      │ ❌ لا حماية                        │ ✅ IdempotencyGuard             │
+  │ Error isolation       │ ✅ allSettled في dispatcher         │ ✅ try/catch في listener        │
+  │ Async timing          │ ⚠️ await (blocks response)          │ ✅ fire-and-forget              │
+  │ AR field support      │ ❌ schema mismatch (silent bug)     │ ✅ English only (schema safe)   │
+  │ Self-notification     │ ❌ لا حراسة                        │ ✅ guard لكل event              │
+  │ Retry support         │ ❌ لا                              │ ❌ لا (TODO Ticket 06)          │
+  │ Dead-letter           │ ❌ لا                              │ ❌ لا (TODO Ticket 06)          │
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. MIGRATION PROGRESS — حالة الهجرة الإجمالية
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━ Activity Logs Migration (Tickets 01–05) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flow                   │ T01-03          │ T04             │ T05 (هذه) │ T06 (مخطط)
+  ──────────────────────────────────────────────────────────────────────────────────────
+  Event contracts        │ ✅ مكتمل       │ —               │ —         │ —
+  EventBus infra.        │ ✅ مكتمل       │ —               │ —         │ —
+  pino adapter           │ —               │ ✅ مكتمل        │ —         │ —
+  Activity listener file │ —               │ ✅ مكتمل        │ —         │ —
+  approval.created act.  │ —               │ ✅ مُهاجَر       │ —         │ —
+  approval.completed act.│ —               │ ✅ مُهاجَر       │ —         │ —
+  ticket.created act.    │ —               │ ⏳ listener      │ —         │ emit + migrate
+  ticket.updated act.    │ —               │ ⏳ listener      │ —         │ emit + migrate
+  cc_added / cc_removed  │ —               │ —               │ —         │ ممتد
+  comment_added act.     │ —               │ —               │ —         │ ممتد
+
+━━ Notification Migration (Tickets 04–06) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Flow                     │ T04 (سابق)     │ T05 (هذه)       │ T06 (مخطط)
+  ─────────────────────────│────────────────│────────────────│────────────────────────
+  notif-bus.ts listener    │ ❌ لم يوجد     │ ✅ أُنشئ        │ —
+  approval.created notif.  │ inline في route│ ✅ مُهاجَر + SSE│ —
+  approval.completed notif.│ inline في route│ ✅ مُهاجَر + SSE│ —
+  ticket.created notif.    │ dispatcher ←   │ ⏳ listener جاهز│ emit + remove legacy
+  ticket.updated notif.    │ inline في route│ ⏳ listener جاهز│ emit + remove inline
+  employee.created notif.  │ dispatcher ←   │ ⏳ listener جاهز│ emit + remove legacy
+  form.submitted notif.    │ N/A            │ ⏳ placeholder  │ define recipients
+  comment_added notif.     │ inline         │ ❌ خارج نطاق   │ قرار منتج مطلوب
+  calendar notif.          │ inline (2)     │ ❌ خارج نطاق   │ event type جديد مطلوب
+  messages notif.          │ inline (3)     │ ❌ خارج نطاق   │ event type جديد مطلوب
+
+  نسبة هجرة الـ notifications إلى bus: 2 من 9 active flows → 22%
+  لكن 4 listeners إضافية جاهزة لتُفعَّل عند إضافة emitters → 6 من 9 = 67% جاهز
+  المتبقي خارج النطاق: comment, calendar, messages (3 flows)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. VERIFICATION — التحقق
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  pnpm --filter @workspace/api-server typecheck → ✅ 0 أخطاء (بعد إضافة notifications-bus.ts)
+  pnpm run typecheck:libs                        → ✅ 0 أخطاء (من Ticket 03)
+  API Server workflow restart                    → ✅ يعمل
+  الـ UI الحالية                                 → ✅ لم تتغير
+  approval notifications (POST /approvals)       → ✅ listener ينشئ نفس البيانات السابقة
+  approval notifications (PATCH /approvals/:id)  → ✅ listener ينشئ نفس البيانات السابقة
+  SSE push للـ approvals                          → ✅ جديد — emitToUser يُطلَق بعد كل insert
+  ticket/comment/calendar/messages notifications  → ✅ لا تزال تعمل (لم تُلمَس)
+  legacy notifications.ts (dispatcher)           → ✅ لا يزال يعمل (لم يُلمَس)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. TECHNICAL DEBT — ديون تقنية جديدة من هذه التذكرة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEBT-T05-01: notifications.ts يُدرج حقولاً غير موجودة في schema
+──────────────────────────────────────────────────────────────────
+  الملف: listeners/notifications.ts (القديم)
+  يُدرج: titleAr, messageAr, link → غير موجودة في notificationsTable schema
+  النتيجة: Drizzle يتجاهل الحقول الزائدة (TypeScript لا ينبّه)
+  الخطر: إذا أُضيفت هذه الحقول مستقبلاً، قد تظهر قيم غير متوقعة
+  الحل: احذف titleAr/messageAr/link من notifyUsers() في notifications.ts
+  الأولوية: متوسطة — لا تأثير وظيفي حالي، لكن مضلل للمطورين الجدد
+
+DEBT-T05-02: IdempotencyGuard في الذاكرة فقط (مشترك مع Ticket 04)
+─────────────────────────────────────────────────────────────────────
+  مثيل إضافي جديد في notifications-bus.ts (منفصل عن الـ activity IdempotencyGuard)
+  إجمالياً: 2 guards في الذاكرة — أحدهما في activity.ts، الآخر في notifications-bus.ts
+  الخطر: race condition عند restart — notification قد تظهر مرتين إذا:
+    1. bus emit حدث
+    2. server restart قبل إتمام الـ listener
+    3. إعادة محاولة بنفس event.id
+  الحل: DEBT-T04-02 (عمود event_bus_id) يُغطي كلا الـ guards
+
+DEBT-T05-03: لا توجد خاصية SSE في legacy notification paths
+──────────────────────────────────────────────────────────────
+  notifications.ts القديم: لا SSE عند إدراج ticket_assigned / ticket_closed
+  comments.ts inline: لا SSE عند إدراج comment_added
+  calendar.ts inline: لا SSE عند إدراج calendar
+  messages.ts inline: لا SSE عند إدراج message
+  النتيجة: المستخدم يرى الإشعار فقط عند إعادة تحميل الصفحة
+  الحل: إضافة emitToUser في كل مسار (أو هجرة للـ bus listener الذي يُضيفها تلقائياً)
+
+DEBT-T05-04: form.submitted notification — recipients غير محددين
+──────────────────────────────────────────────────────────────────
+  listener مُسجَّل كـ no-op placeholder
+  لا قرار منتج واضح: من يستقبل إشعار submission النموذج؟
+    - خيار أ: مدير القسم owningModule
+    - خيار ب: جميع الـ admins
+    - خيار ج: مرسل النموذج فقط (audit trail)
+  الحل: يحتاج product decision قبل Ticket 06
+
+DEBT-T05-05: ticket.title غير متاح في TicketUpdatedPayload
+──────────────────────────────────────────────────────────────
+  في ticket.updated listener، رسالة الإشعار تستخدم رقم التذكرة فقط:
+    "You have been assigned to ticket #${ticketId}"
+  السلوك القديم (tickets.ts inline) كان يستخدم العنوان الكامل:
+    "You have been assigned to: ${ticket!.title}"
+  الفرق: المستخدم يرى رقم بدلاً من عنوان وصفي
+  الحل:
+    خيار أ: أضف entityLabel?: string لـ TicketUpdatedPayload
+    خيار ب: listener يُنفِّذ DB query لجلب title
+  الأولوية: منخفضة (يؤثر فقط على PENDING listener غير نشط بعد)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. SUGGESTIONS FOR TICKET 06 — اقتراحات التذكرة القادمة
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━ الأولوية الأولى: تفعيل الـ listeners الجاهزة (3 events) ━━━━━━━━━━━━━━━━━━━
+
+T06-A: تفعيل ticket.created notification
+─────────────────────────────────────────
+  الخطوات:
+  1. في tickets.ts POST /tickets — أضف بعد db.insert(ticketsTable):
+       void appEventBus.emit({
+         type: EVENT_TYPES.TICKET_CREATED,
+         data: { ticketId, title, assigneeId, createdByUserId, ... }
+       })
+  2. في listeners/notifications.ts — احذف كتلة eventDispatcher.on(EVENTS.TICKET_CREATED):
+       eventDispatcher.on(EVENTS.TICKET_CREATED, async (payload) => {
+         // ... ticket_assigned notification
+       });
+  3. اختبر: أنشئ تذكرة بـ assigneeId — يجب أن يظهر الإشعار للمُعيَّن
+  4. الـ listener (notifications-bus.ts → ticket.created) يُفعَّل تلقائياً
+
+T06-B: تفعيل ticket.updated notification (assignee change)
+───────────────────────────────────────────────────────────
+  الخطوات:
+  1. في tickets.ts PATCH /tickets/:id — احذف:
+       await db.insert(notificationsTable).values({ type: "assigned", ... });
+       emitToUser(parsed.data.assigneeUserId, "notification");
+  2. أضف بدلاً منه:
+       void appEventBus.emit({
+         type: EVENT_TYPES.TICKET_UPDATED,
+         data: {
+           ticketId: params.data.id,
+           changes: { assigneeId: parsed.data.assigneeUserId },
+           previousValues: { assigneeId: oldTicket.assigneeUserId },
+           updatedByUserId: req.userId,
+         }
+       })
+  3. الـ listener (notifications-bus.ts → ticket.updated) يتعامل مع SSE أيضاً
+  ملاحظة: أضف entityLabel للـ TicketUpdatedPayload لتمرير ticket.title للـ message
+
+T06-C: تفعيل employee.created notification
+──────────────────────────────────────────
+  الخطوات:
+  1. ابحث عن eventDispatcher.dispatch({ event: EVENTS.EMPLOYEE_CREATED, ... })
+  2. أضف بجانبه:
+       void appEventBus.emit({ type: EVENT_TYPES.EMPLOYEE_CREATED, ... })
+  3. احذف كتلة EMPLOYEE_CREATED من listeners/notifications.ts
+  4. تحقق: لا يوجد إشعار مزدوج لـ admins
+
+━━ الأولوية الثانية: هجرة activity logs (من Ticket 04) ━━━━━━━━━━━━━━━━━━━━━━━
+
+T06-D: هجرة tickets.ts activity (ticket_created, status_changed, assigned)
+  - أضف emits لـ TICKET_CREATED و TICKET_UPDATED في tickets.ts
+  - احذف inline activityLogsTable inserts (5 أنواع)
+  - الـ listeners في activity.ts جاهزة (من Ticket 04)
+
+T06-E: هجرة comments.ts activity (comment_added)
+  - أضف event type TICKET_COMMENTED في core-events
+  - أضف emit في comments.ts POST
+  - أضف listener في activity.ts
+
+━━ الأولوية الثالثة: تحسين البنية ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+T06-F: إصلاح notifications.ts القديم (schema mismatch)
+  - احذف titleAr، messageAr، link من notifyUsers()
+  - أضف TODO comment لتوثيق الحذف
+
+T06-G: إضافة SSE للـ legacy notification paths
+  - comments.ts POST: أضف emitToUser(ticket.createdByUserId, "notification")
+  - calendar.ts: أضف emitToUsers(toNotify, "notification") بعد insert
+  - messages.ts: أضف emitToUsers(recipientIds, "notification")
+
+T06-H: قرار منتج لـ form.submitted notification recipients
+  - حدد: من يستقبل إشعار submission النموذج
+  - بعد القرار: فعّل الـ listener + أضف DB query للـ recipients
+
+T06-I: إضافة entityLabel لـ TicketUpdatedPayload
+  - في lib/core-events/src/events.ts أضف: entityLabel?: string
+  - في listeners/notifications-bus.ts استخدم entityLabel لتحسين message
+  - في listeners/activity.ts استخدمه للـ metadata
+
+━━ الأولوية الرابعة: بنية تحتية للإشعارات ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+T06-J: إضافة event_bus_id column لـ notificationsTable
+  - يُمكِّن dedup عبر restarts لكلا الـ listeners (activity + notifications)
+  - schema migration: ALTER TABLE notifications ADD COLUMN event_bus_id TEXT UNIQUE
+
+T06-K: NOTIFICATION_CREATED event — ربط SSE بالـ bus
+  - بعد كل insertNotification(), أطلق:
+      void appEventBus.emit({ type: EVENT_TYPES.NOTIFICATION_CREATED, ... })
+  - SSE listener يستقبل الحدث ويُرسل payload كامل للعميل
+  - يُلغي الحاجة للـ polling عند كل refresh
+
+T06-L: TICKET_CLOSED notification path
+  - أضف event type مقابل في EventTypeMap (ticket.status_changed أو TICKET_CLOSED)
+  - أضف listener في notifications-bus.ts للـ ticket.closed → creator notification
+  - احذف كتلة TICKET_CLOSED من notifications.ts القديم
+
+T06-M: Retry mechanism للـ listener failures
+  - حالياً: فشل الـ listener يُسجَّل ويُفقَد
+  - اقتراح: setTimeout-based retry (3 محاولات، exponential backoff)
+  - متقدم: BullMQ queue للـ critical notifications
+
+================================================================================
+  نهاية التقرير — Architecture Ticket 05
+================================================================================

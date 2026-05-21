@@ -1,0 +1,221 @@
+================================================================================
+PHASE P15-A — Commercial Accounts & Billing Contacts
+Implementation Report
+Date: 2026-05-16
+================================================================================
+
+OBJECTIVE
+─────────
+Add Commercial Account and Billing Contact management to the Platform
+Administration Tenant Console. No payment, no Stripe, no invoice, no tax logic.
+All data is platform-side only — tenant workspaces have zero visibility.
+
+SCOPE BOUNDARIES (enforced throughout)
+───────────────────────────────────────
+  ✓ No payment processing, no Stripe, no invoices
+  ✓ No tax IDs or financial calculations
+  ✓ No delete on billing contacts (update only)
+  ✓ No tenant-side exposure — exclusively in the super-admin console
+  ✓ No new user-facing routes — piggybacks the existing /platform/tenants/:id
+    URL namespace
+
+────────────────────────────────────────────────────────────────────────────────
+DATABASE SCHEMA
+────────────────────────────────────────────────────────────────────────────────
+
+File: lib/db/src/schema/commercial-accounts.ts
+
+Table: commercial_accounts
+  id                            serial PK
+  workspace_id                  integer FK → workspaces (unique, 1:1)
+  commercial_account_name       text
+  legal_entity_name             text
+  account_manager_user_id       integer FK → users (nullable)
+  finance_owner_user_id         integer FK → users (nullable)
+  contract_owner_name           text
+  contract_owner_email          text
+  billing_email                 text
+  billing_phone                 text
+  company_tax_number_placeholder text   ← display-only, no validation/calculation
+  commercial_notes              text
+  status                        text    default 'active'
+  created_by / updated_by       integer FK → users (nullable)
+  created_at / updated_at       timestamp (auto-managed)
+
+Table: commercial_billing_contacts
+  id                    serial PK
+  commercial_account_id integer FK → commercial_accounts (cascade delete)
+  contact_name          text NOT NULL
+  contact_email         text NOT NULL
+  contact_phone         text
+  contact_role          text  default 'billing'
+  is_primary            boolean default false
+  notes                 text
+  created_by / updated_by integer FK → users (nullable)
+  created_at / updated_at timestamp (auto-managed)
+
+Migration applied: pnpm --filter @workspace/db run push ✓
+
+────────────────────────────────────────────────────────────────────────────────
+PERMISSIONS (4 new codes, now 22 total)
+────────────────────────────────────────────────────────────────────────────────
+
+Backend:  artifacts/api-server/src/lib/platform-permissions.ts
+Frontend: artifacts/ops-platform/src/lib/platform-permissions-config.ts
+
+New codes:
+  commercial.accounts.read    — read commercial account data
+  commercial.accounts.update  — create/update commercial accounts
+  commercial.contacts.read    — read billing contacts
+  commercial.contacts.update  — create/update billing contacts
+
+Role assignments:
+  root_platform_owner  →  all 4 (read + update for both)
+  platform_admin       →  all 4
+  support_admin        →  read only (commercial.accounts.read, commercial.contacts.read)
+  sales_admin          →  all 4 (read + update for both)
+  finance_admin        →  all 4 (read + update for both)
+  auditor              →  read only (commercial.accounts.read, commercial.contacts.read)
+  workspace_support    →  none
+  read_only_operator   →  read only (commercial.accounts.read, commercial.contacts.read)
+
+Permission group: "commercial" added to PLATFORM_PERMISSION_GROUPS
+
+────────────────────────────────────────────────────────────────────────────────
+AUDIT EVENTS (6 new events, now 18 total)
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/lib/platform-audit-events.ts
+
+New group: "commercial"
+
+New events:
+  commercial_account_created         — commercial account first created
+  commercial_account_updated         — commercial account fields updated
+  commercial_contact_created         — billing contact added
+  commercial_contact_updated         — billing contact fields updated
+  commercial_contact_set_primary     — a contact marked as primary
+  commercial_account_status_changed  — status field changed (active/inactive/suspended)
+
+────────────────────────────────────────────────────────────────────────────────
+BACKEND API (6 endpoints)
+────────────────────────────────────────────────────────────────────────────────
+
+File: artifacts/api-server/src/routes/commercial.ts
+Registered in: artifacts/api-server/src/routes/index.ts
+
+Endpoints:
+
+  GET    /platform/tenants/:tenantId/commercial-account
+    → Returns the commercial account for a workspace (null if not yet created)
+    → Requires: commercial.accounts.read
+
+  PUT    /platform/tenants/:tenantId/commercial-account
+    → Upsert (create or update) the commercial account
+    → Requires: commercial.accounts.update
+    → Logs: commercial_account_created or commercial_account_updated
+
+  GET    /platform/tenants/:tenantId/commercial-contacts
+    → Returns all billing contacts for a workspace's commercial account
+    → Requires: commercial.contacts.read
+
+  POST   /platform/tenants/:tenantId/commercial-contacts
+    → Create a new billing contact
+    → Requires: commercial.contacts.update
+    → Logs: commercial_contact_created
+
+  PATCH  /platform/tenants/:tenantId/commercial-contacts/:contactId
+    → Update a billing contact's fields
+    → Requires: commercial.contacts.update
+    → Logs: commercial_contact_updated
+
+  PATCH  /platform/tenants/:tenantId/commercial-contacts/:contactId/primary
+    → Mark a contact as primary (clears isPrimary on all others)
+    → Requires: commercial.contacts.update
+    → Logs: commercial_contact_set_primary
+
+────────────────────────────────────────────────────────────────────────────────
+FRONTEND
+────────────────────────────────────────────────────────────────────────────────
+
+New ConsoleTab: "commercial"
+  File: artifacts/ops-platform/src/lib/tenant-admin-console-config.ts
+  CONSOLE_TABS now has 9 entries (was 8)
+  Tab config: label "Commercial", labelAr "التجاري", icon Briefcase
+
+Permission map:
+  File: artifacts/ops-platform/src/lib/platform-access.ts
+  CONSOLE_TAB_PERMISSION_MAP["commercial"] = "commercial.accounts.read"
+  New PlatformActionKeys:
+    "write:commercial-account"   → "commercial.accounts.update"
+    "write:commercial-contacts"  → "commercial.contacts.update"
+
+Safety contract:
+  File: artifacts/ops-platform/src/lib/commercial-config.ts
+  COMMERCIAL_SAFETY_CONTRACT: {
+    noPaymentLogic: true,
+    noStripeIntegration: true,
+    noInvoiceGeneration: true,
+    noTaxCalculation: true,
+    noDeleteOnContacts: true,
+    noTenantSideVisibility: true,
+  }
+  COMMERCIAL_ACCOUNT_STATUS_OPTIONS: active | inactive | suspended
+  BILLING_CONTACT_ROLE_OPTIONS: billing | finance | legal | operations | primary | other
+
+React Query hooks:
+  File: artifacts/ops-platform/src/hooks/use-commercial.ts
+  useCommercialAccount(tenantId)         → GET commercial account
+  useUpsertCommercialAccount(tenantId)   → PUT (create/update)
+  useBillingContacts(tenantId)           → GET contacts list
+  useCreateBillingContact(tenantId)      → POST new contact
+  useUpdateBillingContact(tenantId)      → PATCH contact fields
+  useSetPrimaryBillingContact(tenantId)  → PATCH set primary
+
+CommercialPanel component:
+  File: artifacts/ops-platform/src/pages/super-admin-tenants.tsx
+  — Renders inside the "commercial" console tab
+  — Shows commercial account form (editable if canWriteCommercialAccount)
+  — Shows billing contacts list (add/edit if canWriteCommercialContacts)
+  — All write controls hidden when user lacks the required permission
+
+────────────────────────────────────────────────────────────────────────────────
+TEST COVERAGE
+────────────────────────────────────────────────────────────────────────────────
+
+New test files:
+  artifacts/api-server/src/lib/__tests__/commercial-permissions.test.ts
+    — verifies the 4 new permission codes exist in both backend config and matrix
+    — verifies role assignments (who gets read-only vs full access)
+
+  artifacts/api-server/src/lib/__tests__/commercial-audit-events.test.ts
+    — verifies all 6 new audit events are registered
+    — verifies "commercial" group exists in PLATFORM_AUDIT_EVENT_GROUPS
+
+  artifacts/ops-platform/src/lib/__tests__/commercial-config.test.ts
+    — verifies safety contract constants are all true
+    — verifies status and role option arrays
+    — verifies the "commercial" tab is registered in CONSOLE_TABS
+    — verifies CONSOLE_TAB_PERMISSION_MAP["commercial"] is correct
+
+Updated existing tests (count assertions updated to reflect new totals):
+  platform-permissions.test.ts            18 → 22 permission codes
+  platform-me.test.ts                     18 → 22 permissions
+  platform-audit-events.test.ts           12 → 18 events, 8 → 9 groups
+  platform-permissions-config.test.ts     18 → 22 codes, 10 → 11 groups
+  platform-access.test.ts                 18 → 22 permissions
+  platform-phase14-final-contract.test.ts 18 → 22 permissions
+  tenant-admin-console-config.test.ts     8 → 9 tabs
+
+Final test results:
+  Backend  (api-server):   58 test files  /  3293 tests  — ALL PASSED ✓
+  Frontend (ops-platform): 24 test files  /  1209 tests  — ALL PASSED ✓
+
+TypeScript:
+  Backend typecheck:  PASSED (0 new errors) ✓
+  Frontend typecheck: PASSED (0 new errors; 4 pre-existing governance/workflow
+                       errors unchanged and intentionally ignored) ✓
+
+================================================================================
+STATUS: P15-A COMPLETE
+================================================================================
