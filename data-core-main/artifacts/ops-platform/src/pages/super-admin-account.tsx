@@ -22,6 +22,12 @@ interface PlatformMe {
   mustResetPassword: boolean;
 }
 
+function apiErrorMessage(body: unknown, status: number): string {
+  const o = body as { error?: string; message?: string; code?: string };
+  const parts = [o.error, o.message, o.code ? `(${o.code})` : null].filter(Boolean);
+  return parts.length > 0 ? parts.join(" — ") : `Request failed (${status})`;
+}
+
 export default function SuperAdminAccountPage() {
   const { user: authUser, refreshUser } = useAppAuth();
   const apiFetch = useApiFetch();
@@ -51,7 +57,7 @@ export default function SuperAdminAccountPage() {
       const res = await apiFetch("/api/platform/me");
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error((err as { error?: string }).error ?? "Failed to load account");
+        throw new Error(apiErrorMessage(err, res.status));
       }
       const data = (await res.json()) as PlatformMe;
       setMe(data);
@@ -90,7 +96,7 @@ export default function SuperAdminAccountPage() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error((body as { error?: string }).error ?? "Profile update failed");
+        throw new Error(apiErrorMessage(body, res.status));
       }
       toast({ title: "Profile updated", description: "Your profile information was saved." });
       await loadMe();
@@ -119,7 +125,7 @@ export default function SuperAdminAccountPage() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error((body as { error?: string }).error ?? "Email update failed");
+        throw new Error(apiErrorMessage(body, res.status));
       }
       setEmailCurrentPassword("");
       toast({ title: "Email updated", description: "Sign in with your new email on next session." });
@@ -154,7 +160,7 @@ export default function SuperAdminAccountPage() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error((body as { error?: string }).error ?? "Password change failed");
+        throw new Error(apiErrorMessage(body, res.status));
       }
       setCurrentPassword("");
       setNewPassword("");

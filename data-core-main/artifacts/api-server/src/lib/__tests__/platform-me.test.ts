@@ -17,7 +17,7 @@ import {
   hasPlatformPermission,
   PLATFORM_PERMISSION_CODES,
 } from "../platform-permissions";
-import { isPlatformScopeUser } from "../platform-scope";
+import { isPlatformScopeUser, canAccessPlatformSelfManagement } from "../platform-scope";
 
 // ── T1: Legacy root (platformRoleCode IS NULL) ────────────────────────────────
 
@@ -101,6 +101,20 @@ describe("T2 - platform scope guard (GET /platform/me)", () => {
 
   it("legacy root after requireAuth (workspaceId undefined) is allowed", () => {
     expect(isPlatformScopeUser({ role: "super_admin", workspaceId: undefined })).toBe(true);
+  });
+});
+
+describe("T2b - canAccessPlatformSelfManagement (/platform/me/*)", () => {
+  it("allows any super_admin including tenant-scoped workspaceId", () => {
+    expect(canAccessPlatformSelfManagement({ role: "super_admin", workspaceId: 5 })).toBe(true);
+  });
+
+  it("allows legacy root with undefined workspaceId", () => {
+    expect(canAccessPlatformSelfManagement({ role: "super_admin", workspaceId: undefined })).toBe(true);
+  });
+
+  it("blocks workspace admin", () => {
+    expect(canAccessPlatformSelfManagement({ role: "admin", workspaceId: 1 })).toBe(false);
   });
 });
 

@@ -29,20 +29,26 @@ import {
   validatePasswordAgainstPolicy,
   passwordPolicyErrorMessage,
 } from "../lib/platform-password-policy";
-import { isPlatformScopeUser } from "../lib/platform-scope";
+import { canAccessPlatformSelfManagement } from "../lib/platform-scope";
 
 const router = Router();
 
-function platformUserGuard(req: AuthRequest, res: Response): boolean {
+function platformSelfServiceGuard(req: AuthRequest, res: Response): boolean {
   if (!req.userId) {
-    res.status(401).json({ error: "Unauthorized" });
+    res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });
     return false;
   }
-  if (!isPlatformScopeUser({ role: req.userRole, workspaceId: req.workspaceId })) {
+  if (
+    !canAccessPlatformSelfManagement({
+      role: req.userRole,
+      workspaceId: req.workspaceId,
+      isRootOwner: req.isRootOwner,
+    })
+  ) {
     res.status(403).json({
       error: "Forbidden",
-      code: "NOT_PLATFORM_USER",
-      message: "This endpoint is only accessible to platform administration users.",
+      code: "NOT_PLATFORM_SELF_SERVICE",
+      message: "My Account is only available to platform super administrators.",
     });
     return false;
   }
@@ -64,7 +70,7 @@ router.get(
   "/platform/me",
   requireAuth,
   async (req: AuthRequest, res: Response): Promise<void> => {
-    if (!platformUserGuard(req, res)) return;
+    if (!platformSelfServiceGuard(req, res)) return;
 
     const [user] = await db
       .select({
@@ -133,7 +139,7 @@ router.patch(
   "/platform/me/profile",
   requireAuth,
   async (req: AuthRequest, res: Response): Promise<void> => {
-    if (!platformUserGuard(req, res)) return;
+    if (!platformSelfServiceGuard(req, res)) return;
 
     const actor = selfIdentity(req);
     const target = { ...actor };
@@ -188,7 +194,7 @@ router.patch(
   "/platform/me/email",
   requireAuth,
   async (req: AuthRequest, res: Response): Promise<void> => {
-    if (!platformUserGuard(req, res)) return;
+    if (!platformSelfServiceGuard(req, res)) return;
 
     const actor = selfIdentity(req);
     const target = { ...actor };
@@ -253,7 +259,7 @@ router.post(
   "/platform/me/change-password",
   requireAuth,
   async (req: AuthRequest, res: Response): Promise<void> => {
-    if (!platformUserGuard(req, res)) return;
+    if (!platformSelfServiceGuard(req, res)) return;
 
     const actor = selfIdentity(req);
     const target = { ...actor };

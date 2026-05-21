@@ -136,11 +136,20 @@ describe("GET /api/platform/me", () => {
     expect(res.body.canSelfManageAccount).toBe(true);
   });
 
-  it("blocks tenant-scoped super_admin", async () => {
+  it("allows super_admin even when workspaceId is set on account", async () => {
     authWorkspaceId = 5;
+    selectResult.mockResolvedValueOnce([{ ...rootRow, workspaceId: 5 }]);
+    const res = await request(app).get("/api/platform/me");
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBe("root@platform.local");
+  });
+
+  it("blocks non-super_admin roles", async () => {
+    authRole = "admin";
+    authWorkspaceId = 1;
     const res = await request(app).get("/api/platform/me");
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe("NOT_PLATFORM_USER");
+    expect(res.body.code).toBe("NOT_PLATFORM_SELF_SERVICE");
   });
 });
 
