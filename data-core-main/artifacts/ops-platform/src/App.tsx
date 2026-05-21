@@ -18,6 +18,7 @@ import { WorkspaceAccessProvider } from "@/lib/workspace-access-context";
 import { WorkspaceReadOnlyBanner } from "@/components/workspace/WorkspaceReadOnlyBanner";
 import SuperAdminLayout from "@/components/layout/super-admin-layout";
 import DccHomePage from "@/pages/dcc-home";
+import AboutPlatformPage from "@/pages/about-platform";
 import { PublicAuthNav } from "@/components/layout/public-auth-nav";
 import { usePublicEnglish } from "@/hooks/use-public-english";
 import DashboardPage from "@/pages/dashboard";
@@ -584,6 +585,7 @@ function AppRoutes() {
         <Route path="/setup">{() => <Redirect to="/sign-in" />}</Route>
         <Route path="/">{() => <HomeRedirect />}</Route>
         <Route path="/dcc-home">{() => <DccHomePage />}</Route>
+        <Route path="/about-platform">{() => <AboutPlatformPage />}</Route>
         <Route path="/landing">{() => <Redirect to="/dcc-home" />}</Route>
         <Route path="/sign-in/*?">{() => <SignInPage />}</Route>
         <Route path="/platform/activate">{() => <PlatformActivatePage />}</Route>

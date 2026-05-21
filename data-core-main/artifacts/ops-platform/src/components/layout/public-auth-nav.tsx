@@ -3,7 +3,9 @@ import { ArrowLeft, Home } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type Variant = "home" | "sign-in" | "minimal";
+type Variant = "home" | "sign-in" | "about" | "minimal";
+
+const LOGO_URL = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/official-logo.png`;
 
 interface PublicAuthNavProps {
   variant: Variant;
@@ -24,15 +26,25 @@ export function PublicAuthNav({ variant, className }: PublicAuthNavProps) {
           className="flex items-center gap-2 font-bold text-base sm:text-lg text-foreground hover:opacity-90 transition-opacity min-w-0"
         >
           <img
-            src={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/logo.png`}
+            src={LOGO_URL}
             alt="Data Core Center"
-            className="w-8 h-8 rounded shrink-0"
+            className="h-8 w-auto max-w-[120px] object-contain shrink-0"
           />
           <span className="truncate">Data Core Center</span>
         </Link>
       </div>
 
       <nav className="flex items-center gap-2 shrink-0" aria-label="Public navigation">
+        {(variant === "home" || variant === "about") && (
+          <Button
+            variant={variant === "about" ? "secondary" : "ghost"}
+            size="sm"
+            className="inline-flex"
+            asChild
+          >
+            <Link href="/about-platform">About Platform</Link>
+          </Button>
+        )}
         {variant === "sign-in" && (
           <Button variant="ghost" size="sm" className="gap-1.5" asChild>
             <Link href="/dcc-home">
@@ -42,6 +54,10 @@ export function PublicAuthNav({ variant, className }: PublicAuthNavProps) {
           </Button>
         )}
         {variant === "home" ? (
+          <Button size="sm" asChild>
+            <Link href="/sign-in">Sign In</Link>
+          </Button>
+        ) : variant === "about" ? (
           <Button size="sm" asChild>
             <Link href="/sign-in">Sign In</Link>
           </Button>
