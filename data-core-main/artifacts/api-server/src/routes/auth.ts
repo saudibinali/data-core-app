@@ -6,6 +6,12 @@ import { usersTable, departmentsTable, workspaceCustomRolesTable } from "@worksp
 import { eq, and } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type AuthRequest, requireAuth } from "../middlewares/requireAuth";
+import { isProtectedPlatformAccount } from "../lib/root-platform-owner-policy";
+import {
+  loadPlatformPasswordPolicy,
+  validatePasswordAgainstPolicy,
+  passwordPolicyErrorMessage,
+} from "../lib/platform-password-policy";
 
 const router: IRouter = Router();
 
@@ -125,8 +131,19 @@ router.post("/auth/change-password", requireAuth, async (req: AuthRequest, res: 
     res.status(400).json({ error: "currentPassword and newPassword are required" });
     return;
   }
-  if (String(newPassword).length < 8) {
-    res.status(400).json({ error: "New password must be at least 8 characters" });
+  const isPlatformAccount =
+    req.userRole === "super_admin" && (req.workspaceId === null || req.workspaceId === undefined);
+
+  const policy = isPlatformAccount
+    ? await loadPlatformPasswordPolicy()
+    : { minLength: 8, requireUppercase: false, requireSpecial: false, requireNumber: false };
+
+  const strength = validatePasswordAgainstPolicy(String(newPassword), policy);
+  if (!strength.valid) {
+    res.status(400).json({
+      error: passwordPolicyErrorMessage(strength.errors, policy),
+      codes: strength.errors,
+    });
     return;
   }
 
@@ -157,8 +174,36 @@ router.post("/auth/reset-password", requireAuth, async (req: AuthRequest, res: R
     conditions.push(eq(usersTable.workspaceId, req.workspaceId));
   }
 
-  const [target] = await db.select({ id: usersTable.id }).from(usersTable).where(and(...conditions));
+  const [target] = await db
+    .select({
+      id: usersTable.id,
+      role: usersTable.role,
+      workspaceId: usersTable.workspaceId,
+      platformRoleCode: usersTable.platformRoleCode,
+      isRootOwner: usersTable.isRootOwner,
+      isProtected: usersTable.isProtected,
+    })
+    .from(usersTable)
+    .where(and(...conditions));
   if (!target) { res.status(404).json({ error: "User not found" }); return; }
+
+  if (
+    req.userId !== Number(userId) &&
+    isProtectedPlatformAccount({
+      id: target.id,
+      role: target.role,
+      workspaceId: target.workspaceId,
+      platformRoleCode: target.platformRoleCode,
+      isRootOwner: target.isRootOwner,
+      isProtected: target.isProtected,
+    })
+  ) {
+    res.status(403).json({
+      error: "Cannot reset password for a protected platform owner account",
+      code: "ROOT_PASSWORD_RESET_BLOCKED",
+    });
+    return;
+  }
 
   const hash = await bcrypt.hash(password, 12);
   await db.update(usersTable).set({ passwordHash: hash, mustResetPassword: true }).where(eq(usersTable.id, Number(userId)));

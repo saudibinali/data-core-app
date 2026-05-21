@@ -50,6 +50,7 @@ import SuperAdminTenants from "@/pages/super-admin-tenants";
 import SuperAdminCommercialRisk from "@/pages/super-admin-commercial-risk";
 import SuperAdminPlatformUsers from "@/pages/super-admin-platform-users";
 import SuperAdminPlatformOps from "@/pages/super-admin-platform-ops";
+import SuperAdminAccount from "@/pages/super-admin-account";
 import SuperAdminAccessReview from "@/pages/super-admin-access-review";
 import PlatformActivatePage from "@/pages/platform-activate";
 import CalendarPage from "@/pages/calendar";
@@ -344,18 +345,19 @@ function PermissionGate({ permission, children }: { permission?: string; childre
 
 // ── Must-reset-password banner ────────────────────────────────────────────────
 
-function MustResetPasswordBanner() {
+function MustResetPasswordBanner({ accountPath = "/settings" }: { accountPath?: string }) {
   const [dismissed, setDismissed] = useState(false);
   const [, setLocation] = useLocation();
   if (dismissed) return null;
+  const label = accountPath === "/super-admin/account" ? "My Account" : "Settings";
   return (
     <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-sm">
       <div className="flex items-center gap-2">
         <KeyRound className="w-4 h-4 shrink-0" />
         <span>
           You are required to change your password before continuing. Go to{" "}
-          <button onClick={() => setLocation("/settings")} className="underline font-medium hover:text-amber-900 dark:hover:text-amber-200">
-            Settings
+          <button onClick={() => setLocation(accountPath)} className="underline font-medium hover:text-amber-900 dark:hover:text-amber-200">
+            {label}
           </button>{" "}
           to update it.
         </span>
@@ -443,7 +445,9 @@ function SuperAdminRoute({ component: Component }: { component: React.ComponentT
   if (auth.user?.role !== "super_admin") return <Redirect to="/sign-in" />;
 
   return (
-    <SuperAdminLayout>
+    <SuperAdminLayout
+      banner={auth.user.mustResetPassword ? <MustResetPasswordBanner accountPath="/super-admin/account" /> : null}
+    >
       <Component />
     </SuperAdminLayout>
   );
@@ -597,6 +601,7 @@ function AppRoutes() {
         <Route path="/super-admin/activity">{() => <SuperAdminRoute component={SuperAdminActivity} />}</Route>
         <Route path="/super-admin/events">{() => <SuperAdminRoute component={SuperAdminEvents} />}</Route>
         <Route path="/super-admin/settings">{() => <SuperAdminRoute component={SuperAdminSettings} />}</Route>
+        <Route path="/super-admin/account">{() => <SuperAdminRoute component={SuperAdminAccount} />}</Route>
 
         {/* Governance Console - super_admin only, read-only review area */}
         <Route path="/super-admin/governance/audit-integrity">{() => <SuperAdminRoute component={SuperAdminGovernanceAudit} />}</Route>

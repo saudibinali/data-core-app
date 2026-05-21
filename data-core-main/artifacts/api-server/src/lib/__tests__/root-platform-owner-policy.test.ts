@@ -13,6 +13,10 @@ import {
   canChangePlatformUserStatus,
   canResetPlatformUserPasswordFromAdmin,
   canChangePlatformUserEmail,
+  canSelfChangePlatformUserPassword,
+  canSelfChangePlatformUserEmail,
+  canSelfUpdatePlatformUserProfile,
+  canSelfManagePlatformAccount,
   validatePlatformUserCreate,
   validatePlatformUserStatusChange,
   buildBlockedPlatformUserActionAuditEvent,
@@ -95,7 +99,8 @@ describe("T1 - ROOT_PLATFORM_OWNER_PROTECTION_POLICY", () => {
       "non_disableable",
       "non_lockable",
       "password_reset_blocked_from_admin_ui",
-      "email_change_blocked",
+      "email_change_blocked_from_admin_ui",
+      "self_credential_management_allowed",
       "self_promotion_blocked",
       "root_role_assignment_blocked",
       "cannot_manage_equal_or_higher_privilege",
@@ -248,6 +253,35 @@ describe("T6 - canChangePlatformUserStatus", () => {
   it("platform_admin can change support_admin status", () => {
     const result = canChangePlatformUserStatus(platformAdmin, supportAdmin, "disabled");
     expect(result.allowed).toBe(true);
+  });
+});
+
+// ── T6b: Self credential management (root owner only, self-only) ───────────────
+
+describe("T6b - self credential management", () => {
+  it("root owner can change own password", () => {
+    const result = canSelfChangePlatformUserPassword(explicitRootUser, explicitRootUser);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("root owner can change own email", () => {
+    const result = canSelfChangePlatformUserEmail(explicitRootUser, explicitRootUser);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("root owner can update own profile", () => {
+    const result = canSelfUpdatePlatformUserProfile(explicitRootUser, explicitRootUser);
+    expect(result.allowed).toBe(true);
+  });
+
+  it("blocks managing another user's credentials", () => {
+    const result = canSelfManagePlatformAccount(explicitRootUser, platformAdmin);
+    expect(result.allowed).toBe(false);
+    expect(result.blockedReason).toBe("CREDENTIALS_SELF_ONLY");
+  });
+
+  it("policy documents self_credential_management_allowed", () => {
+    expect(ROOT_PLATFORM_OWNER_PROTECTION_POLICY.self_credential_management_allowed).toBe(true);
   });
 });
 

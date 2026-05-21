@@ -30,6 +30,7 @@ import {
   ClipboardCheck,
   Radar,
   MoreHorizontal,
+  UserCircle,
 } from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -218,7 +219,12 @@ function SuperAdminSidebarPanel({ onNavigate }: { onNavigate?: () => void }) {
           </button>
         </div>
 
-        <div className="flex items-center gap-3 mt-2 px-2 py-2 rounded-md border border-border bg-card">
+        <Link
+          href="/super-admin/account"
+          onClick={handleNav}
+          data-testid="nav-my-account"
+          className="flex items-center gap-3 mt-2 px-2 py-2 rounded-md border border-border bg-card hover:bg-accent/50 transition-colors"
+        >
           <img
             src={authUser?.avatarUrl || `https://api.dicebear.com/7.x/initials/svg?seed=${authUser?.fullName || "Admin"}`}
             alt={authUser?.fullName || "Admin"}
@@ -228,21 +234,29 @@ function SuperAdminSidebarPanel({ onNavigate }: { onNavigate?: () => void }) {
             <p className="text-sm font-medium truncate">{authUser?.fullName || "Platform Owner"}</p>
             <p className="text-xs text-muted-foreground truncate">{authUser?.email ?? ""}</p>
           </div>
-          <button
-            onClick={() => signOut()}
-            className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors shrink-0"
-            title="Sign out"
-            type="button"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
+          <UserCircle className="w-4 h-4 text-muted-foreground shrink-0" />
+        </Link>
+        <button
+          onClick={() => signOut()}
+          className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground rounded-md hover:bg-accent transition-colors"
+          title="Sign out"
+          type="button"
+        >
+          <LogOut className="w-4 h-4" />
+          Sign out
+        </button>
       </div>
     </div>
   );
 }
 
-export default function SuperAdminLayout({ children }: { children: React.ReactNode }) {
+export default function SuperAdminLayout({
+  children,
+  banner,
+}: {
+  children: React.ReactNode;
+  banner?: React.ReactNode;
+}) {
   const { i18n } = useTranslation();
   const { open, setOpen, openNav, closeNav } = useMobileNav();
 
@@ -281,6 +295,7 @@ export default function SuperAdminLayout({ children }: { children: React.ReactNo
             <span className="font-medium text-foreground truncate">Platform Administration</span>
           </div>
         </header>
+        {banner ? <div className="shrink-0">{banner}</div> : null}
         <main className="app-shell-main">
           <div className="app-shell-container">{children}</div>
         </main>

@@ -12,6 +12,7 @@ import {
 } from "@workspace/db";
 import { sql, count, eq, and, or, desc, inArray } from "drizzle-orm";
 import { type AuthRequest, requireAuth, requireSuperAdmin } from "../middlewares/requireAuth";
+import { canResetPlatformUserPasswordFromAdmin } from "../lib/root-platform-owner-policy";
 import { evaluateWorkloadContainment } from "../lib/workflows/workload-partition";
 import {
   buildPlatformGovernanceOverview,
@@ -356,8 +357,43 @@ router.post("/admin/reset-password", requireAuth, requireSuperAdmin, async (req:
     res.status(400).json({ error: "Password must be at least 8 characters" }); return;
   }
 
-  const [user] = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.id, Number(userId)));
+  const [user] = await db
+    .select({
+      id: usersTable.id,
+      role: usersTable.role,
+      workspaceId: usersTable.workspaceId,
+      platformRoleCode: usersTable.platformRoleCode,
+      isRootOwner: usersTable.isRootOwner,
+      isProtected: usersTable.isProtected,
+    })
+    .from(usersTable)
+    .where(eq(usersTable.id, Number(userId)));
   if (!user) { res.status(404).json({ error: "User not found" }); return; }
+
+  const resetCheck = canResetPlatformUserPasswordFromAdmin(
+    {
+      id: req.userId,
+      role: req.userRole ?? "",
+      workspaceId: req.workspaceId,
+      platformRoleCode: req.platformRoleCode,
+      isRootOwner: req.isRootOwner,
+    },
+    {
+      id: user.id,
+      role: user.role,
+      workspaceId: user.workspaceId,
+      platformRoleCode: user.platformRoleCode,
+      isRootOwner: user.isRootOwner,
+      isProtected: user.isProtected,
+    },
+  );
+  if (req.userId !== Number(userId) && !resetCheck.allowed) {
+    res.status(403).json({
+      error: "Cannot reset password for a protected platform owner account",
+      code: "ROOT_PASSWORD_RESET_BLOCKED",
+    });
+    return;
+  }
 
   const hash = await bcrypt.hash(password, 12);
   await db.update(usersTable).set({ passwordHash: hash, mustResetPassword: true }).where(eq(usersTable.id, Number(userId)));

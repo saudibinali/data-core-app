@@ -1,59 +1,69 @@
 /**
  * @file   routes/platform-me.ts
- * @phase  P14-C - Platform Access Boundary & Route Guards
  *
- * GET /platform/me
- *
- * Returns the authenticated platform user's identity, effective role, and
- * derived permission list. Platform users only - workspace-scoped users receive 403.
- *
- * Safety:
- *   - No profile editing, password, email, SSO, or MFA.
- *   - No DB audit write - req.log.info only.
- *   - Legacy root (platformRoleCode IS NULL) → effectivePlatformRoleCode = root_platform_owner.
+ * Platform user identity + self-service account management.
+ * Only the authenticated platform user may update their own profile/credentials.
  */
 
 import { Router, type Response } from "express";
+import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
 import { usersTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, and, ne } from "drizzle-orm";
 import { type AuthRequest, requireAuth } from "../middlewares/requireAuth";
 import { getPlatformUserRoleCode } from "../lib/platform-permissions";
 import { resolvePlatformUserEffectivePermissions } from "../lib/platform-effective-permissions";
-import { isProtectedPlatformAccount } from "../lib/root-platform-owner-policy";
+import {
+  isProtectedPlatformAccount,
+  canSelfChangePlatformUserPassword,
+  canSelfChangePlatformUserEmail,
+  canSelfUpdatePlatformUserProfile,
+} from "../lib/root-platform-owner-policy";
+import {
+  validatePlatformSelfProfileUpdate,
+  validatePlatformSelfEmailUpdate,
+  normalizePlatformUserEmail,
+} from "../lib/platform-user-lifecycle";
+import {
+  loadPlatformPasswordPolicy,
+  validatePasswordAgainstPolicy,
+  passwordPolicyErrorMessage,
+} from "../lib/platform-password-policy";
 
 const router = Router();
 
-/**
- * GET /platform/me
- *
- * Returns:
- *   id, email, displayName, role, workspaceId,
- *   platformRoleCode, effectivePlatformRoleCode,
- *   isRootOwner, isProtected, permissions[]
- *
- * 401 - no valid token
- * 403 - caller is a workspace-scoped user, not a platform user
- * 404 - user row missing (should not happen)
- */
+function platformUserGuard(req: AuthRequest, res: Response): boolean {
+  if (!req.userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  if (req.userRole !== "super_admin" || req.workspaceId !== null) {
+    res.status(403).json({
+      error: "Forbidden",
+      code: "NOT_PLATFORM_USER",
+      message: "This endpoint is only accessible to platform administration users.",
+    });
+    return false;
+  }
+  return true;
+}
+
+function selfIdentity(req: AuthRequest) {
+  return {
+    id: req.userId,
+    email: req.userEmail ?? null,
+    role: req.userRole ?? "",
+    workspaceId: req.workspaceId,
+    platformRoleCode: req.platformRoleCode,
+    isRootOwner: req.isRootOwner,
+  };
+}
+
 router.get(
   "/platform/me",
   requireAuth,
   async (req: AuthRequest, res: Response): Promise<void> => {
-    if (!req.userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-
-    // Platform users: role = super_admin AND no workspace
-    if (req.userRole !== "super_admin" || req.workspaceId !== null) {
-      res.status(403).json({
-        error: "Forbidden",
-        code: "NOT_PLATFORM_USER",
-        message: "This endpoint is only accessible to platform administration users.",
-      });
-      return;
-    }
+    if (!platformUserGuard(req, res)) return;
 
     const [user] = await db
       .select({
@@ -65,9 +75,14 @@ router.get(
         platformRoleCode: usersTable.platformRoleCode,
         isRootOwner: usersTable.isRootOwner,
         status: usersTable.status,
+        platformJobTitle: usersTable.platformJobTitle,
+        platformDepartment: usersTable.platformDepartment,
+        platformPhone: usersTable.platformPhone,
+        employeeNumber: usersTable.employeeNumber,
+        mustResetPassword: usersTable.mustResetPassword,
       })
       .from(usersTable)
-      .where(eq(usersTable.id, req.userId));
+      .where(eq(usersTable.id, req.userId!));
 
     if (!user) {
       res.status(404).json({ error: "User not found" });
@@ -92,11 +107,6 @@ router.get(
       isRootOwner: user.isRootOwner,
     });
 
-    req.log.info(
-      { userId: user.id, effectiveRoleCode, permissionCount: permissions.length },
-      "GET /platform/me",
-    );
-
     res.json({
       id: user.id,
       email: user.email,
@@ -108,7 +118,203 @@ router.get(
       isRootOwner: user.isRootOwner,
       isProtected,
       permissions,
+      jobTitle: user.platformJobTitle,
+      department: user.platformDepartment,
+      phone: user.platformPhone,
+      employeeNumber: user.employeeNumber,
+      mustResetPassword: user.mustResetPassword,
+      canSelfManageAccount: true,
     });
+  },
+);
+
+router.patch(
+  "/platform/me/profile",
+  requireAuth,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!platformUserGuard(req, res)) return;
+
+    const actor = selfIdentity(req);
+    const target = { ...actor };
+    const profileCheck = canSelfUpdatePlatformUserProfile(actor, target);
+    if (!profileCheck.allowed) {
+      res.status(403).json({ error: "Forbidden", code: profileCheck.blockedReason });
+      return;
+    }
+
+    const payload = req.body as {
+      displayName?: string;
+      jobTitle?: string | null;
+      department?: string | null;
+      phone?: string | null;
+    };
+
+    const validation = validatePlatformSelfProfileUpdate(payload);
+    if (!validation.valid) {
+      res.status(400).json({ error: "Validation failed", codes: validation.errors });
+      return;
+    }
+
+    const updates: Partial<typeof usersTable.$inferInsert> = {
+      platformUpdatedBy: req.userId,
+      updatedAt: new Date(),
+    };
+    if (payload.displayName !== undefined) updates.fullName = payload.displayName.trim();
+    if (payload.jobTitle !== undefined) updates.platformJobTitle = payload.jobTitle?.trim() || null;
+    if (payload.department !== undefined) updates.platformDepartment = payload.department?.trim() || null;
+    if (payload.phone !== undefined) updates.platformPhone = payload.phone?.trim() || null;
+
+    await db.update(usersTable).set(updates).where(eq(usersTable.id, req.userId!));
+
+    const [updated] = await db
+      .select({
+        id: usersTable.id,
+        email: usersTable.email,
+        fullName: usersTable.fullName,
+        platformJobTitle: usersTable.platformJobTitle,
+        platformDepartment: usersTable.platformDepartment,
+        platformPhone: usersTable.platformPhone,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, req.userId!));
+
+    req.log.info({ userId: req.userId }, "PATCH /platform/me/profile");
+    res.json({ success: true, profile: updated });
+  },
+);
+
+router.patch(
+  "/platform/me/email",
+  requireAuth,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!platformUserGuard(req, res)) return;
+
+    const actor = selfIdentity(req);
+    const target = { ...actor };
+    const emailCheck = canSelfChangePlatformUserEmail(actor, target);
+    if (!emailCheck.allowed) {
+      res.status(403).json({ error: "Forbidden", code: emailCheck.blockedReason });
+      return;
+    }
+
+    const payload = req.body as { email?: string; currentPassword?: string };
+    const validation = validatePlatformSelfEmailUpdate(payload);
+    if (!validation.valid) {
+      res.status(400).json({ error: "Validation failed", codes: validation.errors });
+      return;
+    }
+
+    const normalizedEmail = normalizePlatformUserEmail(payload.email!);
+
+    const [user] = await db
+      .select({ passwordHash: usersTable.passwordHash })
+      .from(usersTable)
+      .where(eq(usersTable.id, req.userId!));
+
+    if (!user?.passwordHash) {
+      res.status(400).json({ error: "No password set for this account" });
+      return;
+    }
+
+    const validCurrent = await bcrypt.compare(String(payload.currentPassword), user.passwordHash);
+    if (!validCurrent) {
+      res.status(401).json({ error: "Current password is incorrect" });
+      return;
+    }
+
+    const [duplicate] = await db
+      .select({ id: usersTable.id })
+      .from(usersTable)
+      .where(
+        and(
+          eq(usersTable.email, normalizedEmail),
+          ne(usersTable.id, req.userId!),
+        ),
+      )
+      .limit(1);
+
+    if (duplicate) {
+      res.status(409).json({ error: "A user with this email already exists", code: "DUPLICATE_EMAIL" });
+      return;
+    }
+
+    await db
+      .update(usersTable)
+      .set({ email: normalizedEmail, updatedAt: new Date(), platformUpdatedBy: req.userId })
+      .where(eq(usersTable.id, req.userId!));
+
+    req.log.info({ userId: req.userId }, "PATCH /platform/me/email");
+    res.json({ success: true, email: normalizedEmail });
+  },
+);
+
+router.post(
+  "/platform/me/change-password",
+  requireAuth,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    if (!platformUserGuard(req, res)) return;
+
+    const actor = selfIdentity(req);
+    const target = { ...actor };
+    const pwCheck = canSelfChangePlatformUserPassword(actor, target);
+    if (!pwCheck.allowed) {
+      res.status(403).json({ error: "Forbidden", code: pwCheck.blockedReason });
+      return;
+    }
+
+    const { currentPassword, newPassword } = req.body as {
+      currentPassword?: string;
+      newPassword?: string;
+    };
+
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: "currentPassword and newPassword are required" });
+      return;
+    }
+
+    if (String(currentPassword) === String(newPassword)) {
+      res.status(400).json({ error: "New password must be different from the current password" });
+      return;
+    }
+
+    const policy = await loadPlatformPasswordPolicy();
+    const strength = validatePasswordAgainstPolicy(String(newPassword), policy);
+    if (!strength.valid) {
+      res.status(400).json({
+        error: passwordPolicyErrorMessage(strength.errors, policy),
+        codes: strength.errors,
+      });
+      return;
+    }
+
+    const [user] = await db
+      .select({ passwordHash: usersTable.passwordHash })
+      .from(usersTable)
+      .where(eq(usersTable.id, req.userId!));
+
+    if (!user?.passwordHash) {
+      res.status(400).json({ error: "No password set for this account" });
+      return;
+    }
+
+    const validCurrent = await bcrypt.compare(String(currentPassword), user.passwordHash);
+    if (!validCurrent) {
+      res.status(401).json({ error: "Current password is incorrect" });
+      return;
+    }
+
+    const hash = await bcrypt.hash(String(newPassword), 12);
+    await db
+      .update(usersTable)
+      .set({
+        passwordHash: hash,
+        mustResetPassword: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(usersTable.id, req.userId!));
+
+    req.log.info({ userId: req.userId }, "POST /platform/me/change-password");
+    res.json({ success: true, message: "Password updated successfully" });
   },
 );
 

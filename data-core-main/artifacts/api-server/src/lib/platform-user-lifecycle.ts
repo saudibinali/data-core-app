@@ -146,6 +146,55 @@ export function validatePlatformUserProfileUpdate(
   return { valid: errors.length === 0, errors };
 }
 
+export interface PlatformSelfProfileUpdatePayload {
+  displayName?: string;
+  jobTitle?: string | null;
+  department?: string | null;
+  phone?: string | null;
+}
+
+export function validatePlatformSelfProfileUpdate(
+  payload: PlatformSelfProfileUpdatePayload,
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (payload.displayName !== undefined && payload.displayName.trim().length < 2) {
+    errors.push("DISPLAY_NAME_REQUIRED");
+  }
+
+  const hasProfileField =
+    payload.displayName !== undefined ||
+    payload.jobTitle !== undefined ||
+    payload.department !== undefined ||
+    payload.phone !== undefined;
+
+  if (!hasProfileField) {
+    errors.push("NO_PROFILE_FIELDS");
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+export interface PlatformSelfEmailUpdatePayload {
+  email?: string;
+  currentPassword?: string;
+}
+
+export function validatePlatformSelfEmailUpdate(
+  payload: PlatformSelfEmailUpdatePayload,
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!payload.currentPassword || String(payload.currentPassword).length < 1) {
+    errors.push("CURRENT_PASSWORD_REQUIRED");
+  }
+  if (!payload.email || !isValidPlatformUserEmail(payload.email)) {
+    errors.push("INVALID_EMAIL");
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 export interface PlatformUserDirectoryStatusPayload {
   nextStatus?: string;
   reason?: string;

@@ -17,8 +17,11 @@ export const ROOT_PLATFORM_OWNER_PROTECTION_POLICY = {
   non_deletable: true,
   non_disableable: true,
   non_lockable: true,
+  /** Admin UI cannot reset another user's password; root owner changes own password via /platform/me. */
   password_reset_blocked_from_admin_ui: true,
-  email_change_blocked: true,
+  /** Admin UI cannot change another user's email; root owner updates own email via /platform/me. */
+  email_change_blocked_from_admin_ui: true,
+  self_credential_management_allowed: true,
   self_promotion_blocked: true,
   root_role_assignment_blocked: true,
   cannot_manage_equal_or_higher_privilege: true,
@@ -174,6 +177,42 @@ export function canAssignPlatformRole(
     return { allowed: false, blockedReason: "EQUAL_OR_HIGHER_PRIVILEGE" };
   }
   return { allowed: true };
+}
+
+/** Only the signed-in user may update their own credentials or profile (not other admins). */
+export function canSelfManagePlatformAccount(
+  actor: PlatformUserIdentity,
+  targetUser: PlatformUserIdentity,
+): PolicyCheckResult {
+  if (
+    actor.id === undefined ||
+    targetUser.id === undefined ||
+    actor.id !== targetUser.id
+  ) {
+    return { allowed: false, blockedReason: "CREDENTIALS_SELF_ONLY" };
+  }
+  return { allowed: true };
+}
+
+export function canSelfChangePlatformUserPassword(
+  actor: PlatformUserIdentity,
+  targetUser: PlatformUserIdentity,
+): PolicyCheckResult {
+  return canSelfManagePlatformAccount(actor, targetUser);
+}
+
+export function canSelfChangePlatformUserEmail(
+  actor: PlatformUserIdentity,
+  targetUser: PlatformUserIdentity,
+): PolicyCheckResult {
+  return canSelfManagePlatformAccount(actor, targetUser);
+}
+
+export function canSelfUpdatePlatformUserProfile(
+  actor: PlatformUserIdentity,
+  targetUser: PlatformUserIdentity,
+): PolicyCheckResult {
+  return canSelfManagePlatformAccount(actor, targetUser);
 }
 
 export function canManagePlatformUser(

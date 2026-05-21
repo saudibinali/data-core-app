@@ -304,8 +304,10 @@ export const PLATFORM_USER_EMPTY_STATE = {
   noUsers: "No platform users have been created yet.",
   loading: "Loading platform users...",
   error: "Failed to load platform users.",
-  protectedNotice: "Root Platform Owner is protected. It cannot be disabled, locked, demoted, email-changed, or password-reset from Platform Administration.",
-  protectedNoticeAr: "مالك المنصة الجذري حساب محمي ولا يمكن تعديله من لوحة الإدارة.",
+  protectedNotice:
+    "Root Platform Owner is protected. Other administrators cannot disable, lock, demote, change email, or reset the password for this account. The root owner manages their own credentials from My Account.",
+  protectedNoticeAr:
+    "مالك المنصة الجذري حساب محمي. لا يمكن لمسؤول آخر تعطيله أو تغيير بيانات الدخول. يدير المالك الجذري حسابه من صفحة حسابي.",
   safetyBanner: "Platform user management is for internal platform accounts only. Tenant workspace users are managed separately.",
 } as const;
 
