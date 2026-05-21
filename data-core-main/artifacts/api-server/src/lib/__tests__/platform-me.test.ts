@@ -17,6 +17,7 @@ import {
   hasPlatformPermission,
   PLATFORM_PERMISSION_CODES,
 } from "../platform-permissions";
+import { isPlatformScopeUser } from "../platform-scope";
 
 // ── T1: Legacy root (platformRoleCode IS NULL) ────────────────────────────────
 
@@ -81,34 +82,25 @@ describe("T1b - isRootOwner=true gets all permissions", () => {
 
 // ── T2: Workspace user (403 logic) ────────────────────────────────────────────
 
-describe("T2 - workspace user is blocked from GET /platform/me", () => {
-  it("a workspace user (role=admin, workspaceId=5) should not reach platform endpoint", () => {
-    // The endpoint checks: req.userRole !== "super_admin" || req.workspaceId !== null
-    // This simulates the guard logic
-    const workspaceUser = { role: "admin", workspaceId: 5 };
-    const isBlocked =
-      workspaceUser.role !== "super_admin" || workspaceUser.workspaceId !== null;
-    expect(isBlocked).toBe(true);
+describe("T2 - platform scope guard (GET /platform/me)", () => {
+  it("a workspace user (role=admin, workspaceId=5) is blocked", () => {
+    expect(isPlatformScopeUser({ role: "admin", workspaceId: 5 })).toBe(false);
   });
 
-  it("a member user is also blocked", () => {
-    const member = { role: "member", workspaceId: 1 };
-    const isBlocked = member.role !== "super_admin" || member.workspaceId !== null;
-    expect(isBlocked).toBe(true);
+  it("a member user is blocked", () => {
+    expect(isPlatformScopeUser({ role: "member", workspaceId: 1 })).toBe(false);
   });
 
   it("a super_admin with a workspace is blocked (tenant admin)", () => {
-    const tenantAdmin = { role: "super_admin", workspaceId: 3 };
-    const isBlocked =
-      tenantAdmin.role !== "super_admin" || tenantAdmin.workspaceId !== null;
-    expect(isBlocked).toBe(true);
+    expect(isPlatformScopeUser({ role: "super_admin", workspaceId: 3 })).toBe(false);
   });
 
-  it("a platform super_admin (no workspace) is allowed", () => {
-    const platformUser = { role: "super_admin", workspaceId: null };
-    const isBlocked =
-      platformUser.role !== "super_admin" || platformUser.workspaceId !== null;
-    expect(isBlocked).toBe(false);
+  it("platform super_admin with workspaceId null is allowed", () => {
+    expect(isPlatformScopeUser({ role: "super_admin", workspaceId: null })).toBe(true);
+  });
+
+  it("legacy root after requireAuth (workspaceId undefined) is allowed", () => {
+    expect(isPlatformScopeUser({ role: "super_admin", workspaceId: undefined })).toBe(true);
   });
 });
 

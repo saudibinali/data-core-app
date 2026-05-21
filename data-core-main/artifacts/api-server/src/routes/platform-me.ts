@@ -29,6 +29,7 @@ import {
   validatePasswordAgainstPolicy,
   passwordPolicyErrorMessage,
 } from "../lib/platform-password-policy";
+import { isPlatformScopeUser } from "../lib/platform-scope";
 
 const router = Router();
 
@@ -37,7 +38,7 @@ function platformUserGuard(req: AuthRequest, res: Response): boolean {
     res.status(401).json({ error: "Unauthorized" });
     return false;
   }
-  if (req.userRole !== "super_admin" || req.workspaceId !== null) {
+  if (!isPlatformScopeUser({ role: req.userRole, workspaceId: req.workspaceId })) {
     res.status(403).json({
       error: "Forbidden",
       code: "NOT_PLATFORM_USER",
