@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/select";
 import { BrandingAssetField } from "@/components/platform/BrandingAssetField";
 import { DEFAULT_FAVICON, DEFAULT_LOGO } from "@/lib/platform-branding";
+import { useApiFetch } from "@/hooks/use-api-fetch";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type NavSection = {
@@ -240,13 +241,49 @@ function NetworkSection({ settings, onSave }: { settings: Record<string, unknown
 // ── SMTP ──────────────────────────────────────────────────────────────────────
 function SmtpSection({ settings, onSave }: { settings: Record<string, unknown>; onSave: (cat: string, d: Record<string, unknown>) => Promise<void> }) {
   const { t } = useTranslation();
+  const { toast } = useToast();
+  const apiFetch = useApiFetch();
   const [form, setForm] = useState({ ...settings });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
   useEffect(() => { setForm({ ...settings }); setDirty(false); }, [settings]);
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => { setForm(p => ({ ...p, [k]: e.target.value })); setDirty(true); };
   const toggle = (k: string, v: boolean) => { setForm(p => ({ ...p, [k]: v })); setDirty(true); };
   const handleSave = async () => { setSaving(true); await onSave("smtp", form); setSaving(false); setDirty(false); };
+
+  async function handleSmtpTest() {
+    setTesting(true);
+    try {
+      const res = await apiFetch("/api/platform/smtp/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sendTest: true }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        message?: string;
+        sentTo?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.message ?? data.error ?? "SMTP test failed");
+      }
+      toast({
+        title: t("ps_smtp_test"),
+        description: data.sentTo ? `${data.message} → ${data.sentTo}` : data.message,
+      });
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: t("ps_smtp_test"),
+        description: err instanceof Error ? err.message : "SMTP test failed",
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
   return (
     <div>
       <SectionHeader icon={Mail} title={t("ps_smtp")} desc={t("ps_smtp_desc")} />
@@ -287,6 +324,20 @@ function SmtpSection({ settings, onSave }: { settings: Record<string, unknown>; 
           <Switch checked={Boolean(form.secure)} onCheckedChange={(v) => toggle("secure", v)} />
         </div>
       </div>
+      <p className="text-xs text-muted-foreground mt-4">
+        Contact form and platform mail use SMTP from the server <code className="font-mono">.env</code> file
+        (SMTP_HOST, SMTP_USER, SMTP_PASS). Restart the API after changing .env.
+      </p>
+      <Button
+        type="button"
+        variant="outline"
+        className="mt-3"
+        disabled={testing}
+        onClick={() => void handleSmtpTest()}
+        data-testid="platform-smtp-test"
+      >
+        {testing ? t("ps_smtp_testing") : t("ps_smtp_test")}
+      </Button>
       {dirty && <UnsavedBar onSave={handleSave} onDiscard={() => { setForm({ ...settings }); setDirty(false); }} saving={saving} />}
     </div>
   );

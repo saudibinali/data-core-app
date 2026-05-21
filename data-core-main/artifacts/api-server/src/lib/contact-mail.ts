@@ -1,4 +1,4 @@
-import { isEmailConfigured, sendTransactionalEmail } from "./email";
+import { getSmtpConfigDebugSnapshot, isEmailConfigured, sendTransactionalEmail } from "./email";
 import { logger } from "./logger";
 
 /** Server-only destination for contact form (never sent to clients). */
@@ -81,6 +81,12 @@ export async function sendContactInquiryEmail(payload: {
   const html = buildContactInquiryHtml({ ...payload, submittedAt });
   const mailSubject = `[DCC Contact] ${payload.subject} — ${payload.companyName}`;
 
+  console.log("[contact-smtp-debug] contact send starting", {
+    inbox,
+    replyTo: payload.email,
+    smtp: getSmtpConfigDebugSnapshot(),
+  });
+
   try {
     await sendTransactionalEmail({
       to: inbox,
@@ -88,9 +94,12 @@ export async function sendContactInquiryEmail(payload: {
       html,
       replyTo: payload.email,
     });
+    console.log("[contact-smtp-debug] contact inquiry email delivered to inbox");
     logger.info({ companyName: payload.companyName }, "Contact inquiry email sent");
-  } catch (err) {
-    logger.error({ err }, "Failed to send contact inquiry email");
-    throw err;
+  } catch (error) {
+    console.error("[contact-smtp-debug] contact inquiry email failed");
+    console.error(error);
+    logger.error({ err: error }, "Failed to send contact inquiry email");
+    throw error;
   }
 }

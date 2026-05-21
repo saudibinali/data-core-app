@@ -14,14 +14,45 @@ function isEmailConfigured(): boolean {
   return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
 }
 
+/** Safe snapshot for PM2 debug logs (no secrets). */
+export function getSmtpConfigDebugSnapshot(): Record<string, unknown> {
+  return {
+    configured: isEmailConfigured(),
+    host: SMTP_HOST ?? null,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    from: SMTP_FROM,
+    user: SMTP_USER ? `${SMTP_USER.slice(0, 2)}***` : null,
+    hasPassword: Boolean(SMTP_PASS),
+  };
+}
+
 function getTransporter() {
   if (!isEmailConfigured()) return null;
   return nodemailer.createTransport({
-    host:   SMTP_HOST,
-    port:   SMTP_PORT,
+    host: SMTP_HOST,
+    port: SMTP_PORT,
     secure: SMTP_SECURE,
-    auth:   { user: SMTP_USER, pass: SMTP_PASS },
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
+}
+
+function createSmtpTransporterForContact() {
+  if (!isEmailConfigured()) return null;
+  try {
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+    console.log("[contact-smtp-debug] transporter created", getSmtpConfigDebugSnapshot());
+    return transporter;
+  } catch (error) {
+    console.error("[contact-smtp-debug] transporter creation failed");
+    console.error(error);
+    throw error;
+  }
 }
 
 // ── Status styling ────────────────────────────────────────────────────────────
@@ -276,18 +307,46 @@ export async function sendTransactionalEmail(opts: {
   html: string;
   replyTo?: string;
 }): Promise<void> {
+  console.log("[contact-smtp-debug] SMTP config loaded", getSmtpConfigDebugSnapshot());
+
   if (!isEmailConfigured()) {
-    throw new Error("SMTP_NOT_CONFIGURED");
+    const err = new Error("SMTP_NOT_CONFIGURED");
+    console.error("[contact-smtp-debug] sendMail aborted — SMTP not configured");
+    console.error(err);
+    throw err;
   }
-  const transporter = getTransporter();
+
+  const transporter = createSmtpTransporterForContact();
   if (!transporter) {
-    throw new Error("SMTP_NOT_CONFIGURED");
+    const err = new Error("SMTP_NOT_CONFIGURED");
+    console.error("[contact-smtp-debug] sendMail aborted — transporter missing");
+    console.error(err);
+    throw err;
   }
-  await transporter.sendMail({
-    from: SMTP_FROM,
-    to: opts.to,
-    subject: opts.subject,
-    html: opts.html,
-    replyTo: opts.replyTo,
-  });
+
+  try {
+    console.log("[contact-smtp-debug] sendMail executing", {
+      to: opts.to,
+      subject: opts.subject,
+      from: SMTP_FROM,
+      hasReplyTo: Boolean(opts.replyTo),
+    });
+    const info = await transporter.sendMail({
+      from: SMTP_FROM,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      replyTo: opts.replyTo,
+    });
+    console.log("[contact-smtp-debug] sendMail success", {
+      messageId: info.messageId ?? null,
+      accepted: info.accepted,
+      rejected: info.rejected,
+    });
+  } catch (error) {
+    console.error("[contact-smtp-debug] sendMail failure");
+    console.error(error);
+    logger.error({ err: error, to: opts.to }, "sendTransactionalEmail failed");
+    throw error;
+  }
 }

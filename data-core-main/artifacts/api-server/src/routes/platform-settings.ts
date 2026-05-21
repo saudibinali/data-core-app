@@ -1,8 +1,9 @@
 import { Router, type IRouter } from "express";
 import { db } from "@workspace/db";
-import { platformSettingsTable } from "@workspace/db";
+import { platformSettingsTable, usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { type AuthRequest, requireAuth, requireSuperAdmin } from "../middlewares/requireAuth";
+import { platformMailer } from "../lib/mail/platform-mailer";
 import { parseBrandingUpload } from "../lib/parse-branding-upload";
 import {
   getPublicPlatformBranding,
@@ -143,6 +144,92 @@ router.post(
 router.get("/platform/settings", requireAuth, requireSuperAdmin, async (_req, res): Promise<void> => {
   const all = await getAllSettings();
   res.json(all);
+});
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Verify platform SMTP from server env (SMTP_HOST, SMTP_USER, SMTP_PASS, …).
+ * Used by contact form and platform mailer. Optional body.sendTest sends a message to `to`
+ * or the signed-in super admin email.
+ */
+router.post("/platform/smtp/test", requireAuth, requireSuperAdmin, async (req: AuthRequest, res): Promise<void> => {
+  if (!platformMailer.isConfigured()) {
+    res.status(503).json({
+      success: false,
+      error: "SMTP_NOT_CONFIGURED",
+      message:
+        "Platform SMTP is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASS in the server environment (.env), then restart the API.",
+    });
+    return;
+  }
+
+  const body = (req.body ?? {}) as { to?: unknown; sendTest?: unknown };
+  const sendTest = body.sendTest === true || body.sendTest === "true";
+  let to: string | undefined =
+    typeof body.to === "string" && body.to.trim() ? body.to.trim().toLowerCase() : undefined;
+
+  if (to && (!EMAIL_RE.test(to) || to.length > 254)) {
+    res.status(400).json({ success: false, error: "INVALID_EMAIL", message: "Invalid test recipient email." });
+    return;
+  }
+
+  try {
+    await platformMailer.verifyConnection();
+
+    if (!sendTest && !to) {
+      res.json({
+        success: true,
+        message: "SMTP connection verified (server environment).",
+        configured: true,
+      });
+      return;
+    }
+
+    if (!to && req.userId) {
+      const [user] = await db
+        .select({ email: usersTable.email })
+        .from(usersTable)
+        .where(eq(usersTable.id, req.userId))
+        .limit(1);
+      to = user?.email?.trim().toLowerCase() || undefined;
+    }
+
+    if (!to) {
+      res.status(400).json({
+        success: false,
+        error: "NO_RECIPIENT",
+        message: "Provide body.to or sign in with an account that has an email address.",
+      });
+      return;
+    }
+
+    const platformName =
+      ((await getAllSettings()).identity?.platform_name as string | undefined) ?? "Data Core Center";
+    const result = await platformMailer.send({
+      to,
+      subject: `[${platformName}] SMTP test`,
+      html: `<p>This is a test message from <strong>${platformName}</strong> platform SMTP (server environment).</p><p>If you received this, outbound mail is working.</p>`,
+      text: `SMTP test from ${platformName}. If you received this, outbound mail is working.`,
+    });
+
+    if (!result) {
+      res.status(503).json({ success: false, error: "SMTP_SEND_FAILED", message: "Test email was not sent." });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: "SMTP connection verified and test email sent.",
+      configured: true,
+      sentTo: to,
+      messageId: result.messageId ?? null,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "SMTP test failed";
+    req.log?.warn({ err }, "Platform SMTP test failed");
+    res.status(422).json({ success: false, error: "SMTP_TEST_FAILED", message });
+  }
 });
 
 router.patch("/platform/settings/:category", requireAuth, requireSuperAdmin, async (req: AuthRequest, res): Promise<void> => {

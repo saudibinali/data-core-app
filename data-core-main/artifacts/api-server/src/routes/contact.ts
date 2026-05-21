@@ -35,6 +35,7 @@ router.post("/contact", async (req: Request, res: Response): Promise<void> => {
   }
 
   if (!isContactDeliveryReady()) {
+    console.error("[contact-smtp-debug] contact delivery not ready (SMTP or inbox missing)");
     res.status(503).json({
       error: "Contact delivery is temporarily unavailable. Please try again later.",
       code: "CONTACT_UNAVAILABLE",
@@ -54,15 +55,19 @@ router.post("/contact", async (req: Request, res: Response): Promise<void> => {
   const payload = sanitizeContactForm(req.body ?? {});
 
   try {
+    console.log("[contact-smtp-debug] POST /contact delivery attempt", { ip, company: payload.companyName });
     await sendContactInquiryEmail({
       ...payload,
       clientIp: ip,
     });
+    console.log("[contact-smtp-debug] POST /contact delivery success");
     res.json({
       success: true,
       message: "Your message has been received. Our team will respond if appropriate.",
     });
-  } catch {
+  } catch (error) {
+    console.error("[contact-smtp-debug] POST /contact delivery failed");
+    console.error(error);
     res.status(500).json({
       error: "We could not send your message at this time. Please try again later.",
       code: "DELIVERY_FAILED",
