@@ -5,7 +5,25 @@
 import { useState } from "react";
 import { CreditCard, Loader2, Pencil, PlusCircle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useTenantProfile } from "@/lib/tenant-registry-hooks";
+import {
+  SubscriptionFormBody,
+  SubscriptionStatusSelect,
+  validateSubscriptionForm,
+  type SubscriptionFormErrors,
+} from "@/components/subscription/subscription-form-ui";
 import {
   useTenantSubscription,
   useCreateTenantSubscription,
@@ -18,7 +36,6 @@ import { useCommercialAccount } from "@/hooks/use-commercial";
 import { useTenantCommercialContracts } from "@/hooks/use-commercial-contracts";
 import {
   WORKSPACE_SUBSCRIPTION_STATUS_CONFIG,
-  WORKSPACE_SUBSCRIPTION_STATUS_CODES,
   type WorkspaceSubscriptionStatusCode,
 } from "@/lib/subscription-state-config";
 
@@ -76,6 +93,10 @@ export function SubscriptionStatePanel({
   const [showEdit, setShowEdit] = useState(false);
   const [showStatus, setShowStatus] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<SubscriptionFormErrors>({});
+
+  const { data: tenantProfileData } = useTenantProfile(canRead ? tenantId : null);
+  const tenantRegion = tenantProfileData?.tenant.region ?? null;
 
   const [createForm, setCreateForm] = useState<WorkspaceSubscriptionCreateInput>({
     subscriptionCode: "",
@@ -137,6 +158,7 @@ export function SubscriptionStatePanel({
       planName: sub.planName ?? undefined,
       internalNotes: sub.internalNotes ?? undefined,
     });
+    setFieldErrors({});
     setShowEdit(true);
     setFormError(null);
   }
@@ -149,6 +171,12 @@ export function SubscriptionStatePanel({
 
   async function handleCreate() {
     setFormError(null);
+    const errors = validateSubscriptionForm(createForm);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
     try {
       await createMutation.mutateAsync(createForm);
       setShowCreate(false);
@@ -159,6 +187,12 @@ export function SubscriptionStatePanel({
 
   async function handleEdit() {
     setFormError(null);
+    const errors = validateSubscriptionForm(editForm);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
     try {
       await updateMutation.mutateAsync(editForm);
       setShowEdit(false);
@@ -202,6 +236,7 @@ export function SubscriptionStatePanel({
                   status: "trial",
                   commercialAccountId: account?.id ?? null,
                 });
+                setFieldErrors({});
                 setShowCreate(true);
                 setFormError(null);
               }}
@@ -266,235 +301,194 @@ export function SubscriptionStatePanel({
         </dl>
       )}
 
-      {showCreate && (
-        <FormModal title="Create Subscription" onClose={() => setShowCreate(false)} testId="subscription-create-modal">
-          <SubscriptionFormFields
-            form={createForm}
-            setForm={setCreateForm}
-            includeStatus
-            accountId={account?.id}
-            contracts={contracts}
-          />
-          <FormActions
-            onCancel={() => setShowCreate(false)}
-            onSubmit={() => void handleCreate()}
-            pending={createMutation.isPending}
-            label="Create"
-          />
-        </FormModal>
-      )}
-
-      {showEdit && subscription && (
-        <FormModal title="Edit Subscription" onClose={() => setShowEdit(false)} testId="subscription-edit-modal">
-          <SubscriptionFormFields
-            form={editForm}
-            setForm={setEditForm}
-            accountId={account?.id}
-            contracts={contracts}
-          />
-          <FormActions
-            onCancel={() => setShowEdit(false)}
-            onSubmit={() => void handleEdit()}
-            pending={updateMutation.isPending}
-            label="Save"
-          />
-        </FormModal>
-      )}
-
-      {showStatus && subscription && (
-        <FormModal title="Change Status" onClose={() => setShowStatus(false)} testId="subscription-status-modal">
-          <label className="block text-xs font-medium mb-1">New status</label>
-          <select
-            className="w-full text-xs border rounded px-2 py-1.5 mb-3"
-            value={statusForm.status}
-            onChange={(e) => setStatusForm((f) => ({ ...f, status: e.target.value }))}
-            data-testid="subscription-status-select"
-          >
-            {WORKSPACE_SUBSCRIPTION_STATUS_CODES.filter((s) => s !== subscription.status).map((s) => (
-              <option key={s} value={s}>
-                {WORKSPACE_SUBSCRIPTION_STATUS_CONFIG[s].label}
-              </option>
-            ))}
-          </select>
-          <label className="block text-xs font-medium mb-1">Reason (required)</label>
-          <textarea
-            className="w-full text-xs border rounded px-2 py-1.5 min-h-[80px]"
-            value={statusForm.reason}
-            onChange={(e) => setStatusForm((f) => ({ ...f, reason: e.target.value }))}
-            data-testid="subscription-status-reason"
-            placeholder="Explain why this status change is being recorded..."
-          />
-          <FormActions
-            onCancel={() => setShowStatus(false)}
-            onSubmit={() => void handleStatusChange()}
-            pending={statusMutation.isPending}
-            label="Apply Status"
-          />
-        </FormModal>
-      )}
-
-      {formError && (
-        <p className="text-xs text-destructive" data-testid="subscription-form-error">
-          {formError}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function FormModal({
-  title,
-  children,
-  onClose,
-  testId,
-}: {
-  title: string;
-  children: React.ReactNode;
-  onClose: () => void;
-  testId: string;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      data-testid={testId}
-    >
-      <div className="bg-background border border-border rounded-lg shadow-lg w-full max-w-md p-4 space-y-3">
-        <h4 className="text-sm font-semibold">{title}</h4>
-        {children}
-        <button type="button" className="text-xs text-muted-foreground underline" onClick={onClose}>
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function FormActions({
-  onCancel,
-  onSubmit,
-  pending,
-  label,
-}: {
-  onCancel: () => void;
-  onSubmit: () => void;
-  pending: boolean;
-  label: string;
-}) {
-  return (
-    <div className="flex gap-2 pt-2">
-      <button
-        type="button"
-        className="px-3 py-1.5 text-xs rounded border"
-        onClick={onCancel}
-        disabled={pending}
-      >
-        Cancel
-      </button>
-      <button
-        type="button"
-        className="px-3 py-1.5 text-xs rounded bg-primary text-primary-foreground"
-        onClick={onSubmit}
-        disabled={pending}
-        data-testid="subscription-form-submit"
-      >
-        {pending ? "Saving..." : label}
-      </button>
-    </div>
-  );
-}
-
-function SubscriptionFormFields({
-  form,
-  setForm,
-  includeStatus,
-  accountId,
-  contracts,
-}: {
-  form: WorkspaceSubscriptionCreateInput;
-  setForm: React.Dispatch<React.SetStateAction<WorkspaceSubscriptionCreateInput>>;
-  includeStatus?: boolean;
-  accountId?: number;
-  contracts: { id: number; contractNumber: string | null; contractTitle: string | null }[];
-}) {
-  return (
-    <div className="space-y-2 text-xs">
-      <input
-        className="w-full border rounded px-2 py-1.5"
-        placeholder="Subscription code"
-        value={form.subscriptionCode}
-        onChange={(e) => setForm((f) => ({ ...f, subscriptionCode: e.target.value }))}
-        data-testid="subscription-form-code"
-      />
-      <input
-        className="w-full border rounded px-2 py-1.5"
-        placeholder="Subscription name"
-        value={form.subscriptionName}
-        onChange={(e) => setForm((f) => ({ ...f, subscriptionName: e.target.value }))}
-        data-testid="subscription-form-name"
-      />
-      {includeStatus && (
-        <select
-          className="w-full border rounded px-2 py-1.5"
-          value={form.status ?? "trial"}
-          onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))}
+      <Dialog open={showCreate} onOpenChange={(open) => !open && !createMutation.isPending && setShowCreate(false)}>
+        <DialogContent
+          className="sm:max-w-xl max-h-[min(90dvh,880px)] flex flex-col gap-0 p-0 overflow-hidden"
+          data-testid="subscription-create-modal"
         >
-          {WORKSPACE_SUBSCRIPTION_STATUS_CODES.map((s) => (
-            <option key={s} value={s}>
-              {WORKSPACE_SUBSCRIPTION_STATUS_CONFIG[s].label}
-            </option>
-          ))}
-        </select>
-      )}
-      {accountId != null && (
-        <input type="hidden" value={accountId} readOnly />
-      )}
-      <select
-        className="w-full border rounded px-2 py-1.5"
-        value={form.activeContractTermId ?? ""}
-        onChange={(e) =>
-          setForm((f) => ({
-            ...f,
-            activeContractTermId: e.target.value ? Number(e.target.value) : null,
-          }))
-        }
-      >
-        <option value="">No linked contract</option>
-        {contracts.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.contractNumber ?? c.id} - {c.contractTitle ?? "Contract"}
-          </option>
-        ))}
-      </select>
-      <input
-        type="date"
-        className="w-full border rounded px-2 py-1.5"
-        value={form.startDate ?? ""}
-        onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value || undefined }))}
-      />
-      <input
-        type="date"
-        className="w-full border rounded px-2 py-1.5"
-        value={form.endDate ?? ""}
-        onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value || undefined }))}
-      />
-      <input
-        type="date"
-        className="w-full border rounded px-2 py-1.5"
-        value={form.renewalDate ?? ""}
-        onChange={(e) => setForm((f) => ({ ...f, renewalDate: e.target.value || undefined }))}
-      />
-      <input
-        className="w-full border rounded px-2 py-1.5"
-        placeholder="Plan name"
-        value={form.planName ?? ""}
-        onChange={(e) => setForm((f) => ({ ...f, planName: e.target.value || undefined }))}
-      />
-      <textarea
-        className="w-full border rounded px-2 py-1.5 min-h-[60px]"
-        placeholder="Internal notes"
-        value={form.internalNotes ?? ""}
-        onChange={(e) => setForm((f) => ({ ...f, internalNotes: e.target.value || undefined }))}
-      />
+          <DialogHeader className="px-6 pt-6 pb-2 space-y-1.5 border-b border-border shrink-0">
+            <DialogTitle className="text-lg font-semibold text-foreground">Create Subscription</DialogTitle>
+            <DialogDescription className="text-sm text-muted-foreground">
+              Register workspace subscription state linked to the commercial account. Metadata only — no
+              payment or access enforcement.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <SubscriptionFormBody
+              form={createForm}
+              setForm={setCreateForm}
+              includeStatus
+              tenantId={tenantId}
+              region={tenantRegion}
+              contracts={contracts}
+              fieldErrors={fieldErrors}
+              disabled={createMutation.isPending}
+            />
+            {formError && showCreate ? (
+              <p className="mt-3 text-xs text-destructive" role="alert" data-testid="subscription-form-error">
+                {formError}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter className="shrink-0 gap-2 border-t border-border bg-muted/30 px-6 py-4 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowCreate(false)}
+              disabled={createMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleCreate()}
+              disabled={createMutation.isPending}
+              data-testid="subscription-form-submit"
+            >
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 me-2 animate-spin" />
+                  Creating…
+                </>
+              ) : (
+                "Create subscription"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showEdit} onOpenChange={(open) => !open && !updateMutation.isPending && setShowEdit(false)}>
+        <DialogContent
+          className="sm:max-w-xl max-h-[min(90dvh,880px)] flex flex-col gap-0 p-0 overflow-hidden"
+          data-testid="subscription-edit-modal"
+        >
+          <DialogHeader className="px-6 pt-6 pb-2 space-y-1.5 border-b border-border shrink-0">
+            <DialogTitle className="text-lg font-semibold text-foreground">Edit Subscription</DialogTitle>
+            <DialogDescription className="text-sm text-muted-foreground">
+              Update subscription metadata. Changes are audit-logged.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <SubscriptionFormBody
+              form={editForm}
+              setForm={setEditForm}
+              tenantId={tenantId}
+              region={tenantRegion}
+              contracts={contracts}
+              fieldErrors={fieldErrors}
+              disabled={updateMutation.isPending}
+            />
+            {formError && showEdit ? (
+              <p className="mt-3 text-xs text-destructive" role="alert" data-testid="subscription-form-error">
+                {formError}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter className="shrink-0 gap-2 border-t border-border bg-muted/30 px-6 py-4 sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowEdit(false)}
+              disabled={updateMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleEdit()}
+              disabled={updateMutation.isPending}
+              data-testid="subscription-form-submit"
+            >
+              {updateMutation.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 me-2 animate-spin" />
+                  Saving…
+                </>
+              ) : (
+                "Save changes"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showStatus} onOpenChange={(open) => !open && !statusMutation.isPending && setShowStatus(false)}>
+        <DialogContent
+          className="sm:max-w-md"
+          data-testid="subscription-status-modal"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-lg font-semibold text-foreground">Change Status</DialogTitle>
+            <DialogDescription className="text-sm text-muted-foreground">
+              Record a lifecycle status transition with a required reason (audit-logged).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-1">
+            <div className="space-y-1.5">
+              <Label htmlFor="subscription-status-select" className="text-sm font-medium text-foreground">
+                New status <span className="text-destructive">*</span>
+              </Label>
+              <p className="text-xs text-muted-foreground">Select the target subscription lifecycle state.</p>
+              <SubscriptionStatusSelect
+                id="subscription-status-select"
+                value={statusForm.status}
+                onChange={(v) => setStatusForm((f) => ({ ...f, status: v }))}
+                excludeStatus={subscription?.status}
+                disabled={statusMutation.isPending}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="subscription-status-reason" className="text-sm font-medium text-foreground">
+                Reason <span className="text-destructive">*</span>
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Explain why this status change is being recorded for compliance and audit review.
+              </p>
+              <Textarea
+                id="subscription-status-reason"
+                className="min-h-[88px] resize-y bg-background text-foreground border-input text-sm"
+                value={statusForm.reason}
+                onChange={(e) => setStatusForm((f) => ({ ...f, reason: e.target.value }))}
+                disabled={statusMutation.isPending}
+                data-testid="subscription-status-reason"
+                placeholder="e.g. Customer requested activation after contract signature…"
+              />
+            </div>
+            {formError && showStatus ? (
+              <p className="text-xs text-destructive" role="alert" data-testid="subscription-form-error">
+                {formError}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowStatus(false)}
+              disabled={statusMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleStatusChange()}
+              disabled={statusMutation.isPending || !statusForm.reason.trim()}
+              data-testid="subscription-form-submit"
+            >
+              {statusMutation.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 me-2 animate-spin" />
+                  Applying…
+                </>
+              ) : (
+                "Apply status"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+
