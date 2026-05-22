@@ -25,6 +25,11 @@ import {
   CONTRACT_PDF_MIME,
 } from "../lib/contract-document-storage";
 import { parseContractPdfUpload } from "../lib/parse-contract-pdf-upload";
+import {
+  parseOptionalDate,
+  isSchemaMismatchError,
+  pgErrorInfo,
+} from "../lib/commercial-route-utils";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_TEXT = 4000;
@@ -44,20 +49,6 @@ function strRequired(v: unknown, max: number): string | null | "INVALID" | "MISS
   if (typeof v !== "string") return "INVALID";
   const s = v.trim().slice(0, max);
   return s || "INVALID";
-}
-
-function parseDate(v: unknown): string | null | "INVALID" | "MISSING" {
-  if (v === undefined) return "MISSING";
-  if (v === null || v === "") return null;
-  if (typeof v !== "string") return "INVALID";
-  const s = v.trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "INVALID";
-  if (Number.isNaN(new Date(`${s}T00:00:00.000Z`).getTime())) return "INVALID";
-  return s;
-}
-
-function dateToNull(v: string | null | "INVALID" | "MISSING"): string | null {
-  return v === "MISSING" ? null : v;
 }
 
 function validateDates(start: string | null, end: string | null, renewal: string | null): string | null {
@@ -99,14 +90,33 @@ async function loadContractDoc(contractId: number) {
   });
 }
 
+function resolveContractDates(body: Record<string, unknown>): {
+  start: string | null;
+  end: string | null;
+  renewal: string | null;
+  error: string | null;
+} {
+  const startRaw = parseOptionalDate(body.startDate ?? body.contractStartDate);
+  const endRaw = parseOptionalDate(body.endDate ?? body.contractEndDate);
+  const renewalRaw = parseOptionalDate(body.renewalReminderDate ?? body.renewalDate);
+  if (startRaw === "INVALID" || endRaw === "INVALID" || renewalRaw === "INVALID") {
+    return { start: null, end: null, renewal: null, error: "Dates must be YYYY-MM-DD" };
+  }
+  const start = startRaw;
+  const end = endRaw;
+  const renewal = renewalRaw;
+  const dateErr = validateDates(start, end, renewal);
+  if (dateErr) return { start, end, renewal, error: dateErr };
+  return { start, end, renewal, error: null };
+}
+
 function mapBodyToInsert(
   body: Record<string, unknown>,
   commercialAccountId: number,
   workspaceId: number,
 ) {
-  const start = dateToNull(parseDate(body.startDate ?? body.contractStartDate));
-  const end = dateToNull(parseDate(body.endDate ?? body.contractEndDate));
-  const renewal = dateToNull(parseDate(body.renewalReminderDate ?? body.renewalDate));
+  const { start, end, renewal, error } = resolveContractDates(body);
+  if (error) throw new Error(error);
 
   return {
     workspaceId,
@@ -121,9 +131,9 @@ function mapBodyToInsert(
     contractStartDate: start,
     contractEndDate: end,
     renewalDate: renewal,
-    renewalType: "manual",
-    renewalCommitmentStatus: "not_started",
-    status: "active",
+    renewalType: "manual" as const,
+    renewalCommitmentStatus: "not_started" as const,
+    status: "active" as const,
   };
 }
 
@@ -213,28 +223,39 @@ router.post(
       return;
     }
 
-    const fields = mapBodyToInsert(body, ctx.account.id, tenantId);
-    if (fields.contractStartDate === "INVALID" || fields.contractEndDate === "INVALID" || fields.renewalDate === "INVALID") {
-      res.status(400).json({ error: "Dates must be YYYY-MM-DD" });
-      return;
-    }
-    const dateErr = validateDates(fields.contractStartDate, fields.contractEndDate, fields.renewalDate);
-    if (dateErr) {
-      res.status(400).json({ error: dateErr });
+    let fields: ReturnType<typeof mapBodyToInsert>;
+    try {
+      fields = mapBodyToInsert(body, ctx.account.id, tenantId);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : "Invalid contract data" });
       return;
     }
 
-    const [row] = await db
-      .insert(commercialContractTermsTable)
-      .values({
-        ...fields,
-        createdBy: req.userId!,
-        updatedBy: req.userId!,
-      })
-      .returning();
+    try {
+      const [row] = await db
+        .insert(commercialContractTermsTable)
+        .values({
+          ...fields,
+          createdBy: req.userId ?? null,
+          updatedBy: req.userId ?? null,
+        })
+        .returning();
 
-    await audit("commercial_contract_created", req.userId!, tenantId, { contractId: row.id });
-    res.status(201).json({ contract: toOperationalContract(row, null) });
+      await audit("commercial_contract_created", req.userId!, tenantId, { contractId: row.id });
+      res.status(201).json({ contract: toOperationalContract(row, null) });
+    } catch (e: unknown) {
+      console.error("[commercial-contracts POST]", e);
+      if (isSchemaMismatchError(e)) {
+        const { message } = pgErrorInfo(e);
+        res.status(503).json({
+          error:
+            "Database schema is missing operational commercial columns. Run scripts/migrate-commercial-simplification.cjs",
+          detail: message,
+        });
+        return;
+      }
+      throw e;
+    }
   },
 );
 
@@ -262,9 +283,9 @@ router.patch(
 
     const setDate = (key: "contractStartDate" | "contractEndDate" | "renewalDate", raw: unknown) => {
       if (raw === undefined) return;
-      const p = parseDate(raw);
+      const p = parseOptionalDate(raw);
       if (p === "INVALID") throw new Error("INVALID_DATE");
-      patch[key] = dateToNull(p);
+      patch[key] = p;
     };
 
     try {

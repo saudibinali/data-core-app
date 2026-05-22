@@ -3,8 +3,11 @@
  */
 
 import { useRef, useState } from "react";
-import { FileText, PlusCircle, Loader2, Upload, Download, AlertTriangle } from "lucide-react";
+import { FileText, PlusCircle, Loader2, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { CommercialPdfActions } from "@/components/commercial/CommercialPdfActions";
+import { useCommercialAccount } from "@/hooks/use-commercial";
 import {
   useTenantCommercialContracts,
   useCreateTenantCommercialContract,
@@ -41,9 +44,17 @@ interface Props {
   tenantId: string;
   commercialAccountId: number | undefined;
   canWrite: boolean;
+  canUpload: boolean;
 }
 
-export function OperationalContractsPanel({ tenantId, commercialAccountId, canWrite }: Props) {
+export function OperationalContractsPanel({
+  tenantId,
+  commercialAccountId: commercialAccountIdProp,
+  canWrite,
+  canUpload,
+}: Props) {
+  const { data: account } = useCommercialAccount(tenantId);
+  const commercialAccountId = commercialAccountIdProp ?? account?.id;
   const { data: contracts = [], isLoading } = useTenantCommercialContracts(tenantId);
   const createM = useCreateTenantCommercialContract(tenantId);
   const updateM = useUpdateTenantCommercialContract(tenantId);
@@ -110,7 +121,13 @@ export function OperationalContractsPanel({ tenantId, commercialAccountId, canWr
         const { commercialAccountId: _a, ...rest } = form;
         await updateM.mutateAsync({ contractId: editId, input: rest });
       } else {
-        await createM.mutateAsync({ ...form, commercialAccountId });
+        const created = await createM.mutateAsync({ ...form, commercialAccountId });
+        setFormOpen(false);
+        if (canUpload && created.contract?.id) {
+          setUploadTargetId(created.contract.id);
+          fileRef.current?.click();
+        }
+        return;
       }
       setFormOpen(false);
     } catch (e) {
@@ -142,15 +159,17 @@ export function OperationalContractsPanel({ tenantId, commercialAccountId, canWr
           <span className="text-xs text-muted-foreground">({contracts.length} records)</span>
         </div>
         {canWrite && commercialAccountId && (
-          <button
+          <Button
             type="button"
+            variant="default"
+            size="sm"
+            className="h-8 text-xs gap-1"
             onClick={openCreate}
-            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
             data-testid="operational-add-contract-btn"
           >
             <PlusCircle className="w-3.5 h-3.5" />
-            Upload new contract
-          </button>
+            Add contract record
+          </Button>
         )}
       </div>
 
@@ -159,6 +178,12 @@ export function OperationalContractsPanel({ tenantId, commercialAccountId, canWr
       </p>
 
       {err ? <p className="text-xs text-destructive">{err}</p> : null}
+
+      {!commercialAccountId && !isLoading && (
+        <p className="text-xs text-amber-700 dark:text-amber-400 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          Create a commercial account above before adding contracts.
+        </p>
+      )}
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -208,41 +233,21 @@ export function OperationalContractsPanel({ tenantId, commercialAccountId, canWr
                   <p className="truncate">{c.responsiblePersonEmail ?? ""}</p>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2 pt-1">
-                {c.hasDocument ? (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                    onClick={() => downloadM.mutate(c.id)}
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Download PDF
-                  </button>
-                ) : (
-                  <span className="text-xs text-amber-600 dark:text-amber-400">PDF not uploaded</span>
-                )}
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-border/50">
+                <CommercialPdfActions
+                  hasDocument={c.hasDocument}
+                  busy={busy}
+                  canUpload={canUpload}
+                  onUpload={() => {
+                    setUploadTargetId(c.id);
+                    fileRef.current?.click();
+                  }}
+                  onDownload={() => downloadM.mutate(c.id)}
+                />
                 {canWrite && (
-                  <>
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 text-xs hover:underline"
-                      onClick={() => {
-                        setUploadTargetId(c.id);
-                        fileRef.current?.click();
-                      }}
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      {c.hasDocument ? "Replace PDF" : "Upload PDF"}
-                    </button>
-                    <button
-                      type="button"
-                      className="text-xs hover:underline"
-                      onClick={() => openEdit(c)}
-                    >
-                      Edit details
-                    </button>
-                  </>
+                  <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => openEdit(c)}>
+                    Edit details
+                  </Button>
                 )}
               </div>
             </li>
@@ -278,15 +283,15 @@ export function OperationalContractsPanel({ tenantId, commercialAccountId, canWr
               <input className={inp} value={form.companyName ?? ""} onChange={(e) => setForm((f) => ({ ...f, companyName: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs">
-              <span className="font-medium">Responsible person</span>
+              <span className="font-medium">Responsible person name</span>
               <input className={inp} value={form.responsiblePersonName ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonName: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs">
-              <span className="font-medium">Phone</span>
-              <input className={inp} value={form.responsiblePersonPhone ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonPhone: e.target.value }))} />
+              <span className="font-medium">Phone number</span>
+              <input className={inp} type="tel" value={form.responsiblePersonPhone ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonPhone: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs sm:col-span-2">
-              <span className="font-medium">Email</span>
+              <span className="font-medium">Email address</span>
               <input className={inp} type="email" value={form.responsiblePersonEmail ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonEmail: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs">

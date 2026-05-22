@@ -64,16 +64,19 @@ describe("unified operational commercial console", () => {
   });
 
   it("operational panels expose PDF upload/download", () => {
-    expect(contracts).toContain("Upload PDF");
-    expect(contracts).toContain("Download PDF");
-    expect(invoices).toContain("Upload PDF");
-    expect(invoices).toContain("Download PDF");
+    const pdfActions = readSrc("components/commercial/CommercialPdfActions.tsx");
+    expect(contracts).toContain("CommercialPdfActions");
+    expect(invoices).toContain("CommercialPdfActions");
+    expect(pdfActions).toContain("Upload PDF");
+    expect(pdfActions).toContain("Download PDF");
+    expect(pdfActions).toContain("Missing PDF");
   });
 
   it("permission props passed to console", () => {
     expect(tenants).toContain("canReadContracts={canReadCommercialContracts}");
     expect(tenants).toContain("commercial.invoices.read");
     expect(tenants).toContain("canUploadDocuments={canUploadInvoiceDocuments}");
+    expect(consoleSrc).toContain("canUploadContracts");
   });
 
   it("no forbidden UI terms in console components", () => {

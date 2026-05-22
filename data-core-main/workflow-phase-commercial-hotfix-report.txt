@@ -1,0 +1,58 @@
+WORKFLOW PHASE: Commercial Hotfix — Contracts / Invoices Runtime & UI
+Date: 2026-05-20
+Target: /super-admin/tenants → Commercial
+
+================================================================================
+ROOT CAUSE (HTTP 500 on contract create)
+================================================================================
+Primary: DB schema drift when migrate-commercial-simplification.cjs not applied.
+Secondary: commercialAccountId undefined when user lacks commercial.accounts.read.
+Tertiary: date/ISO serialization edge cases on operational DTOs.
+
+API now returns 503 with migration hint + PostgreSQL detail (logged to console).
+Panels self-load commercial account id for contracts/invoices tabs.
+
+================================================================================
+FIXES SHIPPED
+================================================================================
+API:
+  commercial-route-utils.ts (parseOptionalDate, isSchemaMismatchError)
+  commercial-contracts.ts — safe insert, schema-aware errors
+  commercial-invoices.ts — reminderDate fix, schema-aware errors
+  commercial-operational.ts — toIsoTimestamp
+
+UI:
+  CommercialPdfActions.tsx — visible Upload/Download/Replace/Missing PDF
+  OperationalContractsPanel — full wiring + canUpload
+  OperationalInvoicesPanel — full wiring
+  CommercialConsole — account load + canUploadContracts
+  CommercialAccountSection — responsible person + phone on account & contacts
+
+Hooks:
+  sanitizeOperationalPayload on create/update
+  API errors surface migration detail text
+
+================================================================================
+DELIVERABLES
+================================================================================
+[OK] commercial-hotfix-root-cause.md
+[OK] commercial-upload-runtime-fix.md
+[OK] commercial-contact-fields-fix.md
+[OK] commercial-ui-completion.md
+[OK] commercial-runtime-validation.md
+[OK] workflow-phase-commercial-hotfix-report.txt
+
+================================================================================
+TESTS
+================================================================================
+api-server commercial-contracts + commercial-invoices: PASS (25)
+ops-platform commercial static tests: PASS
+
+================================================================================
+DEPLOY
+================================================================================
+1. node scripts/migrate-commercial-simplification.cjs
+2. Deploy api-server + ops-platform
+3. Run manual E2E checklist in commercial-runtime-validation.md
+
+END REPORT

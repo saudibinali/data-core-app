@@ -35,7 +35,10 @@ export function CommercialConsole({
   canUploadDocuments,
 }: CommercialConsoleProps) {
   const tenantId = String(tenant.tenantId);
-  const { data: account } = useCommercialAccount(canReadAccount ? tenantId : undefined);
+  const needsCommercialAccount =
+    canReadAccount || canReadContacts || canReadContracts || canReadInvoices;
+  const { data: account } = useCommercialAccount(needsCommercialAccount ? tenantId : undefined);
+  const canUploadContracts = canWriteContracts || canUploadDocuments;
 
   return (
     <div className="space-y-6" data-testid="commercial-console">
@@ -66,6 +69,7 @@ export function CommercialConsole({
             tenantId={tenantId}
             commercialAccountId={account?.id}
             canWrite={canWriteContracts}
+            canUpload={canUploadContracts}
           />
         </section>
       )}

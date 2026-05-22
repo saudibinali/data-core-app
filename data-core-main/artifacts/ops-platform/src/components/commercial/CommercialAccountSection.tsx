@@ -188,25 +188,31 @@ export function CommercialAccountSection({
                     <dd className="font-medium">{account.legalEntityName}</dd>
                   </>
                 )}
-                {account.billingEmail && (
+                {account.contractOwnerName && (
                   <>
-                    <dt className="text-muted-foreground">Billing Email</dt>
-                    <dd className="font-medium">{account.billingEmail}</dd>
+                    <dt className="text-muted-foreground">Responsible person</dt>
+                    <dd className="font-medium">{account.contractOwnerName}</dd>
                   </>
                 )}
                 {account.billingPhone && (
                   <>
-                    <dt className="text-muted-foreground">Billing Phone</dt>
+                    <dt className="text-muted-foreground">Phone number</dt>
                     <dd className="font-medium">{account.billingPhone}</dd>
+                  </>
+                )}
+                {(account.contractOwnerEmail || account.billingEmail) && (
+                  <>
+                    <dt className="text-muted-foreground">Email address</dt>
+                    <dd className="font-medium">{account.contractOwnerEmail ?? account.billingEmail}</dd>
                   </>
                 )}
               </dl>
             )}
             {editingAccount && (
               <div className="space-y-3" data-testid="commercial-account-form">
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Account Name</label>
+                    <label className="text-xs text-muted-foreground">Account name</label>
                     <input
                       className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
                       value={accountForm.commercialAccountName ?? ""}
@@ -227,6 +233,46 @@ export function CommercialAccountSection({
                         <option key={s.code} value={s.code}>{s.label}</option>
                       ))}
                     </select>
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-xs text-muted-foreground">Legal entity</label>
+                    <input
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+                      value={accountForm.legalEntityName ?? ""}
+                      onChange={e => setAccountForm(f => ({ ...f, legalEntityName: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Responsible person name</label>
+                    <input
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+                      value={accountForm.contractOwnerName ?? ""}
+                      onChange={e => setAccountForm(f => ({ ...f, contractOwnerName: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Phone number</label>
+                    <input
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+                      type="tel"
+                      value={accountForm.billingPhone ?? ""}
+                      onChange={e => setAccountForm(f => ({ ...f, billingPhone: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-xs text-muted-foreground">Email address</label>
+                    <input
+                      className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+                      type="email"
+                      value={accountForm.contractOwnerEmail ?? accountForm.billingEmail ?? ""}
+                      onChange={e =>
+                        setAccountForm(f => ({
+                          ...f,
+                          contractOwnerEmail: e.target.value,
+                          billingEmail: e.target.value,
+                        }))
+                      }
+                    />
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -345,29 +391,45 @@ export function CommercialAccountSection({
                 <p className="text-xs font-semibold">
                   {editingContactId !== null ? "Edit Contact" : "New Contact"}
                 </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    className="rounded border px-2 py-1 text-xs"
-                    value={contactForm.contactName}
-                    onChange={e => setContactForm(f => ({ ...f, contactName: e.target.value }))}
-                    placeholder="Name*"
-                  />
-                  <input
-                    className="rounded border px-2 py-1 text-xs"
-                    type="email"
-                    value={contactForm.contactEmail}
-                    onChange={e => setContactForm(f => ({ ...f, contactEmail: e.target.value }))}
-                    placeholder="Email*"
-                  />
-                  <select
-                    className="rounded border px-2 py-1 text-xs col-span-2"
-                    value={contactForm.contactRole ?? "other"}
-                    onChange={e => setContactForm(f => ({ ...f, contactRole: e.target.value }))}
-                  >
-                    {BILLING_CONTACT_ROLE_CODES.map(r => (
-                      <option key={r} value={r}>{BILLING_CONTACT_ROLE_CONFIG[r].label}</option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Responsible person name *</label>
+                    <input
+                      className="w-full rounded border px-2 py-1 text-xs"
+                      value={contactForm.contactName}
+                      onChange={e => setContactForm(f => ({ ...f, contactName: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground">Phone number</label>
+                    <input
+                      className="w-full rounded border px-2 py-1 text-xs"
+                      type="tel"
+                      value={contactForm.contactPhone ?? ""}
+                      onChange={e => setContactForm(f => ({ ...f, contactPhone: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-xs text-muted-foreground">Email address *</label>
+                    <input
+                      className="w-full rounded border px-2 py-1 text-xs"
+                      type="email"
+                      value={contactForm.contactEmail}
+                      onChange={e => setContactForm(f => ({ ...f, contactEmail: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-xs text-muted-foreground">Role</label>
+                    <select
+                      className="w-full rounded border px-2 py-1 text-xs"
+                      value={contactForm.contactRole ?? "other"}
+                      onChange={e => setContactForm(f => ({ ...f, contactRole: e.target.value }))}
+                    >
+                      {BILLING_CONTACT_ROLE_CODES.map(r => (
+                        <option key={r} value={r}>{BILLING_CONTACT_ROLE_CONFIG[r].label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 {formError && <p className="text-xs text-destructive">{formError}</p>}
                 <div className="flex gap-2">

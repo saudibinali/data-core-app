@@ -3,8 +3,11 @@
  */
 
 import { useRef, useState } from "react";
-import { Receipt, PlusCircle, Loader2, Upload, Download, AlertTriangle } from "lucide-react";
+import { Receipt, PlusCircle, Loader2, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { CommercialPdfActions } from "@/components/commercial/CommercialPdfActions";
+import { useCommercialAccount } from "@/hooks/use-commercial";
 import {
   useTenantCommercialInvoices,
   useCreateTenantCommercialInvoice,
@@ -46,10 +49,12 @@ interface Props {
 
 export function OperationalInvoicesPanel({
   tenantId,
-  commercialAccountId,
+  commercialAccountId: commercialAccountIdProp,
   canWrite,
   canUpload,
 }: Props) {
+  const { data: account } = useCommercialAccount(tenantId);
+  const commercialAccountId = commercialAccountIdProp ?? account?.id;
   const { data: invoices = [], isLoading } = useTenantCommercialInvoices(tenantId);
   const { data: contracts = [] } = useTenantCommercialContracts(tenantId);
   const createM = useCreateTenantCommercialInvoice(tenantId);
@@ -139,14 +144,17 @@ export function OperationalInvoicesPanel({
           <span className="text-xs text-muted-foreground">({invoices.length} records)</span>
         </div>
         {canWrite && commercialAccountId && (
-          <button
+          <Button
             type="button"
+            variant="default"
+            size="sm"
+            className="h-8 text-xs gap-1"
             onClick={openCreate}
-            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            data-testid="operational-add-invoice-btn"
           >
             <PlusCircle className="w-3.5 h-3.5" />
             Add invoice record
-          </button>
+          </Button>
         )}
       </div>
 
@@ -155,6 +163,12 @@ export function OperationalInvoicesPanel({
       </p>
 
       {err ? <p className="text-xs text-destructive">{err}</p> : null}
+
+      {!commercialAccountId && !isLoading && (
+        <p className="text-xs text-amber-700 dark:text-amber-400 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          Create a commercial account above before adding invoices.
+        </p>
+      )}
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -193,35 +207,19 @@ export function OperationalInvoicesPanel({
                 {inv.notes ? (
                   <p className="text-xs text-muted-foreground border-t border-border/50 pt-2">{inv.notes}</p>
                 ) : null}
-                <div className="flex flex-wrap gap-2">
-                  {inv.hasDocument ? (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                      onClick={() => downloadM.mutate(inv.id)}
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Download PDF
-                    </button>
-                  ) : (
-                    <span className="text-xs text-amber-600">Missing PDF</span>
-                  )}
-                  {canUpload && (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 text-xs hover:underline"
-                      onClick={() => {
-                        setUploadTargetId(inv.id);
-                        fileRef.current?.click();
-                      }}
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      {inv.hasDocument ? "Replace PDF" : "Upload PDF"}
-                    </button>
-                  )}
+                <div className="flex flex-wrap items-center gap-2 border-t border-border/50 pt-2">
+                  <CommercialPdfActions
+                    hasDocument={inv.hasDocument}
+                    busy={busy}
+                    canUpload={canUpload}
+                    onUpload={() => {
+                      setUploadTargetId(inv.id);
+                      fileRef.current?.click();
+                    }}
+                    onDownload={() => downloadM.mutate(inv.id)}
+                  />
                   {canWrite && (
-                    <button type="button" className="text-xs hover:underline" onClick={() => {
+                    <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => {
                       setForm({
                         commercialAccountId: inv.commercialAccountId,
                         invoiceNumber: inv.invoiceNumber,
@@ -235,8 +233,8 @@ export function OperationalInvoicesPanel({
                       setEditId(inv.id);
                       setFormOpen(true);
                     }}>
-                      Edit
-                    </button>
+                      Edit details
+                    </Button>
                   )}
                 </div>
               </div>
@@ -285,15 +283,15 @@ export function OperationalInvoicesPanel({
               </select>
             </label>
             <label className="space-y-1 text-xs">
-              <span className="font-medium">Responsible person</span>
+              <span className="font-medium">Responsible person name</span>
               <input className={inp} value={form.responsiblePersonName ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonName: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs">
-              <span className="font-medium">Phone</span>
-              <input className={inp} value={form.responsiblePersonPhone ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonPhone: e.target.value }))} />
+              <span className="font-medium">Phone number</span>
+              <input className={inp} type="tel" value={form.responsiblePersonPhone ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonPhone: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs sm:col-span-2">
-              <span className="font-medium">Email</span>
+              <span className="font-medium">Email address</span>
               <input className={inp} type="email" value={form.responsiblePersonEmail ?? ""} onChange={(e) => setForm((f) => ({ ...f, responsiblePersonEmail: e.target.value }))} />
             </label>
             <label className="space-y-1 text-xs">

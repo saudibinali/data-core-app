@@ -204,6 +204,24 @@ describe("POST /platform/tenants/:tenantId/commercial-contracts", () => {
     expect(dbInsert).toHaveBeenCalled();
   });
 
+  it("creates contract with only title and contact fields (no dates)", async () => {
+    const res = await request(app)
+      .post(`/api/platform/tenants/${TID}/commercial-contracts`)
+      .send({
+        commercialAccountId: 10,
+        contractTitle: "Ops only",
+        responsiblePersonName: "Ali",
+        responsiblePersonPhone: "+966511111111",
+        responsiblePersonEmail: "ali@test.com",
+      });
+    expect(res.status).toBe(201);
+    const row = insertValuesLog.find(
+      (v): v is { contractStartDate?: string | null } =>
+        typeof v === "object" && v !== null && "contractStartDate" in v,
+    );
+    expect(row?.contractStartDate ?? null).toBeNull();
+  });
+
   it("records commercial_contract_created audit event", async () => {
     await request(app)
       .post(`/api/platform/tenants/${TID}/commercial-contracts`)

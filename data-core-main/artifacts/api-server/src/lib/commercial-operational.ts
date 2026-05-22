@@ -19,6 +19,12 @@ export type OperationalReminder = {
 
 const DAY_MS = 86400000;
 
+function toIsoTimestamp(v: Date | string): string {
+  if (v instanceof Date) return v.toISOString();
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
 function utcDay(isoDate: string, asOf: Date): number {
   const target = new Date(`${isoDate}T00:00:00.000Z`);
   const today = new Date(
@@ -112,8 +118,8 @@ export function toOperationalContract(
     hasDocument: !!doc,
     reminders,
     primaryReminder: pickPrimaryReminder(reminders),
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   };
 }
 
@@ -160,11 +166,11 @@ export function toOperationalInvoice(
     reminderDate,
     notes: row.notes ?? null,
     hasDocument: !!doc,
-    uploadedAt: doc?.uploadedAt?.toISOString() ?? null,
+    uploadedAt: doc?.uploadedAt ? toIsoTimestamp(doc.uploadedAt) : null,
     uploadedBy: doc?.uploadedBy ?? null,
     reminders,
     primaryReminder: pickPrimaryReminder(reminders),
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
+    createdAt: toIsoTimestamp(row.createdAt),
+    updatedAt: toIsoTimestamp(row.updatedAt),
   };
 }

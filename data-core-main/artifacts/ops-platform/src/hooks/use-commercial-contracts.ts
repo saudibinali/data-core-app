@@ -3,6 +3,7 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { sanitizeOperationalPayload } from "@/lib/commercial-payload";
 
 const BASE = "/api";
 const TOKEN_KEY = "ops_access_token";
@@ -24,8 +25,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { ...authHeaders(), ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    const body = await res.json().catch(() => ({})) as { error?: string; detail?: string };
+    const msg = body.detail ? `${body.error ?? "Error"}: ${body.detail}` : (body.error ?? `HTTP ${res.status}`);
+    throw new Error(msg);
   }
   return res.json() as Promise<T>;
 }
@@ -89,7 +91,10 @@ export function useCreateTenantCommercialContract(tenantId: string) {
     mutationFn: (input: OperationalContractInput) =>
       apiFetch<{ contract: OperationalContract }>(
         `/platform/tenants/${tenantId}/commercial-contracts`,
-        { method: "POST", body: JSON.stringify(input) },
+        {
+          method: "POST",
+          body: JSON.stringify(sanitizeOperationalPayload(input as Record<string, unknown>)),
+        },
       ),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["operational-contracts", tenantId] });
@@ -109,7 +114,7 @@ export function useUpdateTenantCommercialContract(tenantId: string) {
     }) =>
       apiFetch<{ contract: OperationalContract }>(
         `/platform/tenants/${tenantId}/commercial-contracts/${contractId}`,
-        { method: "PATCH", body: JSON.stringify(input) },
+        { method: "PATCH", body: JSON.stringify(sanitizeOperationalPayload(input as Record<string, unknown>)) },
       ),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["operational-contracts", tenantId] });

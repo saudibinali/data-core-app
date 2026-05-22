@@ -77,8 +77,8 @@ describe("operational contracts panel (static)", () => {
 
   it("OperationalContractsPanel exposes expected test ids", () => {
     expect(panel).toContain('data-testid="operational-contracts-panel"');
-    expect(panel).toContain("Upload new contract");
-    expect(panel).toContain("Download PDF");
+    expect(panel).toContain("Add contract record");
+    expect(panel).toContain("CommercialPdfActions");
   });
 
   it("does not add forbidden billing/payment/invoice UI in contract panel", () => {

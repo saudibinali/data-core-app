@@ -79,6 +79,7 @@ describe("operational invoices panel static safety", () => {
   it("exposes invoice test ids", () => {
     expect(panel).toContain('data-testid="operational-invoices-panel"');
     expect(panel).toContain("Add invoice record");
+    expect(panel).toContain("CommercialPdfActions");
   });
 
   it("does not implement forbidden features", () => {

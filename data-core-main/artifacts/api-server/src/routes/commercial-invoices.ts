@@ -26,6 +26,7 @@ import {
   hasPlatformPermission,
   type PlatformUserPermissionIdentity,
 } from "../lib/platform-permissions";
+import { isSchemaMismatchError, pgErrorInfo, parseOptionalDate } from "../lib/commercial-route-utils";
 import {
   invoiceDocumentStorage,
   INVOICE_PDF_MIME,
@@ -313,7 +314,13 @@ router.post(
       return;
     }
 
-    const fields = mapInvoiceFields(body, ctx.account.id, tenantId);
+    let fields: ReturnType<typeof mapInvoiceFields>;
+    try {
+      fields = mapInvoiceFields(body, ctx.account.id, tenantId);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : "Invalid invoice data" });
+      return;
+    }
     const actorId = req.userId!;
 
     try {
@@ -339,6 +346,16 @@ router.post(
     } catch (e: unknown) {
       if (isUniqueViolation(e)) {
         res.status(400).json({ error: "invoiceNumber must be unique for this tenant" });
+        return;
+      }
+      console.error("[commercial-invoices POST]", e);
+      if (isSchemaMismatchError(e)) {
+        const { message } = pgErrorInfo(e);
+        res.status(503).json({
+          error:
+            "Database schema is missing operational commercial columns. Run scripts/migrate-commercial-simplification.cjs",
+          detail: message,
+        });
         return;
       }
       throw e;
@@ -658,8 +675,10 @@ async function validateInvoiceBody(
     if (num === "MISSING" || num === "INVALID") return "invoiceNumber is invalid";
   }
 
-  const reminder = body.reminderDate !== undefined ? parseDate(body.reminderDate) : "MISSING";
-  if (reminder === "INVALID") return "reminderDate must be YYYY-MM-DD";
+  if (body.reminderDate !== undefined && body.reminderDate !== null && body.reminderDate !== "") {
+    const reminder = parseOptionalDate(body.reminderDate);
+    if (reminder === "INVALID") return "reminderDate must be YYYY-MM-DD";
+  }
 
   const email = strOpt(body.responsiblePersonEmail, MAX_NAME);
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -683,7 +702,8 @@ function mapInvoiceFields(
   workspaceId: number,
 ) {
   const invoiceNumber = strRequired(body.invoiceNumber, MAX_NUMBER);
-  const reminder = dateToNull(parseDate(body.reminderDate));
+  const reminder = parseOptionalDate(body.reminderDate);
+  if (reminder === "INVALID") throw new Error("reminderDate must be YYYY-MM-DD");
 
   let contractTermId: number | null = null;
   if (body.contractTermId !== undefined && body.contractTermId !== null && body.contractTermId !== "") {
