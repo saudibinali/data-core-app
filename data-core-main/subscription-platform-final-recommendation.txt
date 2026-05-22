@@ -1,0 +1,209 @@
+================================================================================
+SUBSCRIPTION PLATFORM — FINAL RECOMMENDATION (AUDIT ONLY)
+================================================================================
+Date: 2026-05-20
+Scope: /super-admin/tenants — subscriptions, contracts, entitlements, access
+Action: NO refactor / cleanup / redesign executed in this pass
+================================================================================
+
+DELIVERABLES
+------------
+1. subscription-platform-architecture-audit.md  — entities, APIs, runtime truth
+2. subscription-data-model-audit.md             — tables, relations, merge/remove
+3. subscription-console-redesign.md             — proposed UX (not built)
+4. This file                                    — executive decisions
+
+================================================================================
+FINAL VERDICT
+================================================================================
+
+The current system is best described as:
+
+  METADATA-HEAVY + UX-CONFUSING + PARTIALLY OVER-ENGINEERED
+  with ONE real runtime lever (workspace write access guard)
+
+It is NOT enterprise-ready as a unified "Subscription Management" product.
+It IS valuable as an HCM/multi-tenant ops platform with layered commercial
+metadata from phased delivery (P13 registry, P15 commercial, P16 workspace).
+
+Scores (1–5, 5 = mature enterprise SaaS):
+
+  Operational meaningfulness (runtime)     2  — only write guard enforced
+  Metadata completeness                    4  — rich stored fields
+  Enterprise-ready (unified UX + enforcement) 2
+  UX clarity                               1  — dual models exposed
+  Contract management                      3  — real CRUD, siloed in Commercial tab
+  Over-engineering                         4  — policy/quota/evaluation without automation
+  Underdefined (gaps)                      3  — route bugs, shadowed APIs, split truth
+
+================================================================================
+WHAT TO DELETE (eventually — not now)
+================================================================================
+
+Do NOT delete in place without migration and API fixes.
+
+  [LATER] tenant_subscriptions table — after merging into workspace_subscriptions
+  [LATER] tenant_entitlement_overrides — after P16/module-settings consolidation
+  [LATER] Entitlements tab (UI) — duplicate of Subscription accordion C
+  [LATER] SubscriptionConsole 8-card summary row — duplicate network + cognitive load
+  [LATER] Accordion labels "A) B) C)..." — internal phase noise
+  [LATER] enforcement_mode values implying automation until engine exists
+  [NOW - UX ONLY] "integration only" hero banner as primary message — demote to footnote
+
+Keep (do not delete):
+
+  commercial_contract_terms + commercial_accounts — operational module
+  workspace_subscriptions — target canonical subscription
+  workspace_access_enforcement — only runtime enforcement
+  workspace_module_settings — actual product module gates
+  Commercial tab (entire console)
+
+================================================================================
+WHAT TO SIMPLIFY
+================================================================================
+
+  1. Single subscription editor on Subscription tab (remove duplicate P13 modal
+     OR hide under "Advanced registry metadata").
+  2. Single entitlements surface (merge P13 overrides into workspace entitlements
+     OR module settings view).
+  3. One empty state: "Set up subscription" — hide B/C/D/E/F until record exists.
+  4. Contract UX: subscription form = picker only; lifecycle = Commercial tab.
+  5. Rename all user-visible "evaluation" / "policy" to "advisory" / "health check".
+  6. Workspace Access panel = label as "Controls workspace edits" (honest scope).
+
+================================================================================
+WHAT TO MERGE
+================================================================================
+
+  Data (future):
+    tenant_subscriptions  -->  workspace_subscriptions (+ compat read view)
+    tenant_entitlement_overrides  -->  workspace_entitlements OR drop in favor of
+                                       workspace_module_settings + quotas only
+
+  API (future):
+    Unify GET/PATCH /platform/tenants/:id/subscription on P16 handler
+    Fix P13 paths: /:tenantId/entitlements -> /platform/tenants/:tenantId/entitlements
+
+  UI (near-term, low risk):
+    Entitlements tab + Subscription section C  -->  one "Product access" section
+    Overview subscription fields + Subscription tab  -->  link, don't duplicate edit
+
+================================================================================
+WHAT TO DEFER (enterprise contract management)
+================================================================================
+
+  Signatures, amendments workflow, CLM integration, automated renewal execution,
+  dunning, payment gateway, e-invoicing (ZATCA), login suspension by subscription,
+  automatic module enforcement from entitlements/quota hard limits.
+
+  Current commercial_contract_terms is "contract registry + dates + status" —
+  adequate for manual finance ops, not full CLM.
+
+  Recommendation: KEEP module, IMPROVE discoverability, DEFER CLM features.
+
+================================================================================
+WHAT TO KEEP HCM-ONLY (core product)
+================================================================================
+
+  workspace / tenant HR ops, modules (HR, payroll, attendance, tickets, etc.),
+  workspace_module_settings governance, workspace RBAC, employee auth,
+  super-admin tenant registry list, lifecycle (workspace activate/suspend),
+  manual commercial invoices (finance record-keeping).
+
+  Subscription console should SUPPORT HCM tenancy, not become a billing product.
+
+================================================================================
+OVER-ENGINEERING (fake enterprise complexity)
+================================================================================
+
+  - 8 summary cards + overview section (duplicate fetches)
+  - Policy evaluator with enforcement_mode enum but isAutomaticAllowed: false
+  - "Apply recommended status" manual chain pretending to be automation
+  - Dual subscription + dual entitlements with no reconciliation job
+  - Quota hard_limit flag with no middleware enforcement
+  - canWorkspaceUseFeature() implemented but never called on routes
+  - Three module-gating mechanisms (settings, P13 overrides, P16 entitlements)
+  - Phase-coded accordion (P16-F integration console pattern)
+
+================================================================================
+ENTERPRISE-READY (what is genuinely solid)
+================================================================================
+
+  - Commercial account + contract CRUD with audit reasons and status transitions
+  - Workspace subscription status FSM with transition validation
+  - Platform permission matrix (granular super-admin capabilities)
+  - Workspace access write guard (real 403 for tenant users in read-only)
+  - Tenant lifecycle transitions with confirmation + reason
+  - Audit logging on subscription/access mutations (activity patterns in routes)
+  - Tenant-facing read-only subscription summary APIs (sanitized)
+  - Recent Create Subscription modal UX (labels, sections, dark Select)
+
+================================================================================
+CONTRACT SYSTEM — DIRECT ANSWERS
+================================================================================
+
+  Q: Does a contracts module exist?
+  A: YES — commercial_contract_terms, APIs, ContractTermsSection UI (Commercial tab).
+
+  Q: DB tables?
+  A: YES — commercial_accounts, commercial_contract_terms, invoices, payments.
+
+  Q: Routes?
+  A: YES — /api/platform/tenants/:tenantId/commercial-contracts (+ status PATCH).
+
+  Q: UI screens?
+  A: YES — Commercial tab accordion "Contracts & Renewals" (inline forms).
+      Partial link in Subscription State (dropdown only).
+
+  Q: Operational or empty relation?
+  A: OPERATIONAL for manual CRUD; NOT wired to enforce access/modules/login.
+      Link on workspace_subscriptions is metadata pointer only.
+
+  Q: Linked to tenant, subscription, or billing?
+  A: Tenant (workspace) + commercial_account; optional link from subscription row;
+     billing via invoices/payments (manual, not payment processor).
+
+  Q: Lifecycle, renewals, attachments, signatures, amendments?
+  A: Lifecycle/status + renewal fields YES (data model).
+     Attachments/signatures/amendments NO (not in scope).
+     Commercial agreements = structured terms + dates + value, not CLM.
+
+  Q: Delete, simplify, or future CLM?
+  A: DO NOT DELETE. SIMPLIFY UX coupling (picker + deep link). DEFER CLM.
+     NOT a fake placeholder — under-exposed relative to build cost.
+
+================================================================================
+RUNTIME — DIRECT ANSWERS
+================================================================================
+
+  Subscription status stops login?           NO (allowLogin=false rejected)
+  Subscription status blocks writes?         ONLY if operator sets access mode
+  Entitlements enforced on routes?           NO (resolver unused in middleware)
+  Quotas enforced?                           NO
+  Policy engine automatic?                   NO (advisory only)
+  Contracts affect runtime?                  NO
+  Access modes runtime-driven?               YES (write guard only)
+  Module enablement runtime?                  YES (workspace_module_settings path)
+
+================================================================================
+RECOMMENDED NEXT STEPS (when user approves — not done in audit)
+================================================================================
+
+  Priority 0 (correctness):
+    - Fix GET/PATCH subscription route shadowing (P13 vs P16)
+    - Fix P13 entitlements route paths in tenants.ts
+
+  Priority 1 (UX, no schema):
+    - Implement subscription-console-redesign.md Phase UX-1
+
+  Priority 2 (consolidation plan):
+    - Data migration design tenant_* -> workspace_*
+    - Deprecate Entitlements tab
+
+  Priority 3 (product decision):
+    - Choose: metadata registry OR enforcement platform
+    - If enforcement: wire entitlements + quotas + status -> access/login
+
+================================================================================
+END OF AUDIT — NO CODE CHANGES IN THIS TASK
+================================================================================

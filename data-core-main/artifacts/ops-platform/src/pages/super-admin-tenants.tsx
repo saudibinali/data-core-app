@@ -142,7 +142,7 @@ import {
   type BillingContactRole,
 } from "@/lib/commercial-config";
 import { CommercialConsole } from "@/components/commercial/CommercialConsole";
-import { SubscriptionConsole } from "@/components/subscription/SubscriptionConsole";
+import { TenantCommercialConsole } from "@/components/subscription/TenantCommercialConsole";
 import {
   PLAN_CODE_CONFIG,
   SUBSCRIPTION_STATUS_CONFIG,
@@ -2216,28 +2216,8 @@ function TenantAdminConsole({
     authUser ?? {},
     "tenant.workspace_subscription.status.change",
   );
-  const canReadWorkspaceEntitlements = hasPlatformPermissionClient(authUser ?? {}, "platform.entitlements.read");
-  const canWriteWorkspaceEntitlements = canPerformPlatformAction(
-    authUser ?? {},
-    "tenant.workspace_entitlements.update",
-  );
-  const canReadWorkspaceQuotas = hasPlatformPermissionClient(authUser ?? {}, "platform.quotas.read");
-  const canWriteWorkspaceQuotas = canPerformPlatformAction(
-    authUser ?? {},
-    "tenant.workspace_quotas.update",
-  );
-  const canReadWorkspaceSubscriptionPolicies = hasPlatformPermissionClient(
-    authUser ?? {},
-    "platform.subscriptionPolicies.read",
-  );
-  const canWriteWorkspaceSubscriptionPolicies = canPerformPlatformAction(
-    authUser ?? {},
-    "tenant.workspace_subscription_policies.update",
-  );
-  const canEvaluateWorkspaceSubscriptionPolicies = hasPlatformPermissionClient(
-    authUser ?? {},
-    "platform.subscriptionPolicies.evaluate",
-  );
+  const canReadProductModules = hasPlatformPermissionClient(authUser ?? {}, "tenants.read");
+  const canUpdateProductModules = hasPlatformPermissionClient(authUser ?? {}, "platform.modules.govern");
   const canReadWorkspaceAccess = hasPlatformPermissionClient(
     authUser ?? {},
     "platform.workspaceAccess.read",
@@ -2329,41 +2309,38 @@ function TenantAdminConsole({
             )}
             {effectiveTab === "subscription" && (
               <div data-testid="console-tab-content-subscription">
-                <SubscriptionConsole
+                <TenantCommercialConsole
                   tenantId={String(tenant.tenantId)}
-                  registrySubscriptionSlot={
-                    canReadTenantRegistrySubscription ? (
-                      <SubscriptionManagementPanel
-                        tenant={tenant}
-                        canWrite={canWriteSubscription}
-                      />
-                    ) : undefined
-                  }
+                  tenantDisplayName={tenant.tenantDisplayName}
                   canReadSubscription={canReadWorkspaceSubscription}
                   canUpdateSubscription={canWriteWorkspaceSubscription}
                   canChangeSubscriptionStatus={canChangeWorkspaceSubscriptionStatus}
-                  canReadEntitlements={canReadWorkspaceEntitlements}
-                  canUpdateEntitlements={canWriteWorkspaceEntitlements}
-                  canReadQuotas={canReadWorkspaceQuotas}
-                  canUpdateQuotas={canWriteWorkspaceQuotas}
-                  canReadSubscriptionPolicies={canReadWorkspaceSubscriptionPolicies}
-                  canUpdateSubscriptionPolicies={canWriteWorkspaceSubscriptionPolicies}
-                  canEvaluateSubscriptionPolicies={canEvaluateWorkspaceSubscriptionPolicies}
-                  canApplyRecommendedSubscriptionStatus={canChangeWorkspaceSubscriptionStatus}
+                  canReadProductModules={canReadProductModules}
+                  canUpdateProductModules={canUpdateProductModules}
                   canReadWorkspaceAccess={canReadWorkspaceAccess}
                   canUpdateWorkspaceAccess={canUpdateWorkspaceAccess}
                   canEvaluateWorkspaceAccess={canEvaluateWorkspaceAccess}
-                />
-                <span
-                  data-testid="console-tab-content-subscription-entitlements"
-                  className="sr-only"
-                  aria-hidden
+                  onOpenCommercialTab={() => setActiveTab("commercial")}
                 />
               </div>
             )}
             {effectiveTab === "entitlements" && (
               <div data-testid="console-tab-content-entitlements">
-                <EntitlementPanel tenant={tenant} canWrite={canWriteEntitlements} />
+                <p className="text-sm text-muted-foreground mb-3">
+                  Product access is managed under the Subscription tab.
+                </p>
+                <TenantCommercialConsole
+                  tenantId={String(tenant.tenantId)}
+                  tenantDisplayName={tenant.tenantDisplayName}
+                  canReadSubscription={false}
+                  canUpdateSubscription={false}
+                  canChangeSubscriptionStatus={false}
+                  canReadProductModules={canReadProductModules}
+                  canUpdateProductModules={canUpdateProductModules}
+                  canReadWorkspaceAccess={false}
+                  canUpdateWorkspaceAccess={false}
+                  canEvaluateWorkspaceAccess={false}
+                />
               </div>
             )}
             {effectiveTab === "usage" && (

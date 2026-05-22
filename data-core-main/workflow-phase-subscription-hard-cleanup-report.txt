@@ -1,0 +1,46 @@
+WORKFLOW: Subscription Platform Hard Cleanup
+DATE: 2026-05-20
+STATUS: IMPLEMENTED (deploy + DB drop pending operator run)
+
+SUMMARY
+-------
+Consolidated Enterprise HCM subscription/commercial model to a single canonical stack.
+Removed P13/P16 parallel subscription, entitlement, quota, and policy layers from active routes and super-admin UX.
+
+CANONICAL MODEL
+---------------
+- workspace_subscriptions (only subscription truth)
+- workspace_module_settings (only product access truth)
+- workspace_access_enforcement (only runtime write gate)
+- commercial_* + invoices/payments (unchanged)
+
+CODE DELIVERED
+--------------
+API: canonical registry loader, tenant list batch subscription load, product-modules routes,
+     P13 route removal from tenants.ts, router cleanup in index.ts, platform stats fix.
+UI:  TenantCommercialConsole, ProductModulesPanel, super-admin tenants rewiring.
+DATA: migrate-canonical-subscription.cjs, drop-legacy-subscription-tables.sql
+
+DOCS
+----
+canonical-subscription-architecture.md
+subscription-cleanup-execution-plan.md
+subscription-runtime-final-state.md
+subscription-api-final-state.md
+subscription-db-cleanup-map.md
+subscription-ui-rebuild-plan.md
+subscription-removal-log.md
+subscription-migration-validation.md
+
+BUILD
+-----
+api-server: pnpm run build — OK
+ops-platform: pnpm run build — OK
+
+OPERATOR NEXT STEPS
+-------------------
+1. Backup DB
+2. node scripts/migrate-canonical-subscription.cjs
+3. Deploy API + ops-platform
+4. Validate per subscription-migration-validation.md
+5. psql -f scripts/drop-legacy-subscription-tables.sql

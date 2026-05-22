@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file   routes/tenants.ts
  * @phase  P13-A - Platform Tenant Registry & Workspace Inventory Foundations
  *         P13-B - Workspace Lifecycle Management & Controlled State Transitions
@@ -25,9 +25,15 @@
 
 import { Router, type IRouter }    from "express";
 import { db }                       from "@workspace/db";
-import { workspacesTable, usersTable, activityLogsTable, tenantSubscriptionsTable, tenantEntitlementOverridesTable, workflowDefinitionsTable } from "@workspace/db";
+import {
+  workspacesTable,
+  usersTable,
+  workspaceSubscriptionsTable,
+  workspaceModuleSettingsTable,
+  workflowDefinitionsTable,
+} from "@workspace/db";
 import { eq, inArray, and, sql }    from "drizzle-orm";
-import { type AuthRequest, requireAuth, requireSuperAdmin, requirePlatformPermission } from "../middlewares/requireAuth";
+import { type AuthRequest, requireAuth, requirePlatformPermission } from "../middlewares/requireAuth";
 import {
   buildTenantProfile,
   applyTenantFilters,
@@ -36,20 +42,13 @@ import {
   type RawSubscriptionRow,
 } from "../lib/tenant-registry";
 import { workspaceLifecycleService } from "../lib/platform/workspace-lifecycle-service";
+import { deriveSubscriptionStatus } from "../lib/subscription-lifecycle";
+import { deriveTenantEntitlementProfile } from "../lib/tenant-entitlements";
 import {
-  validateSubscriptionMetadataUpdate,
-  buildSubscriptionAuditPayload,
-  deriveSubscriptionStatus,
-  type SubscriptionUpdateRequest,
-} from "../lib/subscription-lifecycle";
-import {
-  deriveTenantEntitlementProfile,
-  validateEntitlementOverridesBatch,
-  buildEntitlementAuditPayload,
-  type EntitlementOverrideRecord,
-  type EntitlementOverridesBatchInput,
-  type OverrideType,
-} from "../lib/tenant-entitlements";
+  snapshotToRawSubscriptionRow,
+  workspaceSubscriptionToSnapshot,
+} from "../lib/canonical-subscription-registry";
+import { loadCanonicalSubscriptionRawRow } from "../lib/canonical-subscription-loader";
 import {
   deriveTenantUsageProfile,
   summarizeUsageWarnings,
@@ -69,9 +68,9 @@ import {
 
 const router: IRouter = Router();
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // collectTenantRawUsage  (local helper - read-only, no side effects)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function collectTenantRawUsage(
   workspaceId:       number,
@@ -106,11 +105,11 @@ async function collectTenantRawUsage(
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants
 // List all platform tenant profiles. Super-admin only.
 // Query params: status, subscriptionStatus, riskLevel, search
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get(
   "/platform/tenants",
   requireAuth,
@@ -170,9 +169,26 @@ router.get(
       }
     }
 
-    const profiles = workspaces.map(ws =>
-      buildTenantProfile(ws, ownerMap.get(ws.id) ?? null, now),
+    const subscriptionRows =
+      workspaceIds.length > 0
+        ? await db
+            .select()
+            .from(workspaceSubscriptionsTable)
+            .where(inArray(workspaceSubscriptionsTable.workspaceId, workspaceIds))
+        : [];
+    const subscriptionByWorkspace = new Map(
+      subscriptionRows.map((s) => [s.workspaceId, s]),
     );
+
+    const profiles = workspaces.map((ws) => {
+      const sub = subscriptionByWorkspace.get(ws.id);
+      const rawSub: RawSubscriptionRow | null = sub
+        ? (snapshotToRawSubscriptionRow(
+            workspaceSubscriptionToSnapshot(sub, now),
+          ) as RawSubscriptionRow)
+        : null;
+      return buildTenantProfile(ws, ownerMap.get(ws.id) ?? null, now, rawSub);
+    });
 
     const filters: TenantFilterOptions = { status, subscriptionStatus, riskLevel, search };
     const filtered = applyTenantFilters(profiles, filters);
@@ -189,10 +205,10 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants/:tenantId
 // Single tenant profile. Super-admin only.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get(
   "/platform/tenants/:tenantId",
   requireAuth,
@@ -234,7 +250,8 @@ router.get(
       .where(and(eq(usersTable.workspaceId, workspaceId), eq(usersTable.role, "admin")))
       .limit(1);
 
-    const profile = buildTenantProfile(workspace, owner ?? null, now);
+    const { raw: rawSub } = await loadCanonicalSubscriptionRawRow(workspaceId, now);
+    const profile = buildTenantProfile(workspace, owner ?? null, now, rawSub);
 
     req.log.info({
       actorId:  req.userId,
@@ -246,11 +263,11 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants/:tenantId/summary
 // Lightweight tenant summary - no owner lookup, reduced payload.
 // Super-admin only.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.get(
   "/platform/tenants/:tenantId/summary",
   requireAuth,
@@ -286,7 +303,8 @@ router.get(
       return;
     }
 
-    const profile = buildTenantProfile(workspace, null, now);
+    const { raw: rawSub } = await loadCanonicalSubscriptionRawRow(workspaceId, now);
+    const profile = buildTenantProfile(workspace, null, now, rawSub);
 
     req.log.info({
       actorId:  req.userId,
@@ -313,11 +331,11 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // PATCH /platform/tenants/:tenantId/lifecycle
 // Controlled workspace lifecycle state transition. Super-admin only.
 // Body: { action, reason, internalNote?, confirmation }
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 router.patch(
   "/platform/tenants/:tenantId/lifecycle",
   requireAuth,
@@ -378,7 +396,8 @@ router.patch(
         res.status(404).json({ error: "Tenant not found" });
         return;
       }
-      const profile = buildTenantProfile(workspace, owner ?? null, now);
+      const { raw: rawSub } = await loadCanonicalSubscriptionRawRow(workspaceId, now);
+      const profile = buildTenantProfile(workspace, owner ?? null, now, rawSub);
 
       res.json({ tenant: profile, lifecycleEvent: auditPayload });
     } catch (err) {
@@ -403,569 +422,10 @@ router.patch(
     }
   },
 );
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /platform/tenants/:tenantId/subscription
-// Read subscription metadata for a tenant. Super-admin only.
-// Returns subscription fields and derived status.
-// Returns isConfigured=false when no subscription record exists - not 404.
-// ─────────────────────────────────────────────────────────────────────────────
-router.get(
-  "/platform/tenants/:tenantId/subscription",
-  requireAuth,
-  requirePlatformPermission("subscriptions.read"),
-  async (req: AuthRequest, res): Promise<void> => {
-    const workspaceId = parseInt(String((req.params as { tenantId: string }).tenantId ?? ""), 10);
-    if (isNaN(workspaceId) || workspaceId <= 0) {
-      res.status(400).json({ error: "Invalid tenantId - must be a positive integer" });
-      return;
-    }
-
-    const now = new Date();
-
-    // Verify tenant exists
-    const [workspace] = await db
-      .select({ id: workspacesTable.id, name: workspacesTable.name })
-      .from(workspacesTable)
-      .where(eq(workspacesTable.id, workspaceId));
-
-    if (!workspace) {
-      res.status(404).json({ error: "Tenant not found" });
-      return;
-    }
-
-    const [sub] = await db
-      .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, workspaceId))
-      .limit(1);
-
-    const isConfigured = !!sub;
-
-    const subFields: Partial<RawSubscriptionRow> | null = sub
-      ? {
-          planCode:             sub.planCode,
-          subscriptionStatus:   sub.subscriptionStatus,
-          billingPeriodStart:   sub.billingPeriodStart,
-          billingPeriodEnd:     sub.billingPeriodEnd,
-          renewalDueAt:         sub.renewalDueAt,
-          trialStartedAt:       sub.trialStartedAt,
-          trialEndsAt:          sub.trialEndsAt,
-          gracePeriodStartedAt: sub.gracePeriodStartedAt,
-          gracePeriodEndsAt:    sub.gracePeriodEndsAt,
-          cancelledAt:          sub.cancelledAt,
-          suspendedAt:          sub.suspendedAt,
-        }
-      : null;
-
-    const derivedStatus = sub
-      ? deriveSubscriptionStatus(
-          {
-            planCode:             sub.planCode,
-            subscriptionStatus:   sub.subscriptionStatus,
-            billingPeriodStart:   sub.billingPeriodStart,
-            billingPeriodEnd:     sub.billingPeriodEnd,
-            renewalDueAt:         sub.renewalDueAt,
-            trialStartedAt:       sub.trialStartedAt,
-            trialEndsAt:          sub.trialEndsAt,
-            gracePeriodStartedAt: sub.gracePeriodStartedAt,
-            gracePeriodEndsAt:    sub.gracePeriodEndsAt,
-            cancelledAt:          sub.cancelledAt,
-            suspendedAt:          sub.suspendedAt,
-          },
-          now,
-        )
-      : "unknown";
-
-    req.log.info({
-      actorId:     req.userId,
-      tenantId:    workspaceId,
-      isConfigured,
-      action:      "tenant_subscription_read",
-    });
-
-    void subFields; // used for type narrowing; actual response built from sub
-
-    res.json({
-      tenantId:             String(workspaceId),
-      workspaceId,
-      isConfigured,
-      planCode:             sub?.planCode             ?? null,
-      subscriptionStatus:   sub?.subscriptionStatus   ?? "unknown",
-      derivedStatus,
-      billingPeriodStart:   sub?.billingPeriodStart?.toISOString()   ?? null,
-      billingPeriodEnd:     sub?.billingPeriodEnd?.toISOString()     ?? null,
-      renewalDueAt:         sub?.renewalDueAt?.toISOString()         ?? null,
-      trialStartedAt:       sub?.trialStartedAt?.toISOString()       ?? null,
-      trialEndsAt:          sub?.trialEndsAt?.toISOString()          ?? null,
-      gracePeriodStartedAt: sub?.gracePeriodStartedAt?.toISOString() ?? null,
-      gracePeriodEndsAt:    sub?.gracePeriodEndsAt?.toISOString()    ?? null,
-      cancelledAt:          sub?.cancelledAt?.toISOString()          ?? null,
-      suspendedAt:          sub?.suspendedAt?.toISOString()          ?? null,
-      metadataJson:         sub?.metadataJson                        ?? null,
-      reason:               sub?.reason                              ?? null,
-      createdAt:            sub?.createdAt?.toISOString()            ?? null,
-      updatedAt:            sub?.updatedAt?.toISOString()            ?? null,
-    });
-  },
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /platform/tenants/:tenantId/subscription
-// Update subscription metadata. Super-admin only.
-// Body: { planCode?, subscriptionStatus?, billingPeriodStart?, billingPeriodEnd?,
-//         renewalDueAt?, trialStartedAt?, trialEndsAt?, gracePeriodStartedAt?,
-//         gracePeriodEndsAt?, cancelledAt?, suspendedAt?, metadataJson?,
-//         reason, confirmation }
-//
-// SAFETY CONTRACT:
-//   - Metadata only - no payment processing, no invoice, no charge, no tax.
-//   - No automatic workspace.status changes - subscriptions are independent.
-//   - Requires reason (≥10 chars) and confirmation=true.
-//   - All changes audit-logged to activity_logs before response.
-// ─────────────────────────────────────────────────────────────────────────────
-router.patch(
-  "/platform/tenants/:tenantId/subscription",
-  requireAuth,
-  requirePlatformPermission("subscriptions.update"),
-  async (req: AuthRequest, res): Promise<void> => {
-    const workspaceId = parseInt(String((req.params as { tenantId: string }).tenantId ?? ""), 10);
-    if (isNaN(workspaceId) || workspaceId <= 0) {
-      res.status(400).json({ error: "Invalid tenantId - must be a positive integer" });
-      return;
-    }
-
-    const body = req.body as Partial<SubscriptionUpdateRequest>;
-    const now   = new Date();
-
-    // Verify tenant exists
-    const [workspace] = await db
-      .select({
-        id:              workspacesTable.id,
-        name:            workspacesTable.name,
-        slug:            workspacesTable.slug,
-        status:          workspacesTable.status,
-        logoUrl:         workspacesTable.logoUrl,
-        primaryColor:    workspacesTable.primaryColor,
-        userCount:       sql<number>`(select count(*)::int from users where workspace_id = ${workspacesTable.id})`,
-        ticketCount:     sql<number>`(select count(*)::int from tickets where workspace_id = ${workspacesTable.id})`,
-        departmentCount: sql<number>`(select count(*)::int from departments where workspace_id = ${workspacesTable.id})`,
-        createdAt:       workspacesTable.createdAt,
-        updatedAt:       workspacesTable.updatedAt,
-      })
-      .from(workspacesTable)
-      .where(eq(workspacesTable.id, workspaceId));
-
-    if (!workspace) {
-      res.status(404).json({ error: "Tenant not found" });
-      return;
-    }
-
-    // Validate request
-    const updateRequest: SubscriptionUpdateRequest = {
-      planCode:             body.planCode,
-      subscriptionStatus:   body.subscriptionStatus,
-      billingPeriodStart:   body.billingPeriodStart ?? null,
-      billingPeriodEnd:     body.billingPeriodEnd   ?? null,
-      renewalDueAt:         body.renewalDueAt       ?? null,
-      trialStartedAt:       body.trialStartedAt     ?? null,
-      trialEndsAt:          body.trialEndsAt        ?? null,
-      gracePeriodStartedAt: body.gracePeriodStartedAt ?? null,
-      gracePeriodEndsAt:    body.gracePeriodEndsAt  ?? null,
-      cancelledAt:          body.cancelledAt        ?? null,
-      suspendedAt:          body.suspendedAt        ?? null,
-      metadataJson:         body.metadataJson,
-      reason:               String(body.reason ?? ""),
-      confirmation:         body.confirmation === true,
-    };
-
-    const validation = validateSubscriptionMetadataUpdate(updateRequest);
-    if (!validation.valid) {
-      res.status(400).json({ error: validation.error, code: validation.code });
-      return;
-    }
-
-    // Load existing subscription for audit diff
-    const [existingSub] = await db
-      .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, workspaceId))
-      .limit(1);
-
-    const previousStatus  = existingSub?.subscriptionStatus ?? "unknown";
-    const previousPlan    = existingSub?.planCode           ?? null;
-
-    // Build the upsert values
-    const toDate = (v: string | null | undefined): Date | null =>
-      (v && v !== "") ? new Date(v) : null;
-
-    const upsertValues = {
-      workspaceId,
-      planCode:             updateRequest.planCode             ?? existingSub?.planCode           ?? null,
-      subscriptionStatus:   updateRequest.subscriptionStatus   ?? existingSub?.subscriptionStatus ?? "unknown",
-      billingPeriodStart:   toDate(updateRequest.billingPeriodStart)   ?? existingSub?.billingPeriodStart   ?? null,
-      billingPeriodEnd:     toDate(updateRequest.billingPeriodEnd)     ?? existingSub?.billingPeriodEnd     ?? null,
-      renewalDueAt:         toDate(updateRequest.renewalDueAt)         ?? existingSub?.renewalDueAt         ?? null,
-      trialStartedAt:       toDate(updateRequest.trialStartedAt)       ?? existingSub?.trialStartedAt       ?? null,
-      trialEndsAt:          toDate(updateRequest.trialEndsAt)          ?? existingSub?.trialEndsAt          ?? null,
-      gracePeriodStartedAt: toDate(updateRequest.gracePeriodStartedAt) ?? existingSub?.gracePeriodStartedAt ?? null,
-      gracePeriodEndsAt:    toDate(updateRequest.gracePeriodEndsAt)    ?? existingSub?.gracePeriodEndsAt    ?? null,
-      cancelledAt:          toDate(updateRequest.cancelledAt)          ?? existingSub?.cancelledAt          ?? null,
-      suspendedAt:          toDate(updateRequest.suspendedAt)          ?? existingSub?.suspendedAt          ?? null,
-      metadataJson:         updateRequest.metadataJson !== undefined ? updateRequest.metadataJson : existingSub?.metadataJson ?? null,
-      reason:               updateRequest.reason.trim(),
-      updatedBy:            req.userId!,
-    };
-
-    // Determine which fields changed for audit
-    const changedFields: string[] = [];
-    const checkField = (key: string, newVal: unknown, oldVal: unknown) => {
-      const n = newVal instanceof Date ? newVal.toISOString() : String(newVal ?? "");
-      const o = oldVal instanceof Date ? oldVal.toISOString() : String(oldVal ?? "");
-      if (n !== o) changedFields.push(key);
-    };
-    checkField("planCode",             upsertValues.planCode,             existingSub?.planCode);
-    checkField("subscriptionStatus",   upsertValues.subscriptionStatus,   existingSub?.subscriptionStatus);
-    checkField("billingPeriodStart",   upsertValues.billingPeriodStart,   existingSub?.billingPeriodStart);
-    checkField("billingPeriodEnd",     upsertValues.billingPeriodEnd,     existingSub?.billingPeriodEnd);
-    checkField("renewalDueAt",         upsertValues.renewalDueAt,         existingSub?.renewalDueAt);
-    checkField("trialStartedAt",       upsertValues.trialStartedAt,       existingSub?.trialStartedAt);
-    checkField("trialEndsAt",          upsertValues.trialEndsAt,          existingSub?.trialEndsAt);
-    checkField("gracePeriodStartedAt", upsertValues.gracePeriodStartedAt, existingSub?.gracePeriodStartedAt);
-    checkField("gracePeriodEndsAt",    upsertValues.gracePeriodEndsAt,    existingSub?.gracePeriodEndsAt);
-    checkField("cancelledAt",          upsertValues.cancelledAt,          existingSub?.cancelledAt);
-    checkField("suspendedAt",          upsertValues.suspendedAt,          existingSub?.suspendedAt);
-
-    // Upsert subscription record
-    await db
-      .insert(tenantSubscriptionsTable)
-      .values(upsertValues)
-      .onConflictDoUpdate({
-        target: tenantSubscriptionsTable.workspaceId,
-        set:    {
-          planCode:             upsertValues.planCode,
-          subscriptionStatus:   upsertValues.subscriptionStatus,
-          billingPeriodStart:   upsertValues.billingPeriodStart,
-          billingPeriodEnd:     upsertValues.billingPeriodEnd,
-          renewalDueAt:         upsertValues.renewalDueAt,
-          trialStartedAt:       upsertValues.trialStartedAt,
-          trialEndsAt:          upsertValues.trialEndsAt,
-          gracePeriodStartedAt: upsertValues.gracePeriodStartedAt,
-          gracePeriodEndsAt:    upsertValues.gracePeriodEndsAt,
-          cancelledAt:          upsertValues.cancelledAt,
-          suspendedAt:          upsertValues.suspendedAt,
-          metadataJson:         upsertValues.metadataJson,
-          reason:               upsertValues.reason,
-          updatedBy:            upsertValues.updatedBy,
-          updatedAt:            now,
-        },
-      });
-
-    // Derive new status for audit
-    const newStatus = deriveSubscriptionStatus(
-      {
-        planCode:             upsertValues.planCode,
-        subscriptionStatus:   upsertValues.subscriptionStatus,
-        billingPeriodStart:   upsertValues.billingPeriodStart,
-        billingPeriodEnd:     upsertValues.billingPeriodEnd,
-        renewalDueAt:         upsertValues.renewalDueAt,
-        trialStartedAt:       upsertValues.trialStartedAt,
-        trialEndsAt:          upsertValues.trialEndsAt,
-        gracePeriodStartedAt: upsertValues.gracePeriodStartedAt,
-        gracePeriodEndsAt:    upsertValues.gracePeriodEndsAt,
-        cancelledAt:          upsertValues.cancelledAt,
-        suspendedAt:          upsertValues.suspendedAt,
-      },
-      now,
-    );
-
-    const auditPayload = buildSubscriptionAuditPayload({
-      tenantId:                   String(workspaceId),
-      workspaceId,
-      actorId:                    req.userId!,
-      previousSubscriptionStatus: previousStatus,
-      newSubscriptionStatus:      newStatus,
-      previousPlanCode:           previousPlan,
-      newPlanCode:                upsertValues.planCode,
-      changedFields,
-      reason:                     updateRequest.reason.trim(),
-      now,
-    });
-
-    await db.insert(activityLogsTable).values({
-      userId:     req.userId!,
-      workspaceId,
-      action:     auditPayload.eventType,
-      metadata:   JSON.stringify({
-        previousSubscriptionStatus: auditPayload.previousSubscriptionStatus,
-        newSubscriptionStatus:      auditPayload.newSubscriptionStatus,
-        previousPlanCode:           auditPayload.previousPlanCode,
-        newPlanCode:                auditPayload.newPlanCode,
-        changedFields:              auditPayload.changedFields,
-        reason:                     auditPayload.reason,
-        tenantId:                   auditPayload.tenantId,
-      }),
-    });
-
-    req.log.info({
-      actorId:                    req.userId,
-      tenantId:                   workspaceId,
-      workspaceName:              workspace.name,
-      action:                     "tenant_subscription_updated",
-      previousSubscriptionStatus: previousStatus,
-      newSubscriptionStatus:      newStatus,
-      changedFields,
-    });
-
-    // Return updated tenant profile (with subscription) + audit payload
-    const [owner] = await db
-      .select({ id: usersTable.id, email: usersTable.email, fullName: usersTable.fullName })
-      .from(usersTable)
-      .where(and(eq(usersTable.workspaceId, workspaceId), eq(usersTable.role, "admin")))
-      .limit(1);
-
-    const subRow: RawSubscriptionRow = {
-      planCode:             upsertValues.planCode,
-      subscriptionStatus:   upsertValues.subscriptionStatus,
-      billingPeriodStart:   upsertValues.billingPeriodStart,
-      billingPeriodEnd:     upsertValues.billingPeriodEnd,
-      renewalDueAt:         upsertValues.renewalDueAt,
-      trialStartedAt:       upsertValues.trialStartedAt,
-      trialEndsAt:          upsertValues.trialEndsAt,
-      gracePeriodStartedAt: upsertValues.gracePeriodStartedAt,
-      gracePeriodEndsAt:    upsertValues.gracePeriodEndsAt,
-      cancelledAt:          upsertValues.cancelledAt,
-      suspendedAt:          upsertValues.suspendedAt,
-    };
-
-    const profile = buildTenantProfile(workspace, owner ?? null, now, subRow);
-
-    res.json({
-      subscription: {
-        tenantId:             String(workspaceId),
-        workspaceId,
-        isConfigured:         true,
-        planCode:             upsertValues.planCode,
-        subscriptionStatus:   upsertValues.subscriptionStatus,
-        derivedStatus:        newStatus,
-        billingPeriodStart:   upsertValues.billingPeriodStart?.toISOString()   ?? null,
-        billingPeriodEnd:     upsertValues.billingPeriodEnd?.toISOString()     ?? null,
-        renewalDueAt:         upsertValues.renewalDueAt?.toISOString()         ?? null,
-        trialStartedAt:       upsertValues.trialStartedAt?.toISOString()       ?? null,
-        trialEndsAt:          upsertValues.trialEndsAt?.toISOString()          ?? null,
-        gracePeriodStartedAt: upsertValues.gracePeriodStartedAt?.toISOString() ?? null,
-        gracePeriodEndsAt:    upsertValues.gracePeriodEndsAt?.toISOString()    ?? null,
-        cancelledAt:          upsertValues.cancelledAt?.toISOString()          ?? null,
-        suspendedAt:          upsertValues.suspendedAt?.toISOString()          ?? null,
-        metadataJson:         upsertValues.metadataJson,
-        reason:               upsertValues.reason,
-      },
-      tenant:         profile,
-      auditEvent:     auditPayload,
-    });
-  },
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET /platform/tenants/:tenantId/entitlements  (P13-D)
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.get(
-  "/:tenantId/entitlements",
-  requireAuth,
-  requirePlatformPermission("entitlements.read"),
-  async (req, res) => {
-    const workspaceId = parseInt(String((req.params as { tenantId: string }).tenantId ?? ""), 10);
-    if (isNaN(workspaceId) || workspaceId <= 0) {
-      res.status(400).json({ error: "Invalid tenant ID." });
-      return;
-    }
-
-    const workspace = await db.query.workspacesTable.findFirst({
-      where: eq(workspacesTable.id, workspaceId),
-    });
-    if (!workspace) {
-      res.status(404).json({ error: "Tenant not found." });
-      return;
-    }
-
-    const [subscription] = await db
-      .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, workspaceId))
-      .limit(1);
-
-    const planCode = subscription?.planCode ?? null;
-
-    const rawOverrides = await db
-      .select()
-      .from(tenantEntitlementOverridesTable)
-      .where(eq(tenantEntitlementOverridesTable.workspaceId, workspaceId));
-
-    const overrides: EntitlementOverrideRecord[] = rawOverrides.map(ov => ({
-      id:           ov.id,
-      moduleCode:   ov.moduleCode as EntitlementOverrideRecord["moduleCode"],
-      overrideType: ov.overrideType as OverrideType,
-      limitCode:    ov.limitCode as EntitlementOverrideRecord["limitCode"],
-      limitValue:   ov.limitValue ?? null,
-      reason:       ov.reason,
-      createdBy:    ov.createdBy,
-      createdAt:    ov.createdAt.toISOString(),
-    }));
-
-    const profile = deriveTenantEntitlementProfile(planCode, overrides, new Date());
-
-    res.json({ entitlementProfile: profile, overrides });
-  },
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PATCH /platform/tenants/:tenantId/entitlements/overrides  (P13-D)
-// ─────────────────────────────────────────────────────────────────────────────
-
-router.patch(
-  "/:tenantId/entitlements/overrides",
-  requireAuth,
-  requirePlatformPermission("entitlements.override.update"),
-  async (req, res) => {
-    const workspaceId = parseInt(String((req.params as { tenantId: string }).tenantId ?? ""), 10);
-    if (isNaN(workspaceId) || workspaceId <= 0) {
-      res.status(400).json({ error: "Invalid tenant ID." });
-      return;
-    }
-
-    const [workspace] = await db
-      .select({
-        id:              workspacesTable.id,
-        name:            workspacesTable.name,
-        slug:            workspacesTable.slug,
-        status:          workspacesTable.status,
-        logoUrl:         workspacesTable.logoUrl,
-        primaryColor:    workspacesTable.primaryColor,
-        userCount:       sql<number>`(select count(*)::int from users where workspace_id = ${workspacesTable.id})`,
-        ticketCount:     sql<number>`(select count(*)::int from tickets where workspace_id = ${workspacesTable.id})`,
-        departmentCount: sql<number>`(select count(*)::int from departments where workspace_id = ${workspacesTable.id})`,
-        createdAt:       workspacesTable.createdAt,
-        updatedAt:       workspacesTable.updatedAt,
-      })
-      .from(workspacesTable)
-      .where(eq(workspacesTable.id, workspaceId));
-    if (!workspace) {
-      res.status(404).json({ error: "Tenant not found." });
-      return;
-    }
-
-    const body        = req.body as EntitlementOverridesBatchInput;
-    const validation  = validateEntitlementOverridesBatch(body);
-    if (!validation.valid) {
-      res.status(422).json({ error: validation.message, code: validation.code });
-      return;
-    }
-
-    const [subscription] = await db
-      .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, workspaceId))
-      .limit(1);
-
-    const planCode = subscription?.planCode ?? null;
-    const actorId  = (req as AuthRequest).userId!;
-    const now      = new Date();
-
-    for (const ov of body.overrides) {
-      if (ov.overrideType === "limit_override") {
-        await db
-          .delete(tenantEntitlementOverridesTable)
-          .where(
-            and(
-              eq(tenantEntitlementOverridesTable.workspaceId, workspaceId),
-              eq(tenantEntitlementOverridesTable.moduleCode,   ov.moduleCode),
-              eq(tenantEntitlementOverridesTable.overrideType, "limit_override"),
-              ov.limitCode != null
-                ? eq(tenantEntitlementOverridesTable.limitCode, ov.limitCode)
-                : sql`${tenantEntitlementOverridesTable.limitCode} IS NULL`,
-            ),
-          );
-      } else {
-        await db
-          .delete(tenantEntitlementOverridesTable)
-          .where(
-            and(
-              eq(tenantEntitlementOverridesTable.workspaceId, workspaceId),
-              eq(tenantEntitlementOverridesTable.moduleCode,   ov.moduleCode),
-              inArray(tenantEntitlementOverridesTable.overrideType, ["enable", "disable"]),
-            ),
-          );
-      }
-
-      await db.insert(tenantEntitlementOverridesTable).values({
-        workspaceId,
-        moduleCode:   ov.moduleCode,
-        overrideType: ov.overrideType,
-        limitCode:    ov.limitCode ?? null,
-        limitValue:   ov.limitValue ?? null,
-        reason:       ov.reason,
-        createdBy:    actorId,
-      });
-    }
-
-    const rawOverrides = await db
-      .select()
-      .from(tenantEntitlementOverridesTable)
-      .where(eq(tenantEntitlementOverridesTable.workspaceId, workspaceId));
-
-    const overrides: EntitlementOverrideRecord[] = rawOverrides.map(ov => ({
-      id:           ov.id,
-      moduleCode:   ov.moduleCode as EntitlementOverrideRecord["moduleCode"],
-      overrideType: ov.overrideType as OverrideType,
-      limitCode:    ov.limitCode as EntitlementOverrideRecord["limitCode"],
-      limitValue:   ov.limitValue ?? null,
-      reason:       ov.reason,
-      createdBy:    ov.createdBy,
-      createdAt:    ov.createdAt.toISOString(),
-    }));
-
-    const profile = deriveTenantEntitlementProfile(planCode, overrides, now);
-
-    const combinedReason = body.overrides.map(o => o.reason).join("; ");
-    const auditPayload   = buildEntitlementAuditPayload({
-      tenantId:       String(workspaceId),
-      workspaceId,
-      actorId,
-      planCode,
-      addedOverrides: body.overrides,
-      reason:         combinedReason,
-      now,
-    });
-
-    await db.insert(activityLogsTable).values({
-      workspaceId: null,
-      userId:      actorId,
-      action:      auditPayload.eventType,
-      metadata:    JSON.stringify(auditPayload),
-    });
-
-    const [owner] = await db
-      .select({ id: usersTable.id, email: usersTable.email, fullName: usersTable.fullName })
-      .from(usersTable)
-      .where(and(eq(usersTable.workspaceId, workspaceId), eq(usersTable.role, "admin")))
-      .limit(1);
-
-    const tenantProfile = buildTenantProfile(workspace, owner ?? null, now, subscription ?? null);
-
-    res.json({
-      entitlementProfile: profile,
-      overrides,
-      tenant:     tenantProfile,
-      auditEvent: auditPayload,
-    });
-  },
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants/:tenantId/usage  (P13-E)
 // Read-only usage and capacity intelligence for a single tenant.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router.get(
   "/:tenantId/usage",
@@ -989,31 +449,14 @@ router.get(
       return;
     }
 
-    const [subscription] = await db
+    const { planCode } = await loadCanonicalSubscriptionRawRow(workspaceId, now);
+    const moduleSettings = await db
       .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, workspaceId))
-      .limit(1);
+      .from(workspaceModuleSettingsTable)
+      .where(eq(workspaceModuleSettingsTable.workspaceId, workspaceId));
 
-    const planCode = subscription?.planCode ?? null;
-
-    const rawOverrides = await db
-      .select()
-      .from(tenantEntitlementOverridesTable)
-      .where(eq(tenantEntitlementOverridesTable.workspaceId, workspaceId));
-
-    const overrides: EntitlementOverrideRecord[] = rawOverrides.map(ov => ({
-      id:           ov.id,
-      moduleCode:   ov.moduleCode as EntitlementOverrideRecord["moduleCode"],
-      overrideType: ov.overrideType as OverrideType,
-      limitCode:    ov.limitCode as EntitlementOverrideRecord["limitCode"],
-      limitValue:   ov.limitValue ?? null,
-      reason:       ov.reason,
-      createdBy:    ov.createdBy,
-      createdAt:    ov.createdAt.toISOString(),
-    }));
-
-    const entitlementProfile = deriveTenantEntitlementProfile(planCode, overrides, now);
+    const entitlementProfile = deriveTenantEntitlementProfile(planCode, [], now);
+    entitlementProfile.customEntitlementsCount = moduleSettings.length;
 
     const rawUsage = await collectTenantRawUsage(
       workspaceId,
@@ -1058,11 +501,11 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants/:tenantId/renewal-intelligence
 // P13-F - Subscription Expiry, Grace Period & Renewal Intelligence
 // READ-ONLY - no mutations, no suspension, no enforcement.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router.get(
   "/platform/tenants/:tenantId/renewal-intelligence",
@@ -1094,51 +537,29 @@ router.get(
 
     const now = new Date();
 
-    // Fetch subscription metadata
-    const [subRow] = await db
-      .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, tenantIdRaw))
-      .limit(1);
+    const { raw: subFields, subscriptionId, planCode } =
+      await loadCanonicalSubscriptionRawRow(tenantIdRaw, now);
 
-    const subFields = subRow
-      ? {
-          planCode:             subRow.planCode,
-          subscriptionStatus:   subRow.subscriptionStatus,
-          billingPeriodStart:   subRow.billingPeriodStart,
-          billingPeriodEnd:     subRow.billingPeriodEnd,
-          renewalDueAt:         subRow.renewalDueAt,
-          trialStartedAt:       subRow.trialStartedAt,
-          trialEndsAt:          subRow.trialEndsAt,
-          gracePeriodStartedAt: subRow.gracePeriodStartedAt,
-          gracePeriodEndsAt:    subRow.gracePeriodEndsAt,
-          cancelledAt:          subRow.cancelledAt,
-          suspendedAt:          subRow.suspendedAt,
-        }
-      : null;
-
-    // Derive renewal profile
     const renewalProfile = deriveSubscriptionRenewalProfile(
       tenantIdRaw,
       subFields,
       now,
-      subRow ? String(subRow.id) : null,
+      subscriptionId,
     );
 
-    // Subscription summary for UI context
-    const subscriptionSummary = subRow
+    const subscriptionSummary = subFields
       ? {
-          planCode:             subRow.planCode,
-          subscriptionStatus:   subRow.subscriptionStatus,
-          billingPeriodStart:   subRow.billingPeriodStart?.toISOString()   ?? null,
-          billingPeriodEnd:     subRow.billingPeriodEnd?.toISOString()     ?? null,
-          renewalDueAt:         subRow.renewalDueAt?.toISOString()         ?? null,
-          trialStartedAt:       subRow.trialStartedAt?.toISOString()       ?? null,
-          trialEndsAt:          subRow.trialEndsAt?.toISOString()          ?? null,
-          gracePeriodStartedAt: subRow.gracePeriodStartedAt?.toISOString() ?? null,
-          gracePeriodEndsAt:    subRow.gracePeriodEndsAt?.toISOString()    ?? null,
-          cancelledAt:          subRow.cancelledAt?.toISOString()          ?? null,
-          suspendedAt:          subRow.suspendedAt?.toISOString()          ?? null,
+          planCode,
+          subscriptionStatus:   subFields.subscriptionStatus,
+          billingPeriodStart:   subFields.billingPeriodStart?.toISOString()   ?? null,
+          billingPeriodEnd:     subFields.billingPeriodEnd?.toISOString()     ?? null,
+          renewalDueAt:         subFields.renewalDueAt?.toISOString()         ?? null,
+          trialStartedAt:       subFields.trialStartedAt?.toISOString()       ?? null,
+          trialEndsAt:          subFields.trialEndsAt?.toISOString()          ?? null,
+          gracePeriodStartedAt: subFields.gracePeriodStartedAt?.toISOString() ?? null,
+          gracePeriodEndsAt:    subFields.gracePeriodEndsAt?.toISOString()    ?? null,
+          cancelledAt:          subFields.cancelledAt?.toISOString()          ?? null,
+          suspendedAt:          subFields.suspendedAt?.toISOString()          ?? null,
         }
       : null;
 
@@ -1162,11 +583,11 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GET /platform/tenants/:tenantId/health
 // P13-G - Tenant Health, Risk Signals & Operational Monitoring
 // READ-ONLY - no mutations, no suspension, no enforcement, no billing.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router.get(
   "/platform/tenants/:tenantId/health",
@@ -1198,52 +619,17 @@ router.get(
 
     const now = new Date();
 
-    // Fetch subscription metadata
-    const [subRow] = await db
+    const { raw: subFields, subscriptionId, planCode } =
+      await loadCanonicalSubscriptionRawRow(tenantIdRaw, now);
+
+    const moduleSettings = await db
       .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, tenantIdRaw))
-      .limit(1);
+      .from(workspaceModuleSettingsTable)
+      .where(eq(workspaceModuleSettingsTable.workspaceId, tenantIdRaw));
 
-    const subFields = subRow
-      ? {
-          planCode:             subRow.planCode,
-          subscriptionStatus:   subRow.subscriptionStatus,
-          billingPeriodStart:   subRow.billingPeriodStart,
-          billingPeriodEnd:     subRow.billingPeriodEnd,
-          renewalDueAt:         subRow.renewalDueAt,
-          trialStartedAt:       subRow.trialStartedAt,
-          trialEndsAt:          subRow.trialEndsAt,
-          gracePeriodStartedAt: subRow.gracePeriodStartedAt,
-          gracePeriodEndsAt:    subRow.gracePeriodEndsAt,
-          cancelledAt:          subRow.cancelledAt,
-          suspendedAt:          subRow.suspendedAt,
-        }
-      : null;
+    const entitlementProfile = deriveTenantEntitlementProfile(planCode, [], now);
+    entitlementProfile.customEntitlementsCount = moduleSettings.length;
 
-    const planCode = subRow?.planCode ?? null;
-
-    // Fetch entitlement overrides
-    const rawOverrides = await db
-      .select()
-      .from(tenantEntitlementOverridesTable)
-      .where(eq(tenantEntitlementOverridesTable.workspaceId, tenantIdRaw));
-
-    const overrides: EntitlementOverrideRecord[] = rawOverrides.map(ov => ({
-      id:           ov.id,
-      moduleCode:   ov.moduleCode as EntitlementOverrideRecord["moduleCode"],
-      overrideType: ov.overrideType as OverrideType,
-      limitCode:    ov.limitCode as EntitlementOverrideRecord["limitCode"],
-      limitValue:   ov.limitValue ?? null,
-      reason:       ov.reason,
-      createdBy:    ov.createdBy,
-      createdAt:    ov.createdAt.toISOString(),
-    }));
-
-    // Derive entitlement profile
-    const entitlementProfile = deriveTenantEntitlementProfile(planCode, overrides, now);
-
-    // Derive usage profile
     const rawUsage = await collectTenantRawUsage(
       tenantIdRaw,
       entitlementProfile.limits as Record<string, number | null>,
@@ -1256,16 +642,14 @@ router.get(
       now,
     );
 
-    // Derive renewal profile for renewal signals + urgency
     const renewalProfile = deriveSubscriptionRenewalProfile(
       tenantIdRaw,
       subFields,
       now,
-      subRow ? String(subRow.id) : null,
+      subscriptionId,
     );
 
-    // Derive subscription status string
-    const subscriptionStatusStr: string = subRow && subFields
+    const subscriptionStatusStr: string = subFields
       ? deriveSubscriptionStatus(subFields, now)
       : "unknown";
 
@@ -1318,10 +702,10 @@ router.get(
   },
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // P13-I - GET /platform/tenants/:tenantId/lifecycle-evaluation
 // Lifecycle Evaluation Engine - super-admin only, read-only, no mutations.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router.get(
   "/platform/tenants/:tenantId/lifecycle-evaluation",
@@ -1353,56 +737,21 @@ router.get(
 
     const now = new Date();
 
-    // Fetch subscription metadata
-    const [subRow] = await db
+    const { raw: subFields, subscriptionId, planCode } =
+      await loadCanonicalSubscriptionRawRow(tenantIdRaw, now);
+
+    const moduleSettings = await db
       .select()
-      .from(tenantSubscriptionsTable)
-      .where(eq(tenantSubscriptionsTable.workspaceId, tenantIdRaw))
-      .limit(1);
+      .from(workspaceModuleSettingsTable)
+      .where(eq(workspaceModuleSettingsTable.workspaceId, tenantIdRaw));
 
-    const subFields = subRow
-      ? {
-          planCode:             subRow.planCode,
-          subscriptionStatus:   subRow.subscriptionStatus,
-          billingPeriodStart:   subRow.billingPeriodStart,
-          billingPeriodEnd:     subRow.billingPeriodEnd,
-          renewalDueAt:         subRow.renewalDueAt,
-          trialStartedAt:       subRow.trialStartedAt,
-          trialEndsAt:          subRow.trialEndsAt,
-          gracePeriodStartedAt: subRow.gracePeriodStartedAt,
-          gracePeriodEndsAt:    subRow.gracePeriodEndsAt,
-          cancelledAt:          subRow.cancelledAt,
-          suspendedAt:          subRow.suspendedAt,
-        }
-      : null;
-
-    const planCode = subRow?.planCode ?? null;
-
-    // Derive subscription status
-    const subscriptionStatusStr: string = subRow && subFields
+    const subscriptionStatusStr: string = subFields
       ? deriveSubscriptionStatus(subFields, now)
       : "unknown";
 
-    // Fetch entitlement overrides
-    const rawOverrides = await db
-      .select()
-      .from(tenantEntitlementOverridesTable)
-      .where(eq(tenantEntitlementOverridesTable.workspaceId, tenantIdRaw));
+    const entitlementProfile = deriveTenantEntitlementProfile(planCode, [], now);
+    entitlementProfile.customEntitlementsCount = moduleSettings.length;
 
-    const overrides: EntitlementOverrideRecord[] = rawOverrides.map(ov => ({
-      id:           ov.id,
-      moduleCode:   ov.moduleCode as EntitlementOverrideRecord["moduleCode"],
-      overrideType: ov.overrideType as OverrideType,
-      limitCode:    ov.limitCode as EntitlementOverrideRecord["limitCode"],
-      limitValue:   ov.limitValue ?? null,
-      reason:       ov.reason,
-      createdBy:    ov.createdBy,
-      createdAt:    ov.createdAt.toISOString(),
-    }));
-
-    const entitlementProfile = deriveTenantEntitlementProfile(planCode, overrides, now);
-
-    // Derive usage profile
     const rawUsage = await collectTenantRawUsage(
       tenantIdRaw,
       entitlementProfile.limits as Record<string, number | null>,
@@ -1415,12 +764,11 @@ router.get(
       now,
     );
 
-    // Derive renewal profile
     const renewalProfile = deriveSubscriptionRenewalProfile(
       tenantIdRaw,
       subFields,
       now,
-      subRow ? String(subRow.id) : null,
+      subscriptionId,
     );
 
     // Derive lifecycle state

@@ -6,13 +6,11 @@
 import { db } from "@workspace/db";
 import {
   workspaceSubscriptionsTable,
-  workspaceSubscriptionPoliciesTable,
   commercialContractTermsTable,
   commercialAccountsTable,
 } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { DEFAULT_SUBSCRIPTION_POLICY } from "./subscription-policy-defaults";
-import { policyFieldsFromRow } from "./subscription-policy-fields";
 import { evaluateSubscriptionPolicy } from "./workspace-subscription-policy-evaluator";
 import type { SubscriptionPolicyFields } from "./subscription-policy-defaults";
 
@@ -35,13 +33,6 @@ export interface CommercialWorkspaceEnforcementEvaluation {
   isAutomaticAllowed: false;
 }
 
-function policyFromRow(
-  row: typeof workspaceSubscriptionPoliciesTable.$inferSelect | undefined,
-): SubscriptionPolicyFields {
-  if (!row) return { ...DEFAULT_SUBSCRIPTION_POLICY };
-  return policyFieldsFromRow(row);
-}
-
 export async function evaluateCommercialWorkspaceEnforcement(
   tenantId: number,
 ): Promise<CommercialWorkspaceEnforcementEvaluation> {
@@ -51,10 +42,7 @@ export async function evaluateCommercialWorkspaceEnforcement(
     where: eq(workspaceSubscriptionsTable.workspaceId, tenantId),
   });
 
-  const policyRow = await db.query.workspaceSubscriptionPoliciesTable.findFirst({
-    where: eq(workspaceSubscriptionPoliciesTable.workspaceId, tenantId),
-  });
-  const policy = policyFromRow(policyRow);
+  const policy: SubscriptionPolicyFields = { ...DEFAULT_SUBSCRIPTION_POLICY };
 
   let contractEndDate: string | null = null;
   const account = await db.query.commercialAccountsTable.findFirst({

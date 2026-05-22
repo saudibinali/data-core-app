@@ -56,12 +56,12 @@ describe("P13-H tenant-admin-console-config", () => {
   });
 
   // T2 - tabs/sections config stable
-  it("T2: CONSOLE_TABS includes all core tabs including commercial and subscription_entitlements", () => {
+  it("T2: CONSOLE_TABS includes all core tabs including commercial", () => {
     const required: ConsoleTab[] = [
-      "overview", "lifecycle", "subscription", "subscription_entitlements",
+      "overview", "lifecycle", "subscription",
       "entitlements", "usage", "renewal", "health", "evaluation", "commercial",
     ];
-    expect(CONSOLE_TABS).toHaveLength(10);
+    expect(CONSOLE_TABS).toHaveLength(9);
     for (const tab of required) {
       expect(CONSOLE_TABS).toContain(tab);
     }

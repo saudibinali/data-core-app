@@ -6,7 +6,7 @@ import {
   usersTable,
   workflowExecutionsTable,
   schedulerFairnessPoliciesTable,
-  tenantSubscriptionsTable,
+  workspaceSubscriptionsTable,
   attendanceIntegrationsTable,
   workspaceSmtpConfigsTable,
 } from "@workspace/db";
@@ -251,18 +251,18 @@ router.get(
       db.select({ total: count() }).from(workspacesTable).where(eq(workspacesTable.status, "disabled")),
       db
         .select({
-          status: tenantSubscriptionsTable.subscriptionStatus,
+          status: workspaceSubscriptionsTable.status,
           n: sql<number>`count(*)::int`,
         })
-        .from(tenantSubscriptionsTable)
-        .groupBy(tenantSubscriptionsTable.subscriptionStatus),
+        .from(workspaceSubscriptionsTable)
+        .groupBy(workspaceSubscriptionsTable.status),
       db
         .select({
-          planCode: tenantSubscriptionsTable.planCode,
+          planCode: workspaceSubscriptionsTable.planName,
           n: sql<number>`count(*)::int`,
         })
-        .from(tenantSubscriptionsTable)
-        .groupBy(tenantSubscriptionsTable.planCode),
+        .from(workspaceSubscriptionsTable)
+        .groupBy(workspaceSubscriptionsTable.planName),
       db.select({ total: count() }).from(attendanceIntegrationsTable),
       db.select({ total: count() }).from(workspaceSmtpConfigsTable),
       db
@@ -271,21 +271,22 @@ router.get(
         .where(eq(attendanceIntegrationsTable.isEnabled, true)),
       db
         .select({ total: count() })
-        .from(tenantSubscriptionsTable)
+        .from(workspaceSubscriptionsTable)
         .where(
           and(
-            sql`${tenantSubscriptionsTable.trialEndsAt} IS NOT NULL`,
-            sql`${tenantSubscriptionsTable.trialEndsAt} > now()`,
-            sql`${tenantSubscriptionsTable.trialEndsAt} <= now() + interval '14 days'`,
+            eq(workspaceSubscriptionsTable.status, "trial"),
+            sql`${workspaceSubscriptionsTable.endDate} IS NOT NULL`,
+            sql`${workspaceSubscriptionsTable.endDate}::date > current_date`,
+            sql`${workspaceSubscriptionsTable.endDate}::date <= current_date + interval '14 days'`,
           ),
         ),
       db
         .select({ total: count() })
-        .from(tenantSubscriptionsTable)
+        .from(workspaceSubscriptionsTable)
         .where(
           and(
-            sql`${tenantSubscriptionsTable.gracePeriodEndsAt} IS NOT NULL`,
-            sql`${tenantSubscriptionsTable.gracePeriodEndsAt} > now()`,
+            sql`${workspaceSubscriptionsTable.gracePeriodEndsAt} IS NOT NULL`,
+            sql`${workspaceSubscriptionsTable.gracePeriodEndsAt} > now()`,
           ),
         ),
     ]);

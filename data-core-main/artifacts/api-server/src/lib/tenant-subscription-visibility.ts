@@ -7,21 +7,11 @@ import { db } from "@workspace/db";
 import {
   commercialAccountsTable,
   commercialBillingContactsTable,
-  workspaceSubscriptionPoliciesTable,
   workspaceSubscriptionsTable,
 } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 import { resolveWorkspaceAccessMode } from "./workspace-access-resolver";
-import { resolveWorkspaceEntitlements } from "./workspace-entitlement-resolver";
-import { resolveWorkspaceQuotaUsage } from "./workspace-quota-resolver";
-import { evaluateSubscriptionPolicy } from "./workspace-subscription-policy-evaluator";
-import { policyFieldsFromRowOrDefault } from "./subscription-policy-fields";
-import {
-  ENTITLEMENT_MODULE_CATALOG,
-  ENTITLEMENT_MODULE_KEYS,
-  getFeaturesForModule,
-  type EntitlementModuleKey,
-} from "./workspace-entitlement-catalog";
+import { listTenantProductModules } from "./platform/tenant-product-modules";
 import { isWorkspaceReadOnlyEnforcement } from "./workspace-access-enforcement-config";
 
 const INTERNAL_REASON_PATTERNS =
@@ -110,24 +100,6 @@ export async function buildTenantSubscriptionSummary(workspaceId: number) {
   const access = await resolveWorkspaceAccessMode(workspaceId);
   const readOnlyMode = isWorkspaceReadOnlyEnforcement(access.enforcementStatus);
 
-  const policyRow = await db.query.workspaceSubscriptionPoliciesTable.findFirst({
-    where: eq(workspaceSubscriptionPoliciesTable.workspaceId, workspaceId),
-  });
-  const policyFields = policyFieldsFromRowOrDefault(policyRow);
-
-  let recommendedStatus: string | null = null;
-  if (subscription) {
-    const evaluation = evaluateSubscriptionPolicy({
-      subscription: {
-        id: subscription.id,
-        status: subscription.status,
-        endDate: subscription.endDate,
-      },
-      policy: policyFields,
-    });
-    recommendedStatus = tenantRecommendedStatusLabel(evaluation.recommendedStatus);
-  }
-
   const { daysUntilEnd, daysPastEnd } = utcDaysFromToday(subscription?.endDate ?? null);
   const supportContact = await loadTenantSupportContact(workspaceId);
 
@@ -143,52 +115,26 @@ export async function buildTenantSubscriptionSummary(workspaceId: number) {
     readOnlyReason: readOnlyMode ? sanitizeTenantReadOnlyReason(access.reason) : null,
     daysUntilEnd,
     daysPastEnd,
-    recommendedStatus,
+    recommendedStatus: null,
     supportContact,
   };
 }
 
 export async function buildTenantSubscriptionEntitlements(workspaceId: number) {
-  const resolved = await resolveWorkspaceEntitlements(workspaceId);
-
-  const modules = ENTITLEMENT_MODULE_KEYS.map((moduleKey) => {
-    const catalog = ENTITLEMENT_MODULE_CATALOG[moduleKey];
-    const mod = resolved[moduleKey as EntitlementModuleKey];
-    const features = getFeaturesForModule(moduleKey).map((feat) => ({
-      key: feat.key,
-      label: feat.label,
-      labelAr: feat.labelAr,
-      isEnabled: mod.features[feat.key] ?? mod.isEnabled,
-    }));
-
-    return {
-      moduleKey,
-      label: catalog.label,
-      labelAr: catalog.labelAr,
-      description: catalog.description,
-      isCore: catalog.isCore,
-      isEnabled: mod.isEnabled,
-      features,
-    };
-  });
-
-  return { modules };
-}
-
-export async function buildTenantSubscriptionQuotas(workspaceId: number) {
-  const usage = await resolveWorkspaceQuotaUsage(workspaceId);
-
+  const rows = await listTenantProductModules(workspaceId);
   return {
-    quotas: usage.map((item) => ({
-      quotaKey: item.quotaKey,
-      label: item.label,
-      labelAr: item.labelAr,
-      unit: item.unit,
-      limitValue: item.limitValue,
-      currentUsage: item.currentUsage,
-      usagePercent: item.usagePercent,
-      status: item.status,
-      warningThresholdPercent: item.warningThresholdPercent,
+    modules: rows.map((m) => ({
+      moduleKey: m.key,
+      label: m.name,
+      labelAr: m.name,
+      description: m.description,
+      isCore: m.core,
+      isEnabled: m.enabled,
+      features: [],
     })),
   };
+}
+
+export async function buildTenantSubscriptionQuotas(_workspaceId: number) {
+  return { quotas: [] as Array<Record<string, unknown>> };
 }

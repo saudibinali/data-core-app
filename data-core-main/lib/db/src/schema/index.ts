@@ -35,17 +35,13 @@ export * from "./recovery-orchestrations";
 export * from "./remediation-executions";
 export * from "./compliance-audit-chains";
 export * from "./governance-workflow-actions";
-export * from "./tenant-subscriptions";
-export * from "./tenant-entitlement-overrides";
+
 export * from "./commercial-accounts";
 export * from "./commercial-contract-terms";
 export * from "./commercial-invoices";
 export * from "./commercial-invoice-documents";
 export * from "./commercial-payment-records";
 export * from "./workspace-subscriptions";
-export * from "./workspace-entitlements";
-export * from "./workspace-quota-limits";
-export * from "./workspace-subscription-policies";
 export * from "./workspace-access-enforcement";
 export * from "./platform-user-permission-overrides";
 export * from "./platform-user-access-reviews";

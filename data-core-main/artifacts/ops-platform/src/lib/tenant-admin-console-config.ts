@@ -45,7 +45,6 @@ export type ConsoleTab =
   | "overview"
   | "lifecycle"
   | "subscription"
-  | "subscription_entitlements"
   | "entitlements"
   | "usage"
   | "renewal"
@@ -57,7 +56,6 @@ export const CONSOLE_TABS: ConsoleTab[] = [
   "overview",
   "lifecycle",
   "subscription",
-  "subscription_entitlements",
   "entitlements",
   "usage",
   "renewal",
@@ -113,7 +111,7 @@ export function partitionVisibleConsoleTabs(visibleTabs: ConsoleTab[]): Partitio
   }
   for (const tab of CONSOLE_TABS) {
     if (visible.has(tab) && !PRIMARY_TAB_SET.has(tab) && !MORE_TAB_SET.has(tab)) {
-      if (tab === "subscription_entitlements" && visible.has("subscription")) continue;
+      if (tab === "entitlements" && visible.has("subscription")) continue;
       moreTabs.push(tab);
     }
   }
@@ -121,22 +119,22 @@ export function partitionVisibleConsoleTabs(visibleTabs: ConsoleTab[]): Partitio
   return { primaryTabs, moreTabs };
 }
 
-/** Deep-link alias: legacy P16 tab id maps to unified Subscription tab. */
+/** Deep-link alias: legacy tab ids map to unified Subscription tab. */
 export function normalizeConsoleTab(tab: ConsoleTab): ConsoleTab {
-  return tab === "subscription_entitlements" ? "subscription" : tab;
+  return tab === "entitlements" ? "subscription" : tab;
 }
 
-/** Hide duplicate subscription_entitlements when unified subscription tab is visible. */
+/** Hide duplicate entitlements tab when unified subscription tab is visible. */
 export function dedupeConsoleTabs(tabs: ConsoleTab[]): ConsoleTab[] {
   if (tabs.includes("subscription")) {
-    return tabs.filter((t) => t !== "subscription_entitlements");
+    return tabs.filter((t) => t !== "entitlements");
   }
   return tabs;
 }
 
 export function parseConsoleTabParam(raw: string | null | undefined): ConsoleTab | null {
   if (!raw) return null;
-  if (raw === "subscription_entitlements") return "subscription";
+  if (raw === "subscription_entitlements" || raw === "entitlements") return "subscription";
   return CONSOLE_TABS.includes(raw as ConsoleTab) ? (raw as ConsoleTab) : null;
 }
 
@@ -184,23 +182,15 @@ export const CONSOLE_TAB_CONFIG: Record<ConsoleTab, ConsoleTabConfig> = {
     id:          "subscription",
     label:       "Subscription",
     description:
-      "Unified subscription console - overview, state, entitlements, quotas, policy, workspace access.",
+      "Commercial console — plan, subscription term, product modules, and workspace access.",
     readOnly:    false,
     icon:        "CreditCard",
     testId:      "console-tab-subscription",
   },
-  subscription_entitlements: {
-    id:          "subscription_entitlements",
-    label:       "Subscription",
-    description: "Legacy deep-link alias for unified subscription console.",
-    readOnly:    false,
-    icon:        "Shield",
-    testId:      "console-tab-subscription-entitlements",
-  },
   entitlements: {
     id:          "entitlements",
     label:       "Entitlements",
-    description: "Module access and feature limit overrides. No billing or enforcement.",
+    description: "Legacy alias — redirects to Subscription tab for product modules.",
     readOnly:    false,
     icon:        "Package",
     testId:      "console-tab-entitlements",
