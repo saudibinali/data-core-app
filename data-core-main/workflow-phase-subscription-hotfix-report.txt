@@ -1,0 +1,37 @@
+WORKFLOW: Subscription Create HTTP 500 Hotfix
+DATE: 2026-05-20
+STATUS: FIXED
+
+ROOT CAUSE
+----------
+workspace-subscriptions POST inserted parseDate/parseOptionalId sentinel "MISSING"
+into date and integer columns when UI omitted optional fields (endDate, renewalDate,
+activeContractTermId, commercialAccountId). PostgreSQL rejected values → HTTP 500.
+
+WHY AFTER CLEANUP
+-----------------
+Canonical minimal UI + removed P13 route exposed P16 parser gap; not a migration
+or schema drop issue.
+
+FIX
+---
+artifacts/api-server/src/routes/workspace-subscriptions.ts
+  - dateFieldToNull(), optionalIdToNull()
+  - POST + PATCH normalize all optional fields before DB
+
+TESTS
+-----
+workspace-subscriptions.test.ts: +1 regression (minimal create → null columns)
+20/20 tests pass; api-server build OK
+
+DOCS
+----
+subscription-http500-root-cause.md
+subscription-runtime-fix.md
+subscription-db-validation.md
+subscription-api-validation.md
+subscription-ui-payload-validation.md
+
+OPERATOR
+--------
+Restart API server and retry Create Subscription on a tenant without existing subscription.

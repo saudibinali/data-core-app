@@ -176,6 +176,23 @@ describe("POST /platform/tenants/:tenantId/subscription", () => {
     expect(dbInsert).toHaveBeenCalled();
   });
 
+  it("persists null for omitted optional dates and foreign keys (not MISSING sentinel)", async () => {
+    const res = await request(app).post(`/api/platform/tenants/${TID}/subscription`).send({
+      subscriptionCode: "SUB-MIN",
+      subscriptionName: "Minimal Plan",
+      status: "trial",
+    });
+    expect(res.status).toBe(201);
+    const values = insertValuesLog[0] as Record<string, unknown>;
+    expect(values.startDate).toBeNull();
+    expect(values.endDate).toBeNull();
+    expect(values.renewalDate).toBeNull();
+    expect(values.commercialAccountId).toBeNull();
+    expect(values.activeContractTermId).toBeNull();
+    expect(values.endDate).not.toBe("MISSING");
+    expect(values.renewalDate).not.toBe("MISSING");
+  });
+
   it("rejects duplicate subscription", async () => {
     subFind.mockResolvedValue(SUB);
     const res = await request(app).post(`/api/platform/tenants/${TID}/subscription`).send(validBody);

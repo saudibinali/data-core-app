@@ -98,6 +98,15 @@ function parseOptionalId(v: unknown): number | null | "INVALID" | "MISSING" {
   return n;
 }
 
+/** Convert parse* sentinels to SQL-safe nulls (never persist "MISSING" to the database). */
+function dateFieldToNull(v: string | null | "INVALID" | "MISSING"): string | null {
+  return v === "MISSING" ? null : v;
+}
+
+function optionalIdToNull(v: number | null | "INVALID" | "MISSING"): number | null {
+  return v === "MISSING" ? null : v;
+}
+
 function parseTimestamp(v: unknown): Date | null | "INVALID" {
   if (v === undefined || v === null || v === "") return null;
   if (typeof v !== "string") return "INVALID";
@@ -307,16 +316,18 @@ router.post(
       return;
     }
 
-    const commercialAccountId = parseOptionalId(body.commercialAccountId);
-    if (commercialAccountId === "INVALID") {
+    const commercialAccountIdRaw = parseOptionalId(body.commercialAccountId);
+    if (commercialAccountIdRaw === "INVALID") {
       res.status(400).json({ error: "Invalid commercialAccountId" });
       return;
     }
-    const activeContractTermId = parseOptionalId(body.activeContractTermId);
-    if (activeContractTermId === "INVALID") {
+    const activeContractTermIdRaw = parseOptionalId(body.activeContractTermId);
+    if (activeContractTermIdRaw === "INVALID") {
       res.status(400).json({ error: "Invalid activeContractTermId" });
       return;
     }
+    const commercialAccountId = optionalIdToNull(commercialAccountIdRaw);
+    const activeContractTermId = optionalIdToNull(activeContractTermIdRaw);
 
     const acctErr = await validateCommercialAccountId(tenantId, commercialAccountId);
     if (acctErr) {
@@ -351,10 +362,14 @@ router.post(
       return;
     }
 
+    const startDateValue = dateFieldToNull(startDate);
+    const endDateValue = dateFieldToNull(endDate);
+    const renewalDateValue = dateFieldToNull(renewalDate);
+
     const dateErr = validateSubscriptionDates({
-      startDate: startDate === "MISSING" ? null : startDate,
-      endDate,
-      renewalDate,
+      startDate: startDateValue,
+      endDate: endDateValue,
+      renewalDate: renewalDateValue,
       status: statusRaw,
       gracePeriodEndsAt,
     });
@@ -373,9 +388,9 @@ router.post(
         subscriptionName,
         status: statusRaw,
         statusReason: strOpt(body.statusReason, MAX_TEXT),
-        startDate: startDate === "MISSING" ? null : startDate,
-        endDate,
-        renewalDate,
+        startDate: startDateValue,
+        endDate: endDateValue,
+        renewalDate: renewalDateValue,
         gracePeriodEndsAt,
         planName: strOpt(body.planName, MAX_NAME),
         internalNotes: strOpt(body.internalNotes, MAX_TEXT),
@@ -455,11 +470,12 @@ router.patch(
     }
 
     if (body.commercialAccountId !== undefined) {
-      const commercialAccountId = parseOptionalId(body.commercialAccountId);
-      if (commercialAccountId === "INVALID") {
+      const commercialAccountIdRaw = parseOptionalId(body.commercialAccountId);
+      if (commercialAccountIdRaw === "INVALID") {
         res.status(400).json({ error: "Invalid commercialAccountId" });
         return;
       }
+      const commercialAccountId = optionalIdToNull(commercialAccountIdRaw);
       const acctErr = await validateCommercialAccountId(tenantId, commercialAccountId);
       if (acctErr) {
         res.status(400).json({ error: acctErr });
@@ -470,11 +486,12 @@ router.patch(
     }
 
     if (body.activeContractTermId !== undefined) {
-      const activeContractTermId = parseOptionalId(body.activeContractTermId);
-      if (activeContractTermId === "INVALID") {
+      const activeContractTermIdRaw = parseOptionalId(body.activeContractTermId);
+      if (activeContractTermIdRaw === "INVALID") {
         res.status(400).json({ error: "Invalid activeContractTermId" });
         return;
       }
+      const activeContractTermId = optionalIdToNull(activeContractTermIdRaw);
       const contractErr = await validateContractTermId(tenantId, activeContractTermId);
       if (contractErr) {
         res.status(400).json({ error: contractErr });
@@ -492,33 +509,36 @@ router.patch(
     let gracePeriodEndsAt = existing.gracePeriodEndsAt;
 
     if (body.startDate !== undefined) {
-      const parsed = parseDate(body.startDate);
-      if (parsed === "INVALID") {
+      const parsedRaw = parseDate(body.startDate);
+      if (parsedRaw === "INVALID") {
         res.status(400).json({ error: "Invalid startDate" });
         return;
       }
+      const parsed = dateFieldToNull(parsedRaw);
       if (parsed !== startDate) changedFields.push("startDate");
       startDate = parsed;
       patch.startDate = parsed;
     }
 
     if (body.endDate !== undefined) {
-      const parsed = parseDate(body.endDate);
-      if (parsed === "INVALID") {
+      const parsedRaw = parseDate(body.endDate);
+      if (parsedRaw === "INVALID") {
         res.status(400).json({ error: "Invalid endDate" });
         return;
       }
+      const parsed = dateFieldToNull(parsedRaw);
       if (parsed !== endDate) changedFields.push("endDate");
       endDate = parsed;
       patch.endDate = parsed;
     }
 
     if (body.renewalDate !== undefined) {
-      const parsed = parseDate(body.renewalDate);
-      if (parsed === "INVALID") {
+      const parsedRaw = parseDate(body.renewalDate);
+      if (parsedRaw === "INVALID") {
         res.status(400).json({ error: "Invalid renewalDate" });
         return;
       }
+      const parsed = dateFieldToNull(parsedRaw);
       if (parsed !== renewalDate) changedFields.push("renewalDate");
       renewalDate = parsed;
       patch.renewalDate = parsed;
