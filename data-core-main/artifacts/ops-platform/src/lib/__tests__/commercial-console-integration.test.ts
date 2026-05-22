@@ -1,5 +1,5 @@
 /**
- * @phase P15-G - Unified commercial console integration (static)
+ * @phase P15-G / Commercial simplification - operational console integration (static)
  */
 
 import { describe, it, expect } from "vitest";
@@ -18,24 +18,21 @@ describe("COMMERCIAL_SAFETY_CONTRACT P15-G", () => {
     expect(COMMERCIAL_SAFETY_CONTRACT.commercialConsoleReadOnlyIntegration).toBe(true);
     expect(COMMERCIAL_SAFETY_CONTRACT.noDestructiveCommercialActions).toBe(true);
     expect(COMMERCIAL_SAFETY_CONTRACT.sectionPermissionGated).toBe(true);
-    expect(COMMERCIAL_SAFETY_CONTRACT.riskReadOnlyIntegrated).toBe(true);
   });
 });
 
-describe("unified commercial console", () => {
+describe("unified operational commercial console", () => {
   const consoleSrc = readSrc("components/commercial/CommercialConsole.tsx");
   const tenants = readSrc("pages/super-admin-tenants.tsx");
-  const riskPage = readSrc("pages/super-admin-commercial-risk.tsx");
-  const overview = readSrc("components/commercial/CommercialOverviewSummary.tsx");
-  const riskSection = readSrc("components/commercial/CommercialRiskSection.tsx");
-  const invoices = readSrc("components/commercial/InvoicesSection.tsx");
+  const contracts = readSrc("components/commercial/OperationalContractsPanel.tsx");
+  const invoices = readSrc("components/commercial/OperationalInvoicesPanel.tsx");
 
-  it("CommercialConsole renders with test id and accordion sections", () => {
+  it("CommercialConsole renders with test id and operational sections", () => {
     expect(consoleSrc).toContain('data-testid="commercial-console"');
-    expect(consoleSrc).toContain("commercial-console-sections");
-    expect(consoleSrc).toContain("commercial-console-section-account");
-    expect(consoleSrc).toContain("commercial-console-section-risk");
-    expect(consoleSrc).toContain("commercial-console-section-collection");
+    expect(consoleSrc).toContain("commercial-console-section-contracts");
+    expect(consoleSrc).toContain("commercial-console-section-invoices");
+    expect(consoleSrc).toContain("<OperationalContractsPanel");
+    expect(consoleSrc).toContain("<OperationalInvoicesPanel");
   });
 
   it("tenant registry uses CommercialConsole not CommercialPanel", () => {
@@ -44,44 +41,43 @@ describe("unified commercial console", () => {
     expect(tenants).toContain("console-tab-content-commercial");
   });
 
-  it("overview summary cards", () => {
-    expect(overview).toContain("commercial-overview-summary");
-    expect(overview).toContain("Account Status");
-    expect(overview).toContain("Risk Level");
+  it("no collection or payment props on commercial tab", () => {
+    const commercialBlock = tenants.slice(
+      tenants.indexOf('effectiveTab === "commercial"'),
+      tenants.indexOf('effectiveTab === "commercial"') + 1200,
+    );
+    expect(commercialBlock).not.toContain("canReadPayments");
+    expect(commercialBlock).not.toContain("CollectionTrackingPanel");
+    expect(consoleSrc).not.toContain("CommercialCollectionSection");
+    expect(consoleSrc).not.toContain("CommercialRiskSection");
   });
 
-  it("risk section gated and integrated", () => {
-    expect(consoleSrc).toContain("canReadRisk");
-    expect(riskSection).toContain("commercial-open-full-risk-view");
-    expect(riskSection).toContain("/super-admin/commercial-risk");
-  });
-
-  it("deep link from risk page to tenant commercial tab", () => {
+  it("deep link from risk page to tenant commercial tab still supported", () => {
+    const riskPage = readSrc("pages/super-admin-commercial-risk.tsx");
     expect(riskPage).toContain("tab=commercial");
     expect(riskPage).toContain("tenantId=");
-    expect(riskPage).toContain("commercial-risk-open-tenant-console");
   });
 
   it("registry parses tab=commercial deep link", () => {
     expect(tenants).toContain("parseRegistryDeepLink");
-    // Implementation detail: parsing is delegated to parseConsoleTabParam.
     expect(tenants).toContain("parseConsoleTabParam");
   });
 
-  it("invoices support external collection panel", () => {
-    expect(invoices).toContain("hideInlineCollectionPanel");
-    expect(invoices).toContain("onOpenCollection");
+  it("operational panels expose PDF upload/download", () => {
+    expect(contracts).toContain("Upload PDF");
+    expect(contracts).toContain("Download PDF");
+    expect(invoices).toContain("Upload PDF");
+    expect(invoices).toContain("Download PDF");
   });
 
   it("permission props passed to console", () => {
-    expect(tenants).toContain("canReadRisk={canReadCommercialRisk}");
-    expect(tenants).toContain("commercial.risk.read");
+    expect(tenants).toContain("canReadContracts={canReadCommercialContracts}");
     expect(tenants).toContain("commercial.invoices.read");
-    expect(tenants).toContain("commercial.payments.read");
+    expect(tenants).toContain("canUploadDocuments={canUploadInvoiceDocuments}");
   });
 
   it("no forbidden UI terms in console components", () => {
-    const blob = (consoleSrc + overview + riskSection + invoices).toLowerCase();
+    const blob = (consoleSrc + contracts + invoices).toLowerCase();
     for (const term of [
       "pay now",
       "stripe",
@@ -92,15 +88,9 @@ describe("unified commercial console", () => {
       "send email",
       "auto renew",
       "auto collect",
+      "collection tracking",
     ]) {
       expect(blob.includes(term), `forbidden: ${term}`).toBe(false);
     }
-  });
-
-  it("activity section uses tenant feed", () => {
-    expect(consoleSrc).toContain("CommercialActivitySection");
-    const activity = readSrc("components/commercial/CommercialActivitySection.tsx");
-    expect(activity).toContain("commercial-activity-list");
-    expect(activity).toContain("useTenantCommercialActivity");
   });
 });

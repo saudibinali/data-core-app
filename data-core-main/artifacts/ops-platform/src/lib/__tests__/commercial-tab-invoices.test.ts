@@ -1,5 +1,5 @@
 /**
- * @phase P15-C - Invoices section UI gating & safety (static)
+ * @phase P15-C / Commercial simplification - operational invoices UI
  */
 
 import { describe, it, expect } from "vitest";
@@ -67,23 +67,34 @@ describe("invoice permission gating", () => {
   });
 });
 
-describe("Invoices section static safety", () => {
+describe("operational invoices panel static safety", () => {
   const consolePage = readSrc("components/commercial/CommercialConsole.tsx");
-  const section = readSrc("components/commercial/InvoicesSection.tsx");
+  const panel = readSrc("components/commercial/OperationalInvoicesPanel.tsx");
 
-  it("gates InvoicesSection with canReadInvoices", () => {
+  it("gates OperationalInvoicesPanel with canReadInvoices", () => {
     expect(consolePage).toContain("canReadInvoices &&");
-    expect(consolePage).toContain("<InvoicesSection");
+    expect(consolePage).toContain("<OperationalInvoicesPanel");
   });
 
   it("exposes invoice test ids", () => {
-    expect(section).toContain('data-testid="commercial-invoices-section"');
-    expect(section).toContain('data-testid="commercial-add-invoice-btn"');
+    expect(panel).toContain('data-testid="operational-invoices-panel"');
+    expect(panel).toContain("Add invoice record");
   });
 
   it("does not implement forbidden features", () => {
-    const lower = section.toLowerCase();
-    for (const term of ["stripe", "generate invoice", "zatca", "checkout", "delete invoice", "send email"]) {
+    const lower = panel.toLowerCase();
+    for (const term of [
+      "stripe",
+      "generate invoice",
+      "zatca",
+      "checkout",
+      "delete invoice",
+      "send email",
+      "amount",
+      "due date",
+      "invoice status",
+      "collection",
+    ]) {
       expect(lower.includes(term), `forbidden: ${term}`).toBe(false);
     }
   });

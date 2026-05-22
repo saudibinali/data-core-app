@@ -106,7 +106,7 @@ describe("console and hooks", () => {
 
 describe("UI safety", () => {
   const panel = read("src/components/subscription/GraceSuspensionPolicyPanel.tsx");
-  const consoleFile = read("src/components/subscription/SubscriptionConsole.tsx");
+  const consoleFile = read("src/components/subscription/TenantCommercialConsole.tsx");
 
   it("forbidden terms absent", () => {
     for (const term of [
@@ -121,7 +121,7 @@ describe("UI safety", () => {
     ]) {
       expect(panel.includes(term)).toBe(false);
     }
-    expect(consoleFile).toContain("grace-suspension-policy-section");
+    expect(consoleFile).toContain("plan-subscription-section");
   });
 });
 

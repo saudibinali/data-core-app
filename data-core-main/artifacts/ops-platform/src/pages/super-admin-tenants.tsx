@@ -2375,13 +2375,7 @@ function TenantAdminConsole({
                   canWriteContracts={canWriteCommercialContracts}
                   canReadInvoices={canReadCommercialInvoices}
                   canWriteInvoices={canWriteCommercialInvoices}
-                  canReadDocuments={canReadInvoiceDocuments}
                   canUploadDocuments={canUploadInvoiceDocuments}
-                  canReadPayments={canReadCommercialPayments}
-                  canRecordPayments={canRecordCommercialPayments}
-                  canVerifyPayments={canVerifyCommercialPayments}
-                  canReadRisk={canReadCommercialRisk}
-                  canReadActivity={canReadCommercialActivity}
                 />
               </div>
             )}

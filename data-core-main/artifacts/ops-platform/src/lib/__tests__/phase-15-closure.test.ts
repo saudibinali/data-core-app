@@ -141,7 +141,8 @@ describe("P15-H frontend smoke", () => {
 
   it("commercial console integrated", () => {
     expect(consoleSrc).toContain("commercial-console");
-    expect(consoleSrc).toContain("CommercialActivitySection");
+    expect(consoleSrc).toContain("OperationalContractsPanel");
+    expect(consoleSrc).toContain("OperationalInvoicesPanel");
   });
 
   it("risk deep link to tenant commercial tab", () => {

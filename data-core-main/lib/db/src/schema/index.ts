@@ -38,6 +38,7 @@ export * from "./governance-workflow-actions";
 
 export * from "./commercial-accounts";
 export * from "./commercial-contract-terms";
+export * from "./commercial-contract-documents";
 export * from "./commercial-invoices";
 export * from "./commercial-invoice-documents";
 export * from "./commercial-payment-records";

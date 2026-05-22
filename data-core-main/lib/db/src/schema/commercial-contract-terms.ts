@@ -38,6 +38,12 @@ export const commercialContractTermsTable = pgTable(
     contractNumber: text("contract_number"),
     contractTitle:  text("contract_title"),
 
+    companyName: text("company_name"),
+    responsiblePersonName:  text("responsible_person_name"),
+    responsiblePersonPhone: text("responsible_person_phone"),
+    responsiblePersonEmail: text("responsible_person_email"),
+    notes: text("notes"),
+
     contractStartDate: date("contract_start_date"),
     contractEndDate:   date("contract_end_date"),
     renewalDate:       date("renewal_date"),

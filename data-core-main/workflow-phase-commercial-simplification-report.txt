@@ -1,0 +1,73 @@
+WORKFLOW PHASE: Commercial & Documents Simplification
+Date: 2026-05-20
+Target: /super-admin/tenants → Commercial → Contracts | Invoices & Documents
+
+================================================================================
+SUMMARY
+================================================================================
+Refactored commercial module from ERP-style billing console to operational
+SaaS tracking: contract/invoice timeline records, PDF archive, super-admin
+reminders. Subscription and commercial accounts preserved. No customer row deletes.
+
+================================================================================
+DELIVERABLES
+================================================================================
+[OK] commercial-simplification-plan.md
+[OK] contracts-refactor-plan.md
+[OK] invoices-documents-refactor-plan.md
+[OK] commercial-ui-rebuild.md
+[OK] commercial-reminder-architecture.md
+[OK] commercial-cleanup-map.md
+[OK] workflow-phase-commercial-simplification-report.txt
+
+================================================================================
+DATABASE
+================================================================================
+Script: scripts/migrate-commercial-simplification.cjs
+- Adds operational columns on commercial_contract_terms / commercial_invoices
+- Creates commercial_contract_documents
+- Backfills responsible person + reminder_date from legacy fields
+Action required: run with DATABASE_URL on each environment before relying on PDF contract storage.
+
+================================================================================
+API SERVER
+================================================================================
+[OK] commercial-contracts.ts — operational CRUD + contract PDF + status 410
+[OK] commercial-invoices.ts — document records + invoice PDF + status 410
+[OK] commercial-operational.ts — DTO + reminder derivation
+[OK] contract-document-storage.ts, parse-contract-pdf-upload.ts
+[OK] Schema exports: commercial-contract-documents
+[OK] Tests: commercial-contracts.test.ts, commercial-invoices.test.ts (updated)
+[VERIFY] commercial-payments router unregistered from index (legacy file may remain)
+
+================================================================================
+OPS PLATFORM
+================================================================================
+[OK] OperationalContractsPanel.tsx
+[OK] OperationalInvoicesPanel.tsx
+[OK] CommercialConsole.tsx — simplified sections only
+[OK] super-admin-tenants.tsx — payment/risk props removed from CommercialConsole
+[OK] Hooks: use-commercial-contracts.ts, use-commercial-invoices.ts
+[OK] Static tests: commercial-tab-*, commercial-console-integration
+
+Legacy (not wired): ContractTermsSection, InvoicesSection, CollectionTrackingPanel
+
+================================================================================
+OPERATOR SMOKE TEST
+================================================================================
+1. Open tenant → Commercial tab
+2. Add contract record → upload PDF → download PDF
+3. Add second contract — first remains visible (timeline)
+4. Add invoice → link contract → set reminder → upload PDF
+5. Confirm no amount/currency/status fields in forms
+6. PATCH .../status returns 410 if called directly
+
+================================================================================
+KNOWN FOLLOW-UPS
+================================================================================
+- Run migrate-commercial-simplification.cjs on staging/production
+- Optional: remove or archive legacy UI components after soak period
+- Optional: aggregate missing-invoice reminders at platform risk dashboard
+- phase-15-closure.test.ts may need refresh if run as gate
+
+END REPORT

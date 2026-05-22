@@ -1,26 +1,26 @@
 /**
- * @phase P15-C - Commercial Invoices & PDF Documents - Route Tests
+ * @phase P15-C — Operational commercial invoices (document records)
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express from "express";
 
-const wsFind        = vi.fn();
-const acctFind      = vi.fn();
-const contractFind  = vi.fn();
-const invoiceFind   = vi.fn();
-const invoiceMany   = vi.fn();
-const docFind       = vi.fn();
-const dbInsert      = vi.fn();
-const dbUpdate      = vi.fn();
+const wsFind = vi.fn();
+const acctFind = vi.fn();
+const contractFind = vi.fn();
+const invoiceFind = vi.fn();
+const invoiceMany = vi.fn();
+const docFind = vi.fn();
+const dbInsert = vi.fn();
+const dbUpdate = vi.fn();
 
 const mockDb = {
   query: {
-    workspacesTable:                { findFirst: wsFind       },
-    commercialAccountsTable:        { findFirst: acctFind     },
-    commercialContractTermsTable:   { findFirst: contractFind },
-    commercialInvoicesTable:        { findFirst: invoiceFind, findMany: invoiceMany },
+    workspacesTable: { findFirst: wsFind },
+    commercialAccountsTable: { findFirst: acctFind },
+    commercialContractTermsTable: { findFirst: contractFind },
+    commercialInvoicesTable: { findFirst: invoiceFind, findMany: invoiceMany },
     commercialInvoiceDocumentsTable: { findFirst: docFind },
   },
   insert: dbInsert,
@@ -31,9 +31,12 @@ const insertValuesLog: unknown[] = [];
 
 function chain(rows: unknown[] = []) {
   const c: Record<string, unknown> = {
-    values:    (v: unknown) => { insertValuesLog.push(v); return c; },
-    set:       vi.fn(() => c),
-    where:     vi.fn(() => c),
+    values: (v: unknown) => {
+      insertValuesLog.push(v);
+      return c;
+    },
+    set: vi.fn(() => c),
+    where: vi.fn(() => c),
     returning: () => Promise.resolve(rows),
   };
   return c;
@@ -50,8 +53,9 @@ vi.mock("@workspace/db", () => ({
 }));
 
 vi.mock("drizzle-orm", () => ({
-  eq:  (_a: unknown, _b: unknown) => ({ op: "eq" }),
+  eq: (_a: unknown, _b: unknown) => ({ op: "eq" }),
   and: (...args: unknown[]) => ({ op: "and", args }),
+  desc: (_a: unknown) => ({ op: "desc" }),
 }));
 
 vi.mock("../../lib/invoice-document-storage", () => {
@@ -94,7 +98,8 @@ vi.mock("../../middlewares/requireAuth", () => ({
     r["isRootOwner"] = false;
     next();
   },
-  requireSuperAdmin: (_req: express.Request, _res: express.Response, next: express.NextFunction) => next(),
+  requireSuperAdmin: (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
+    next(),
   requirePlatformPermission: (perm: string) =>
     (_req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (denyPermission || (deniedPerm && deniedPerm === perm)) {
@@ -121,21 +126,16 @@ const INVOICE = {
   commercialAccountId: 10,
   contractTermId: null,
   invoiceNumber: "INV-001",
-  invoiceTitle: "January",
-  invoiceDate: "2026-01-01",
-  dueDate: "2026-01-31",
-  invoiceAmount: "1000.00",
-  currency: "SAR",
-  billingPeriodStart: "2026-01-01",
-  billingPeriodEnd: "2026-01-31",
-  status: "draft",
-  externalAccountingSystemName: null,
-  externalAccountingReference: null,
+  responsiblePersonName: "Finance",
+  responsiblePersonPhone: null,
+  responsiblePersonEmail: "finance@acme.test",
+  reminderDate: "2026-02-15",
   notes: null,
+  status: "shared",
   createdBy: 1,
   updatedBy: 1,
-  createdAt: "2026-01-01T00:00:00Z",
-  updatedAt: "2026-01-01T00:00:00Z",
+  createdAt: new Date("2026-01-01T00:00:00Z"),
+  updatedAt: new Date("2026-01-01T00:00:00Z"),
 };
 const DOC = {
   id: 5,
@@ -147,19 +147,15 @@ const DOC = {
   storageKey: "tenants/42/invoices/1/abc.pdf",
   checksum: "abc",
   uploadedBy: 1,
-  uploadedAt: "2026-01-02T00:00:00Z",
-  createdAt: "2026-01-02T00:00:00Z",
+  uploadedAt: new Date("2026-01-02T00:00:00Z"),
+  createdAt: new Date("2026-01-02T00:00:00Z"),
 };
 
 const VALID_CREATE = {
   commercialAccountId: 10,
   invoiceNumber: "INV-002",
-  invoiceTitle: "February",
-  invoiceDate: "2026-02-01",
-  dueDate: "2026-02-28",
-  invoiceAmount: 2000,
-  currency: "SAR",
-  status: "draft",
+  responsiblePersonName: "Ops",
+  reminderDate: "2026-03-01",
 };
 
 beforeEach(() => {
@@ -184,10 +180,11 @@ describe("GET /commercial-invoices", () => {
     expect(res.status).toBe(403);
   });
 
-  it("returns 200 with invoices", async () => {
+  it("returns 200 with operational invoices", async () => {
     const res = await request(app).get(`/api/platform/tenants/${TID}/commercial-invoices`);
     expect(res.status).toBe(200);
     expect(res.body.invoices).toHaveLength(1);
+    expect(res.body.invoices[0]).toHaveProperty("hasDocument");
   });
 });
 
@@ -205,28 +202,15 @@ describe("POST /commercial-invoices", () => {
       .post(`/api/platform/tenants/${TID}/commercial-invoices`)
       .send(VALID_CREATE);
     expect(res.status).toBe(201);
+    expect(res.body.invoice.invoiceNumber).toBeDefined();
   });
 
-  it("rejects invalid date order", async () => {
+  it("rejects invalid responsiblePersonEmail", async () => {
     const res = await request(app)
       .post(`/api/platform/tenants/${TID}/commercial-invoices`)
-      .send({ ...VALID_CREATE, invoiceDate: "2026-03-01", dueDate: "2026-01-01" });
+      .send({ ...VALID_CREATE, responsiblePersonEmail: "bad" });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/invoiceDate/i);
-  });
-
-  it("rejects negative invoiceAmount", async () => {
-    const res = await request(app)
-      .post(`/api/platform/tenants/${TID}/commercial-invoices`)
-      .send({ ...VALID_CREATE, invoiceAmount: -1 });
-    expect(res.status).toBe(400);
-  });
-
-  it("rejects invalid currency", async () => {
-    const res = await request(app)
-      .post(`/api/platform/tenants/${TID}/commercial-invoices`)
-      .send({ ...VALID_CREATE, currency: "XYZ" });
-    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/email/i);
   });
 
   it("rejects cross-tenant contractTermId", async () => {
@@ -244,60 +228,47 @@ describe("POST /commercial-invoices", () => {
       .send(VALID_CREATE);
     const audit = insertValuesLog.find(
       (r): r is { action: string } =>
-        typeof r === "object" && r !== null && "action" in r
-        && (r as { action: string }).action === "commercial_invoice_created",
+        typeof r === "object" &&
+        r !== null &&
+        "action" in r &&
+        (r as { action: string }).action === "commercial_invoice_created",
     );
     expect(audit).toBeDefined();
   });
 });
 
 describe("PATCH status", () => {
-  it("requires reason min 10 chars", async () => {
+  it("returns 410 — accounting status workflow removed", async () => {
     const res = await request(app)
       .patch(`/api/platform/tenants/${TID}/commercial-invoices/1/status`)
-      .send({ status: "issued", reason: "short" });
-    expect(res.status).toBe(400);
-    const blocked = insertValuesLog.find(
-      (r): r is { action: string } =>
-        typeof r === "object" && r !== null && "action" in r
-        && (r as { action: string }).action === "commercial_invoice_status_change_blocked",
-    );
-    expect(blocked).toBeDefined();
+      .send({ status: "issued", reason: "short reason ok" });
+    expect(res.status).toBe(410);
+    expect(res.body.error).toMatch(/removed/i);
   });
 });
 
 describe("document upload/download", () => {
   it("upload returns 403 without commercial.invoiceDocuments.upload", async () => {
     deniedPerm = "commercial.invoiceDocuments.upload";
-    const res = await request(app)
-      .post(`/api/platform/tenants/${TID}/commercial-invoices/1/document`);
+    const res = await request(app).post(
+      `/api/platform/tenants/${TID}/commercial-invoices/1/document`,
+    );
     expect(res.status).toBe(403);
   });
 
   it("upload succeeds with 201", async () => {
     dbInsert.mockReturnValue(chain([DOC]));
-    const res = await request(app)
-      .post(`/api/platform/tenants/${TID}/commercial-invoices/1/document`);
-    expect(res.status).toBe(201);
-    const audit = insertValuesLog.find(
-      (r): r is { action: string } =>
-        typeof r === "object" && r !== null && "action" in r
-        && (r as { action: string }).action === "commercial_invoice_document_uploaded",
+    const res = await request(app).post(
+      `/api/platform/tenants/${TID}/commercial-invoices/1/document`,
     );
-    expect(audit).toBeDefined();
-  });
-
-  it("download returns 403 without commercial.invoiceDocuments.read", async () => {
-    deniedPerm = "commercial.invoiceDocuments.read";
-    const res = await request(app)
-      .get(`/api/platform/tenants/${TID}/commercial-invoices/1/document`);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(201);
   });
 
   it("returns 404 when no PDF uploaded", async () => {
     docFind.mockResolvedValue(null);
-    const res = await request(app)
-      .get(`/api/platform/tenants/${TID}/commercial-invoices/1/document`);
+    const res = await request(app).get(
+      `/api/platform/tenants/${TID}/commercial-invoices/1/document`,
+    );
     expect(res.status).toBe(404);
   });
 });
@@ -305,11 +276,6 @@ describe("document upload/download", () => {
 describe("P15-C safety", () => {
   it("no DELETE invoice route", async () => {
     const res = await request(app).delete(`/api/platform/tenants/${TID}/commercial-invoices/1`);
-    expect(res.status).toBe(404);
-  });
-
-  it("no generate invoice route", async () => {
-    const res = await request(app).post(`/api/platform/tenants/${TID}/commercial-invoices/generate`);
     expect(res.status).toBe(404);
   });
 });

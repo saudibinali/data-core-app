@@ -40,6 +40,13 @@ export const commercialInvoicesTable = pgTable(
     invoiceNumber: text("invoice_number").notNull(),
     invoiceTitle:  text("invoice_title"),
 
+    responsiblePersonName:  text("responsible_person_name"),
+    responsiblePersonPhone: text("responsible_person_phone"),
+    responsiblePersonEmail: text("responsible_person_email"),
+
+    /** Operational reminder date (not accounting due date). */
+    reminderDate: date("reminder_date"),
+
     invoiceDate: date("invoice_date"),
     dueDate:     date("due_date"),
 

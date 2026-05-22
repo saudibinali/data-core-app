@@ -31,6 +31,14 @@ import {
   INVOICE_PDF_MIME,
 } from "../lib/invoice-document-storage";
 import { parseInvoicePdfUpload } from "../lib/parse-invoice-pdf-upload";
+import { toOperationalInvoice } from "../lib/commercial-operational";
+
+const MAX_PHONE = 40;
+const MAX_NAME = 200;
+
+function dateToNull(v: string | null | "INVALID" | "MISSING"): string | null {
+  return v === "MISSING" ? null : v;
+}
 
 const VALID_STATUSES = ["draft", "issued", "shared", "paid", "overdue", "cancelled"] as const;
 const VALID_CURRENCIES = new Set(["SAR", "USD", "EUR", "GBP", "AED", "KWD", "BHD", "OMR", "QAR"]);
@@ -200,24 +208,15 @@ router.get(
       return;
     }
 
-    const statusFilter = typeof req.query.status === "string" ? req.query.status : undefined;
     const contractTermFilter = req.query.contractTermId !== undefined
       ? Number(req.query.contractTermId)
       : undefined;
 
-    if (statusFilter && !VALID_STATUSES.includes(statusFilter as typeof VALID_STATUSES[number])) {
-      res.status(400).json({ error: `Invalid status filter. Must be one of: ${VALID_STATUSES.join(", ")}` });
-      return;
-    }
-
     let invoices = await db.query.commercialInvoicesTable.findMany({
       where: eq(commercialInvoicesTable.workspaceId, tenantId),
-      orderBy: (t, { desc }) => [desc(t.updatedAt)],
+      orderBy: (t, { desc }) => [desc(t.createdAt)],
     });
 
-    if (statusFilter) {
-      invoices = invoices.filter(i => i.status === statusFilter);
-    }
     if (contractTermFilter !== undefined) {
       if (!Number.isFinite(contractTermFilter)) {
         res.status(400).json({ error: "Invalid contractTermId filter" });
@@ -226,26 +225,19 @@ router.get(
       invoices = invoices.filter(i => i.contractTermId === contractTermFilter);
     }
 
-    const showDocMeta = canReadInvoiceDocuments(req);
-    const docByInvoice = new Map<number, { hasDocument: boolean }>();
+    const now = new Date();
+    const operational = await Promise.all(
+      invoices.map(async (inv) => {
+        const doc = canReadInvoiceDocuments(req)
+          ? await db.query.commercialInvoiceDocumentsTable.findFirst({
+              where: eq(commercialInvoiceDocumentsTable.invoiceId, inv.id),
+            })
+          : null;
+        return toOperationalInvoice(inv, doc ?? undefined, now);
+      }),
+    );
 
-    if (showDocMeta && invoices.length > 0) {
-      for (const inv of invoices) {
-        const doc = await db.query.commercialInvoiceDocumentsTable.findFirst({
-          where: eq(commercialInvoiceDocumentsTable.invoiceId, inv.id),
-        });
-        docByInvoice.set(inv.id, { hasDocument: !!doc });
-      }
-    }
-
-    res.json({
-      invoices: invoices.map(inv => ({
-        ...inv,
-        documentStatus: showDocMeta
-          ? (docByInvoice.get(inv.id)?.hasDocument ? "uploaded" : "missing")
-          : undefined,
-      })),
-    });
+    res.json({ invoices: operational });
   },
 );
 
@@ -275,15 +267,16 @@ router.get(
       return;
     }
 
-    let document = undefined;
-    if (canReadInvoiceDocuments(req)) {
-      const doc = await db.query.commercialInvoiceDocumentsTable.findFirst({
-        where: eq(commercialInvoiceDocumentsTable.invoiceId, invoiceId),
-      });
-      document = doc ? serializeDocument(doc) : null;
-    }
+    const doc = canReadInvoiceDocuments(req)
+      ? await db.query.commercialInvoiceDocumentsTable.findFirst({
+          where: eq(commercialInvoiceDocumentsTable.invoiceId, invoiceId),
+        })
+      : null;
 
-    res.json({ invoice, document });
+    res.json({
+      invoice: toOperationalInvoice(invoice, doc ?? undefined),
+      document: doc ? serializeDocument(doc) : null,
+    });
   },
 );
 
@@ -342,7 +335,7 @@ router.post(
         status: invoice.status,
       });
 
-      res.status(201).json({ invoice });
+      res.status(201).json({ invoice: toOperationalInvoice(invoice, null) });
     } catch (e: unknown) {
       if (isUniqueViolation(e)) {
         res.status(400).json({ error: "invoiceNumber must be unique for this tenant" });
@@ -397,14 +390,13 @@ router.patch(
       existing.commercialAccountId,
       tenantId,
       false,
-      existing,
     );
     if (validationError) {
       res.status(400).json({ error: validationError });
       return;
     }
 
-    const patch = mapInvoicePatch(body, existing);
+    const patch = mapInvoicePatch(body);
     const actorId = req.userId!;
 
     try {
@@ -425,7 +417,10 @@ router.patch(
         changedFields,
       });
 
-      res.json({ invoice });
+      const doc = await db.query.commercialInvoiceDocumentsTable.findFirst({
+        where: eq(commercialInvoiceDocumentsTable.invoiceId, invoice.id),
+      });
+      res.json({ invoice: toOperationalInvoice(invoice, doc ?? undefined) });
     } catch (e: unknown) {
       if (isUniqueViolation(e)) {
         res.status(400).json({ error: "invoiceNumber must be unique for this tenant" });
@@ -436,76 +431,15 @@ router.patch(
   },
 );
 
-// ── PATCH status ──────────────────────────────────────────────────────────────
-
 router.patch(
   "/platform/tenants/:tenantId/commercial-invoices/:invoiceId/status",
   requireAuth,
   requireSuperAdmin,
   requirePlatformPermission("commercial.invoices.update"),
-  async (req: AuthRequest, res) => {
-    const tenantId  = Number(req.params.tenantId);
-    const invoiceId = Number(req.params.invoiceId);
-    if (!Number.isFinite(tenantId) || tenantId < 1 || !Number.isFinite(invoiceId) || invoiceId < 1) {
-      res.status(400).json({ error: "Invalid tenantId or invoiceId" });
-      return;
-    }
-
-    const { status, reason } = req.body as { status?: string; reason?: string };
-
-    if (!status || !VALID_STATUSES.includes(status as typeof VALID_STATUSES[number])) {
-      res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` });
-      return;
-    }
-
-    if (!reason || typeof reason !== "string" || reason.trim().length < MIN_REASON_LEN) {
-      await auditInvoice("commercial_invoice_status_change_blocked", req.userId!, tenantId, {
-        tenantId,
-        invoiceId,
-        nextStatus: status,
-        reason: "reason_required",
-      });
-      res.status(400).json({ error: `reason is required and must be at least ${MIN_REASON_LEN} characters` });
-      return;
-    }
-
-    const existing = await db.query.commercialInvoicesTable.findFirst({
-      where: and(
-        eq(commercialInvoicesTable.id, invoiceId),
-        eq(commercialInvoicesTable.workspaceId, tenantId),
-      ),
+  (_req, res) => {
+    res.status(410).json({
+      error: "Invoice accounting status workflow removed. Invoices are document records only.",
     });
-    if (!existing) {
-      res.status(404).json({ error: "Invoice not found" });
-      return;
-    }
-
-    if (existing.status === status) {
-      res.status(400).json({ error: "Invoice is already in this status" });
-      return;
-    }
-
-    const actorId = req.userId!;
-    const previousStatus = existing.status;
-
-    const [invoice] = await db
-      .update(commercialInvoicesTable)
-      .set({ status, updatedBy: actorId })
-      .where(eq(commercialInvoicesTable.id, invoiceId))
-      .returning();
-
-    await auditInvoice("commercial_invoice_status_changed", actorId, tenantId, {
-      tenantId,
-      commercialAccountId: existing.commercialAccountId,
-      contractTermId: existing.contractTermId,
-      invoiceId,
-      invoiceNumber: existing.invoiceNumber,
-      previousStatus,
-      nextStatus: status,
-      reason: reason.trim().slice(0, MAX_TEXT),
-    });
-
-    res.json({ invoice });
   },
 );
 
@@ -706,7 +640,6 @@ async function validateInvoiceBody(
   commercialAccountId: number,
   tenantId: number,
   isCreate: boolean,
-  existing?: ExistingInvoice,
 ): Promise<string | null> {
   if (isCreate) {
     const rawAcctId = body.commercialAccountId;
@@ -717,7 +650,6 @@ async function validateInvoiceBody(
     if (!Number.isFinite(acctId) || acctId !== commercialAccountId) {
       return "commercialAccountId does not match this tenant's commercial account";
     }
-
     const num = strRequired(body.invoiceNumber, MAX_NUMBER);
     if (num === "MISSING") return "invoiceNumber is required";
     if (num === "INVALID") return "invoiceNumber is invalid";
@@ -726,56 +658,19 @@ async function validateInvoiceBody(
     if (num === "MISSING" || num === "INVALID") return "invoiceNumber is invalid";
   }
 
-  if (body.status !== undefined && body.status !== null && body.status !== "") {
-    if (!VALID_STATUSES.includes(body.status as typeof VALID_STATUSES[number])) {
-      return `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}`;
-    }
+  const reminder = body.reminderDate !== undefined ? parseDate(body.reminderDate) : "MISSING";
+  if (reminder === "INVALID") return "reminderDate must be YYYY-MM-DD";
+
+  const email = strOpt(body.responsiblePersonEmail, MAX_NAME);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "Invalid responsiblePersonEmail";
   }
-
-  const currency = body.currency;
-  if (currency !== undefined && currency !== null && currency !== "") {
-    if (typeof currency !== "string" || currency.trim().length > 8) return "Invalid currency";
-    const c = currency.trim().toUpperCase();
-    if (!VALID_CURRENCIES.has(c)) {
-      return `Invalid currency. Supported: ${[...VALID_CURRENCIES].join(", ")}`;
-    }
-  }
-
-  const amount = body.invoiceAmount !== undefined
-    ? parseInvoiceAmount(body.invoiceAmount)
-    : "MISSING";
-  if (amount === "INVALID") return "invoiceAmount must be a non-negative number";
-
-  const invoiceDate = body.invoiceDate !== undefined
-    ? parseDate(body.invoiceDate)
-    : (existing?.invoiceDate ?? null);
-  const dueDate = body.dueDate !== undefined
-    ? parseDate(body.dueDate)
-    : (existing?.dueDate ?? null);
-  const bpStart = body.billingPeriodStart !== undefined
-    ? parseDate(body.billingPeriodStart)
-    : (existing?.billingPeriodStart ?? null);
-  const bpEnd = body.billingPeriodEnd !== undefined
-    ? parseDate(body.billingPeriodEnd)
-    : (existing?.billingPeriodEnd ?? null);
-
-  if (invoiceDate === "INVALID" || dueDate === "INVALID" || bpStart === "INVALID" || bpEnd === "INVALID") {
-    return "Dates must be ISO format YYYY-MM-DD";
-  }
-
-  const dateErr = validateInvoiceDates({
-    invoiceDate: invoiceDate as string | null,
-    dueDate: dueDate as string | null,
-    billingPeriodStart: bpStart as string | null,
-    billingPeriodEnd: bpEnd as string | null,
-  });
-  if (dateErr) return dateErr;
 
   if (body.contractTermId !== undefined && body.contractTermId !== null && body.contractTermId !== "") {
     const termId = Number(body.contractTermId);
     if (!Number.isFinite(termId) || termId < 1) return "Invalid contractTermId";
     if (!(await assertContractTermForTenant(termId, tenantId, commercialAccountId))) {
-      return "contractTermId does not belong to this tenant's commercial account";
+      return "contractTermId does not belong to this tenant";
     }
   }
 
@@ -788,11 +683,7 @@ function mapInvoiceFields(
   workspaceId: number,
 ) {
   const invoiceNumber = strRequired(body.invoiceNumber, MAX_NUMBER);
-  const invoiceDate = parseDate(body.invoiceDate);
-  const dueDate = parseDate(body.dueDate);
-  const bpStart = parseDate(body.billingPeriodStart);
-  const bpEnd = parseDate(body.billingPeriodEnd);
-  const amount = parseInvoiceAmount(body.invoiceAmount);
+  const reminder = dateToNull(parseDate(body.reminderDate));
 
   let contractTermId: number | null = null;
   if (body.contractTermId !== undefined && body.contractTermId !== null && body.contractTermId !== "") {
@@ -804,66 +695,40 @@ function mapInvoiceFields(
     commercialAccountId,
     contractTermId,
     invoiceNumber: invoiceNumber === "INVALID" || invoiceNumber === "MISSING" ? "" : invoiceNumber,
-    invoiceTitle:  strOpt(body.invoiceTitle, MAX_TITLE),
-    invoiceDate:   invoiceDate === "INVALID" ? null : invoiceDate,
-    dueDate:       dueDate === "INVALID" ? null : dueDate,
-    invoiceAmount: amount === "INVALID" || amount === "MISSING" ? null : amount,
-    currency:      typeof body.currency === "string" ? body.currency.trim().toUpperCase().slice(0, 8) : null,
-    billingPeriodStart: bpStart === "INVALID" ? null : bpStart,
-    billingPeriodEnd:   bpEnd === "INVALID" ? null : bpEnd,
-    status: typeof body.status === "string" ? body.status : "draft",
-    externalAccountingSystemName: strOpt(body.externalAccountingSystemName, MAX_SYSTEM_NAME),
-    externalAccountingReference:  strOpt(body.externalAccountingReference, MAX_NUMBER),
+    responsiblePersonName: strOpt(body.responsiblePersonName, MAX_NAME),
+    responsiblePersonPhone: strOpt(body.responsiblePersonPhone, MAX_PHONE),
+    responsiblePersonEmail: strOpt(body.responsiblePersonEmail, MAX_NAME),
+    reminderDate: reminder,
     notes: strOpt(body.notes, MAX_TEXT),
+    status: "shared",
   };
 }
 
-function mapInvoicePatch(body: Record<string, unknown>, existing: ExistingInvoice) {
+function mapInvoicePatch(body: Record<string, unknown>) {
   const patch: Record<string, unknown> = {};
 
   if (body.invoiceNumber !== undefined) {
     const n = strRequired(body.invoiceNumber, MAX_NUMBER);
     if (n !== "MISSING" && n !== "INVALID") patch.invoiceNumber = n;
   }
-  if (body.invoiceTitle !== undefined) patch.invoiceTitle = strOpt(body.invoiceTitle, MAX_TITLE);
-  if (body.invoiceDate !== undefined) {
-    const d = parseDate(body.invoiceDate);
-    patch.invoiceDate = d === "INVALID" ? existing.invoiceDate : d;
+  if (body.responsiblePersonName !== undefined) {
+    patch.responsiblePersonName = strOpt(body.responsiblePersonName, MAX_NAME);
   }
-  if (body.dueDate !== undefined) {
-    const d = parseDate(body.dueDate);
-    patch.dueDate = d === "INVALID" ? existing.dueDate : d;
+  if (body.responsiblePersonPhone !== undefined) {
+    patch.responsiblePersonPhone = strOpt(body.responsiblePersonPhone, MAX_PHONE);
   }
-  if (body.billingPeriodStart !== undefined) {
-    const d = parseDate(body.billingPeriodStart);
-    patch.billingPeriodStart = d === "INVALID" ? existing.billingPeriodStart : d;
+  if (body.responsiblePersonEmail !== undefined) {
+    patch.responsiblePersonEmail = strOpt(body.responsiblePersonEmail, MAX_NAME);
   }
-  if (body.billingPeriodEnd !== undefined) {
-    const d = parseDate(body.billingPeriodEnd);
-    patch.billingPeriodEnd = d === "INVALID" ? existing.billingPeriodEnd : d;
-  }
-  if (body.invoiceAmount !== undefined) {
-    const v = parseInvoiceAmount(body.invoiceAmount);
-    if (v !== "INVALID" && v !== "MISSING") patch.invoiceAmount = v;
-  }
-  if (body.currency !== undefined && typeof body.currency === "string") {
-    patch.currency = body.currency.trim().toUpperCase().slice(0, 8);
+  if (body.reminderDate !== undefined) {
+    const d = parseDate(body.reminderDate);
+    if (d !== "INVALID") patch.reminderDate = dateToNull(d);
   }
   if (body.contractTermId !== undefined) {
-    if (body.contractTermId === null || body.contractTermId === "") {
-      patch.contractTermId = null;
-    } else {
-      patch.contractTermId = Number(body.contractTermId);
-    }
-  }
-  if (body.externalAccountingSystemName !== undefined) {
-    patch.externalAccountingSystemName = strOpt(body.externalAccountingSystemName, MAX_SYSTEM_NAME);
-  }
-  if (body.externalAccountingReference !== undefined) {
-    patch.externalAccountingReference = strOpt(body.externalAccountingReference, MAX_NUMBER);
+    patch.contractTermId =
+      body.contractTermId === null || body.contractTermId === "" ? null : Number(body.contractTermId);
   }
   if (body.notes !== undefined) patch.notes = strOpt(body.notes, MAX_TEXT);
-  if (body.status !== undefined && typeof body.status === "string") patch.status = body.status;
 
   return patch;
 }

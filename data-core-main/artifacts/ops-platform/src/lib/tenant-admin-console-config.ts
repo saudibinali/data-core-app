@@ -143,7 +143,6 @@ export const CONSOLE_TAB_CONTENT_TEST_IDS: readonly string[] = [
   "console-overview-tab",
   "console-tab-content-lifecycle",
   "console-tab-content-subscription",
-  "console-tab-content-subscription-entitlements",
   "console-tab-content-entitlements",
   "console-tab-content-usage",
   "console-tab-content-renewal",

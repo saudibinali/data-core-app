@@ -1,7 +1,7 @@
 /**
  * commercial-tab-contracts.test.ts
  *
- * @phase P15-B - Contract Terms UI gating & safety (static + permission helpers)
+ * @phase P15-B / Commercial simplification - operational contracts UI
  */
 
 import { describe, it, expect } from "vitest";
@@ -62,26 +62,26 @@ describe("P15-B - contract permission gating (client)", () => {
   });
 });
 
-describe("P15-B - Commercial tab contract section (static)", () => {
+describe("operational contracts panel (static)", () => {
   const consolePage = readSrc("components/commercial/CommercialConsole.tsx");
-  const contractSection = readSrc("components/commercial/ContractTermsSection.tsx");
+  const panel = readSrc("components/commercial/OperationalContractsPanel.tsx");
 
-  it("renders ContractTermsSection only when canReadContracts is true", () => {
+  it("renders OperationalContractsPanel only when canReadContracts is true", () => {
     expect(consolePage).toContain("canReadContracts &&");
-    expect(consolePage).toContain("<ContractTermsSection");
+    expect(consolePage).toContain("<OperationalContractsPanel");
   });
 
-  it("passes canWrite to ContractTermsSection for action buttons", () => {
+  it("passes canWrite to OperationalContractsPanel for action buttons", () => {
     expect(consolePage).toContain("canWrite={canWriteContracts}");
   });
 
-  it("ContractTermsSection exposes expected test ids", () => {
-    expect(contractSection).toContain('data-testid="commercial-contract-terms-section"');
-    expect(contractSection).toContain('data-testid="commercial-add-contract-btn"');
-    expect(contractSection).toContain("Change Status");
+  it("OperationalContractsPanel exposes expected test ids", () => {
+    expect(panel).toContain('data-testid="operational-contracts-panel"');
+    expect(panel).toContain("Upload new contract");
+    expect(panel).toContain("Download PDF");
   });
 
-  it("does not add forbidden billing/payment/invoice UI in contract section", () => {
+  it("does not add forbidden billing/payment/invoice UI in contract panel", () => {
     const forbidden = [
       "stripe",
       "checkout",
@@ -91,8 +91,11 @@ describe("P15-B - Commercial tab contract section (static)", () => {
       "send email",
       "delete contract",
       "payment gateway",
+      "change status",
+      "billing cycle",
+      "currency",
     ];
-    const lower = contractSection.toLowerCase();
+    const lower = panel.toLowerCase();
     for (const term of forbidden) {
       expect(lower.includes(term), `forbidden term: ${term}`).toBe(false);
     }
