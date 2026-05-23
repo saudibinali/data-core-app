@@ -4,6 +4,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { workspacesTable } from "./workspaces";
 import { usersTable } from "./users";
+import { departmentsTable } from "./departments";
 import { formDefinitionsTable } from "./forms";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ export const hrOrgUnitsTable = pgTable(
     nameAr: text("name_ar"),
     code: text("code"),                          // short code, e.g. "IT-001"
     parentId: integer("parent_id"),              // self-ref; set after insert
+    managerEmployeeId: integer("manager_employee_id"), // org unit head (employee FK)
     color: text("color").notNull().default("#6366f1"),
     displayOrder: integer("display_order").notNull().default(0),
     isActive: boolean("is_active").notNull().default(true),
@@ -37,6 +39,7 @@ export const hrOrgUnitsTable = pgTable(
     index("idx_hr_org_units_workspace").on(t.workspaceId),
     index("idx_hr_org_units_parent").on(t.parentId),
     index("idx_hr_org_units_type").on(t.type),
+    index("idx_hr_org_units_manager_employee").on(t.managerEmployeeId),
   ],
 );
 
@@ -390,6 +393,12 @@ export const hrEmployeeDocumentsTable = pgTable(
     objectPath: text("object_path"),
     fileName: text("file_name"),
     fileSize: integer("file_size"),
+    mimeType: text("mime_type"),
+    checksum: text("checksum"),
+    storageKey: text("storage_key"),
+    categoryCode: text("category_code"),
+    isSigned: boolean("is_signed").notNull().default(false),
+    signedAt: timestamp("signed_at", { withTimezone: true }),
 
     notes: text("notes"),
     createdBy: integer("created_by").references(() => usersTable.id, { onDelete: "set null" }),
@@ -1276,6 +1285,22 @@ export const hrWorkspaceSettingsTable = pgTable("hr_workspace_settings", {
   numberingStartFrom: integer("numbering_start_from"),
   /** legacy | transition | canonical — workspace leave cutover (P-HCM2) */
   leaveRuntimeMode: text("leave_runtime_mode").notNull().default("transition"),
+  /** legacy | shadow | active — workforce canonical cutover (Phase 1) */
+  workforceCanonicalMode: text("workforce_canonical_mode").notNull().default("legacy"),
+  /** none | employee_to_user | bidirectional */
+  workforceSyncDirection: text("workforce_sync_direction").notNull().default("none"),
+  /** legacy | shadow | active — org linking enforcement (Phase 2) */
+  orgRuntimeMode: text("org_runtime_mode").notNull().default("legacy"),
+  /** legacy | dual | unified — approval runtime cutover (Phase 3) */
+  approvalRuntimeMode: text("approval_runtime_mode").notNull().default("legacy"),
+  /** legacy | shadow | active — workforce governance enforcement (Phase 4) */
+  workforceGovernanceMode: text("workforce_governance_mode").notNull().default("legacy"),
+  /** Activation gate policy JSON (Phase 4) */
+  workforceActivationRequires: jsonb("workforce_activation_requires"),
+  /** none | stage1 | stage2 | stage3 | stage4 — gradual cleanup (Phase 5, no drops) */
+  workforceCleanupStage: text("workforce_cleanup_stage").notNull().default("none"),
+  /** Optional per-surface legacy write policy during cleanup */
+  legacyWritePolicy: jsonb("legacy_write_policy"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 
@@ -1445,10 +1470,91 @@ export const hrLeaveMigrationMapTable = pgTable(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WORKFORCE CANONICAL FOUNDATION (Phase 1)
+// Maps legacy departments → hr_org_units during cutover.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const legacyDepartmentOrgMapTable = pgTable(
+  "legacy_department_org_map",
+  {
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    departmentId: integer("department_id")
+      .notNull()
+      .references(() => departmentsTable.id, { onDelete: "cascade" }),
+    orgUnitId: integer("org_unit_id")
+      .notNull()
+      .references(() => hrOrgUnitsTable.id, { onDelete: "cascade" }),
+    matchMethod: text("match_method").notNull().default("name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.departmentId], name: "pk_legacy_department_org_map" }),
+    index("idx_legacy_dept_org_map_org_unit").on(t.orgUnitId),
+  ],
+);
+
+export const workforceMigrationExceptionsTable = pgTable(
+  "workforce_migration_exceptions",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    entityType: text("entity_type").notNull(),
+    entityId: integer("entity_id").notNull(),
+    reason: text("reason").notNull(),
+    details: jsonb("details"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_workforce_migration_exceptions_ws").on(t.workspaceId),
+  ],
+);
+
+export const workforceExecutiveOverridesTable = pgTable("workforce_executive_overrides", {
+  workspaceId: integer("workspace_id")
+    .primaryKey()
+    .references(() => workspacesTable.id, { onDelete: "cascade" }),
+  ceoEmployeeId: integer("ceo_employee_id"),
+  hrDirectorEmployeeId: integer("hr_director_employee_id"),
+  maxReportingDepth: integer("max_reporting_depth").notNull().default(10),
+  executiveExemptEmployeeIds: jsonb("executive_exempt_employee_ids").notNull().default([]),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+});
+
+/** Phase 2 foundation — consumed by Phase 3 approval/delegation runtime. */
+export const workforceDelegationsTable = pgTable(
+  "workforce_delegations",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    delegatorEmployeeId: integer("delegator_employee_id").notNull(),
+    delegateEmployeeId: integer("delegate_employee_id").notNull(),
+    scope: text("scope").notNull().default("all_approvals"),
+    startDate: date("start_date").notNull(),
+    endDate: date("end_date"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_workforce_delegations_workspace").on(t.workspaceId),
+    index("idx_workforce_delegations_delegator").on(t.delegatorEmployeeId),
+  ],
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type HrWorkspaceSettings         = typeof hrWorkspaceSettingsTable.$inferSelect;
+export type LegacyDepartmentOrgMap      = typeof legacyDepartmentOrgMapTable.$inferSelect;
+export type WorkforceMigrationException   = typeof workforceMigrationExceptionsTable.$inferSelect;
+export type WorkforceExecutiveOverride    = typeof workforceExecutiveOverridesTable.$inferSelect;
+export type WorkforceDelegation           = typeof workforceDelegationsTable.$inferSelect;
 export type HrLeaveMigrationMap          = typeof hrLeaveMigrationMapTable.$inferSelect;
 export type Employee                    = typeof employeesTable.$inferSelect;
 export type HrOrgUnit                   = typeof hrOrgUnitsTable.$inferSelect;

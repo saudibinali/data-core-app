@@ -1,0 +1,182 @@
+================================================================================
+EMPLOYEE ORGANIZATION STRUCTURE & WORKFORCE MODEL — FULL AUDIT REPORT
+================================================================================
+Project: data-core-main
+Date: 2026-05-20
+Mode: AUDIT & DISCOVERY ONLY — zero code/DB/API/UI changes
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+The platform implements a **dual workforce model**:
+
+  users (+ legacy flat departments + lineManagerId)
+  employees (+ hr_org_units tree + directManagerId + optional userId link)
+
+These are **not synchronized**. Only `fullName` is mandatory when creating an
+employee; department/org unit, manager, job title, and position are **optional**.
+
+Real hierarchical org exists in **hr_org_units** (parentId, typed levels).
+Legacy **departments** remain flat and drive **user directory and workflows**.
+
+Manager resolution **splits by module**:
+  • Canonical leave → employees.directManagerId (manager must have userId)
+  • Workflows → users.lineManagerId
+  • Legacy dept → departments.managerId (limited use)
+
+Verdict: **Metadata-rich HCM schema with under-governed runtime** — closer to
+**user management + HR add-on** than unified enterprise workforce platform.
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+1. employee-model-audit.md              — Phase 1: users vs employees vs members
+2. organization-structure-audit.md      — Phase 2: departments vs org units
+3. position-reporting-structure-audit.md — Phase 3: positions, managers, escalation
+4. hr-operational-readiness-audit.md    — Phase 4: leave, attendance, payroll, etc.
+5. employee-structure-ui-ux-audit.md    — Phase 5: UI flows and enforcement gaps
+6. workforce-architecture-final-evaluation.txt — Phase 6: scores and recommendations
+7. workforce-structure-full-audit-report.txt — This integrated summary
+
+================================================================================
+KEY ANSWERS (PRIMARY OBJECTIVE)
+================================================================================
+
+How is employee created?
+  POST /hr/employees (fullName required) | provision | import
+  User creation separate (POST admin/users) — no auto employee
+
+How linked to department?
+  employees.orgUnitId → hr_org_units (HCM)
+  users.departmentId + user_departments → departments (legacy)
+
+Is department mandatory?
+  NO — orgUnitId optional at API and create UI
+
+Real organizational hierarchy?
+  YES in hr_org_units tree — NOT in legacy departments
+  NOT unified platform-wide
+
+Reporting / manager hierarchy?
+  STORED optionally: directManagerId (employee), lineManagerId (user)
+  NOT enforced; NOT synced; weak FK integrity
+
+Position hierarchy?
+  Job grades/titles operational; position SEATS (hr_positions) not assigned
+  to employees in application layer (positionId unused)
+
+Real workforce model?
+  PARTIAL — employee table is canonical for HR ops; platform still user-centric
+
+Enterprise-ready?
+  NO — dual models, dangerous optional fields, approval fallbacks
+
+================================================================================
+ENTITY MODEL (CONDENSED)
+================================================================================
+
+users
+  workspace_id, role (member|manager|admin), department_id, line_manager_id
+  position (text), employment_status
+
+employees
+  workspace_id, user_id (optional unique), full_name (required)
+  org_unit_id, job_title_id, job_grade_id, position_id (unused), direct_manager_id
+  company/branch/location (text), status, employment_type, onboarding_data
+
+hr_org_units
+  type: company|branch|division|department|team, parent_id (tree)
+
+departments (legacy)
+  flat: name, manager_id → user
+
+hr_positions
+  seat definition: title, org_unit_id, headcount, status vacant|filled
+
+================================================================================
+OPERATIONAL READINESS (CONDENSED)
+================================================================================
+
+Leave (canonical)     MEDIUM-HIGH — works; admin fallback if no manager/user link
+Attendance self-serv  MEDIUM — requires employees.userId
+Payroll               MEDIUM — employee-centric; org optional
+Transfer/promotion    LOW — position history audit only; no auto-update
+Disciplinary          LOW — notes only
+Onboarding/offboard   PARTIAL — jsonb + status flags
+Workflow approvals    MEDIUM — user lineManagerId; decoupled from HCM
+
+================================================================================
+UI/UX HIGHLIGHTS
+================================================================================
+
+GOOD: hr-employee-new captures org/manager at create; HR foundation for org tree
+GAP: hr-employee-detail org tab READ-ONLY — no edit for orgUnitId/manager/title
+GAP: Two admin surfaces — /departments vs HR Foundation org units
+GAP: No org chart visualization
+RISK: Optional org fields → contact list masquerading as HCM
+
+================================================================================
+ARCHITECTURAL RISKS (TOP 7)
+================================================================================
+
+1. Dual org systems (departments vs hr_org_units)
+2. Dual manager fields (lineManagerId vs directManagerId)
+3. Zero mandatory org relationships on employee create
+4. User ↔ employee link without field sync
+5. positionId / hr_positions disconnected from roster
+6. Job movement history does not update current employee org
+7. Leave/workflow approver sources disagree
+
+================================================================================
+FAKE FLEXIBILITY / PLACEHOLDER
+================================================================================
+
+• hr_positions occupancy/headcount without employee assignment
+• Workflow department_head approver (not implemented)
+• Text company/branch vs structured org unit branch type
+• "Organization structure" product surface vs optional orgUnitId
+• Employee status text vs hr_employee_statuses lookup (weak coupling)
+
+================================================================================
+RECOMMENDED NEXT STEPS (PLANNING ONLY — NOT EXECUTED)
+================================================================================
+
+1. Declare canonical workforce model (employees + hr_org_units)
+2. Mandatory org/manager policy per workspace tier
+3. Unify manager resolution for leave + workflows
+4. Org edit UI on employee detail + org chart
+5. Wire positionId OR defer seats from product
+6. Sync or deprecate legacy departments for user module
+7. Link-user wizard on employee create
+
+================================================================================
+FINAL VERDICT
+================================================================================
+
+Classification:
+  HR-ready .............. PARTIAL
+  Enterprise-ready ...... NO
+  Structurally weak ..... YES (dual models)
+  Over-flexible ......... YES
+  Under-governed ........ YES
+
+Closer to: USER MANAGEMENT SYSTEM with HCM module
+Not yet:   ENTERPRISE WORKFORCE PLATFORM
+
+Overall score (enterprise lens): ~2.2 / 5
+
+================================================================================
+AUDIT COMPLETE — NO MODIFICATIONS MADE
+================================================================================
+
+Prior related doc: workspace-hr-duplication-conflict-risk-report.md
+
+Key paths:
+  lib/db/src/schema/hr.ts, users.ts, departments.ts
+  artifacts/api-server/src/routes/hr.ts, leave.ts, departments.ts
+  artifacts/ops-platform/src/pages/hr-employee-new.tsx, hr-employee-detail.tsx
+  artifacts/ops-platform/src/pages/users.tsx, departments.tsx, hr-foundation.tsx
+
+================================================================================

@@ -1,0 +1,170 @@
+================================================================================
+HR FOUNDATION MASTER DATA & ORGANIZATIONAL STRUCTURE — FULL AUDIT REPORT
+================================================================================
+Project: data-core-main
+Date: 2026-05-20
+Mode: AUDIT & DISCOVERY ONLY — zero code/DB/API/UI changes
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+The platform implements a credible **HR Foundation** admin surface
+(hr-foundation.tsx) backed by workspace-scoped master data tables and
+POST /hr/foundation/seed defaults. This IS a real foundation architecture
+for **configurable HR metadata**.
+
+It is NOT yet **Runtime Organizational Intelligence**. Most foundation
+entities are lookup catalogs; employee/contract/document rows use parallel
+text fields without FK enforcement. Exceptions with real runtime impact:
+
+  • hr_org_units → employees.orgUnitId
+  • hr_job_titles / hr_job_grades → employee FKs
+  • hr_leave_policies → leave requests, requiresApproval, balance mutations
+
+Position seats (hr_positions) are fully configurable in Foundation but
+NOT assigned to employees in application code (positionId unused).
+
+Parallel legacy org (departments on users) remains outside Foundation UI.
+
+Verdict: **Semi-structured HCM | Metadata-heavy foundation shell |
+Partially operational org | Not enterprise workforce platform yet**
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+1. hr-foundation-model-audit.md
+2. organizational-structure-deep-analysis.md
+3. position-and-job-architecture-audit.md
+4. workforce-relationship-model-audit.md
+5. workflow-org-dependency-analysis.md
+6. hr-foundation-ui-ux-audit.md
+7. enterprise-workforce-readiness-evaluation.txt
+8. workforce-foundation-full-audit-report.txt (this file)
+
+================================================================================
+FOUNDATION COMPONENTS — RUNTIME CLASSIFICATION
+================================================================================
+
+| Component              | Master | Runtime | Bound to employee? |
+|------------------------|--------|---------|-------------------|
+| Org units              | ✓      | ✓       | FK orgUnitId      |
+| Job titles             | ✓      | ✓       | FK jobTitleId     |
+| Job grades             | ✓      | ✓       | FK jobGradeId     |
+| Leave policies         | ✓      | ✓       | leavePolicyId     |
+| Work locations         | ✓      | △       | FK optional       |
+| Positions (seats)      | ✓      | ✗       | positionId unused |
+| Employee statuses      | ✓      | ✗       | text status       |
+| Employment types       | ✓      | △       | text parallel     |
+| Contract types         | ✓      | ✗       | text on contracts |
+| Document types         | ✓      | ✗       | text on documents |
+| Probation policies     | ✓      | ✗       | not linked        |
+
+================================================================================
+ORGANIZATIONAL STRUCTURE
+================================================================================
+
+SUPPORTED IN hr_org_units:
+  company, division, department, team (+ unit in UI; branch in schema comment)
+
+HIERARCHY:
+  parentId tree — YES stored, NO chart, NO cycle validation, NO runtime walk
+
+NOT SUPPORTED:
+  Matrix org, dual reporting, policy inheritance, unit-head approval routing
+
+EMPLOYEE BINDING:
+  Single optional orgUnitId — NOT mandatory
+
+LEGACY PARALLEL:
+  flat departments table for users — NOT in Foundation page
+
+================================================================================
+POSITION / JOB MODEL
+================================================================================
+
+Job Title  = catalog (hr_job_titles) — USED on employee
+Job Grade  = catalog (hr_job_grades) — USED on employee
+Position   = seat (hr_positions) — CONFIG ONLY; employee occupies dept not seat
+Role       = users.role (RBAC) — NOT HR job role
+
+Employee model today: org unit + title + grade + optional free-text position
+
+================================================================================
+WORKFORCE RELATIONSHIPS
+================================================================================
+
+Direct manager: employees.directManagerId → used by CANONICAL LEAVE
+Line manager:   users.lineManagerId      → used by WORKFLOWS
+Dept manager:   departments.managerId    → legacy, limited use
+
+NO: delegation, acting manager, alternate approver, org-graph escalation
+
+================================================================================
+WORKFLOW / APPROVAL DEPENDENCIES
+================================================================================
+
+Workflow engine:     users.lineManagerId + role — IGNORES foundation org
+Leave:               employee manager + leave policy requiresApproval
+Self-service:        employee userId link; policies list
+Attendance:          employee userId; locations partial
+Payroll:             employeeId; org optional
+
+BLOCKERS for enterprise approvals:
+  • Split manager models
+  • No org-head resolver
+  • No delegation
+  • Foundation not wired to workflow steps
+  • Optional org on hire → admin fallback approvers
+
+================================================================================
+HR FOUNDATION UI (hr-foundation.tsx)
+================================================================================
+
+11 tabs, Seed Defaults, bilingual SimpleEntityCard CRUD
+
+GOOD: clear taxonomy, position vs title description, leave policy flags
+CONFUSING: Org Units/Departments naming, Position vs title on employee screens
+GAPS: no org chart, probation not seeded, foundation lookups not enforced
+       on employee/contracts/documents UI
+
+================================================================================
+PRIOR RELATED AUDITS
+================================================================================
+
+employee-model-audit.md
+organization-structure-audit.md
+position-reporting-structure-audit.md
+workforce-architecture-final-evaluation.txt
+workflow-engine-architecture-audit.md (workflow ↔ org decoupling)
+
+================================================================================
+KEY PATHS
+================================================================================
+
+Schema:  lib/db/src/schema/hr.ts
+API:     artifacts/api-server/src/routes/hr.ts (Foundation L1835+)
+UI:      artifacts/ops-platform/src/pages/hr-foundation.tsx
+Leave:   artifacts/api-server/src/routes/leave.ts
+Docs:    p-hcm2-hcm-foundation.md, workspace-hr-duplication-conflict-risk-report.md
+
+================================================================================
+RECOMMENDED FOUNDATION FOR FUTURE BUILD (NOT EXECUTED)
+================================================================================
+
+Before enterprise approvals / delegation / routing:
+
+1. Bind foundation lookups → employee/contract/document FKs or enforced codes
+2. Wire positionId + occupancy automation
+3. Unify manager resolution (employee graph + sync to user)
+4. Org tree service: unit head, ancestry, subtree employees
+5. Mandatory org + manager policy per workspace
+6. Accrual engine from leave policy metadata
+7. Single admin narrative: Foundation = source of truth for structure
+
+Overall readiness: ~2.4/5 enterprise | ~3.8/5 SMB configurable HR
+
+================================================================================
+AUDIT COMPLETE — NO MODIFICATIONS MADE
+================================================================================

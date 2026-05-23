@@ -1,0 +1,70 @@
+PHASE 2 — ENTERPRISE ORGANIZATIONAL RUNTIME
+Final Report
+Generated: 2026-05-20
+
+STATUS: IMPLEMENTATION COMPLETE (additive, backward compatible)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+[PASS] hr_org_units canonical org runtime with manager_employee_id
+[PASS] Org traversal (tree, ancestors, descendants, subtree roster)
+[PASS] Employee org linking validation (legacy/shadow/active modes)
+[PASS] Manager resolution engine (direct + org head + executive)
+[PASS] Reporting chain API with cycle detection
+[PASS] Legacy departments via compatibility layer only
+[PASS] Schema mismatch → 503 (not 500)
+[PASS] Startup schema verification + idempotent backfill
+[PASS] validate-org-runtime.cjs (read-only)
+[PASS] Build + 20 unit tests passing
+
+DEFAULT: orgRuntimeMode = legacy
+
+================================================================================
+KEY DELIVERABLES
+================================================================================
+Code:
+  lib/db/drizzle/0025_org_runtime_foundation.sql
+  artifacts/api-server/src/lib/workforce/org/*
+  scripts/migrate-org-runtime.cjs
+  scripts/validate-org-runtime.cjs
+
+Docs:
+  org-runtime-implementation.md
+  reporting-chain-runtime.md
+  manager-resolution-engine.md
+  org-validation-report.md
+  legacy-org-compatibility.md
+  production-runtime-safety.md
+  phase-2-final-report.txt
+
+================================================================================
+NEW API ROUTES
+================================================================================
+GET  /hr/org-units/:id/ancestors
+GET  /hr/org-units/:id/descendants
+GET  /hr/org-units/:id/employees
+GET  /hr/employees/:id/reporting-chain
+
+PATCH /hr/settings → orgRuntimeMode
+
+================================================================================
+DEPLOYMENT
+================================================================================
+1. Deploy app (migrations auto-run; startup verifies schema)
+2. Optional: node scripts/migrate-org-runtime.cjs
+3. node scripts/validate-org-runtime.cjs
+4. Promote workspaces: legacy → shadow → active
+
+================================================================================
+NOT DONE (by design)
+================================================================================
+- Legacy cleanup / table drops
+- Workflow rebuild / delegation runtime
+- Position seat runtime
+- Mandatory enforcement for all workspaces by default
+
+================================================================================
+NEXT: PHASE 3
+================================================================================
+Workflow approval routing, delegation consumption, position hierarchy wiring.

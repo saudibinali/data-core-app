@@ -3,6 +3,8 @@ import { hrWorkspaceSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 export type LeaveRuntimeMode = "legacy" | "transition" | "canonical";
+export type WorkforceCanonicalMode = "legacy" | "shadow" | "active";
+export type WorkforceSyncDirection = "none" | "employee_to_user" | "bidirectional";
 
 const VALID_MODES: LeaveRuntimeMode[] = ["legacy", "transition", "canonical"];
 

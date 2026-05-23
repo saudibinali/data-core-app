@@ -96,11 +96,21 @@ export default function WorkflowsPage() {
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
             {isAr
-              ? "أتمتة العمليات المتكررة عبر الأحداث والخطوات"
-              : "Automate repetitive processes with event-driven step execution"}
+              ? "قوالب العمليات ومسارات الموافقة المرتبطة بالهيكل التنظيمي"
+              : "Business process templates and org-aware approval routing"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Link href="/process-templates">
+            <Button variant="secondary" size="sm">
+              {isAr ? "قوالب العمليات" : "Process Templates"}
+            </Button>
+          </Link>
+          <Link href="/self-service/approvals">
+            <Button variant="secondary" size="sm">
+              {isAr ? "صندوق الموافقات" : "Approval Inbox"}
+            </Button>
+          </Link>
           <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching} className="gap-2">
             <RefreshCw className={`w-4 h-4 ${isFetching ? "animate-spin" : ""}`} />
             {isAr ? "تحديث" : "Refresh"}

@@ -1,0 +1,60 @@
+PHASE 1 — CANONICAL WORKFORCE FOUNDATION
+Final Report
+Generated: 2026-05-20
+
+STATUS: IMPLEMENTATION COMPLETE (additive, backward compatible)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+[PASS] employees canonical runtime layer created
+[PASS] hr_org_units org traversal + tree API
+[PASS] directManagerId manager resolution (leave + workflows)
+[PASS] legacy compatibility adapters (departments, lineManagerId)
+[PASS] upload hardening + HR document upload foundation
+[PASS] schema mismatch → 503 structured errors
+[PASS] idempotent migrations + validation script
+[PASS] legacy paths preserved — no deletions
+
+DEFAULT: workforceCanonicalMode = legacy (zero production behavior change)
+
+================================================================================
+KEY DELIVERABLES
+================================================================================
+Code:
+  artifacts/api-server/src/lib/workforce/*     — runtime resolver layer
+  lib/db/drizzle/0024_workforce_canonical_foundation.sql
+  scripts/migrate-workforce-foundation.cjs
+  scripts/validate-workforce-integrity.cjs
+
+Docs:
+  workforce-runtime-implementation.md
+  org-runtime-foundation.md
+  upload-runtime-hardening.md
+  migration-safety-report.md
+  employee-file-foundation.md
+  runtime-validation-report.md
+  phase-1-final-report.txt (this file)
+
+================================================================================
+DEPLOYMENT STEPS
+================================================================================
+1. Deploy application
+2. DATABASE_URL=... node scripts/migrate-workforce-foundation.cjs
+3. DATABASE_URL=... node scripts/validate-workforce-integrity.cjs
+4. Staging: PATCH /hr/settings { workforceCanonicalMode: "shadow" }
+5. After validation: promote to "active" per workspace
+
+================================================================================
+EXPLICITLY NOT DONE (by design)
+================================================================================
+- Legacy cleanup / table drops
+- Workflow UX rebuild
+- Position seat runtime
+- Mandatory org/manager enforcement
+- Big-bang runtime switch
+
+================================================================================
+NEXT PHASE PREVIEW
+================================================================================
+Phase 2: Position runtime, reporting hierarchy hardening, org-based routing.

@@ -1,6 +1,7 @@
 import { db } from "@workspace/db";
 import { employeesTable, usersTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
+import { syncLegacyUserFieldsFromEmployee } from "../workforce/manager-resolver";
 
 export type EmployeeAccountStatus = {
   employeeId: number;
@@ -65,6 +66,8 @@ export async function linkEmployeeToUser(
     .update(employeesTable)
     .set({ userId })
     .where(eq(employeesTable.id, employeeId));
+
+  await syncLegacyUserFieldsFromEmployee(workspaceId, employeeId).catch(() => undefined);
 
   return { ok: true };
 }

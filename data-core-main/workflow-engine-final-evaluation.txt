@@ -1,0 +1,139 @@
+================================================================================
+WORKFLOW ENGINE — FINAL SYSTEM EVALUATION
+================================================================================
+Date: 2026-05-20
+Scope: Read-only audit — no modifications performed
+Base: data-core-main/
+
+================================================================================
+1. WORKFLOW ENGINE CLASSIFICATION
+================================================================================
+
+Primary verdict: PARTIALLY OPERATIONAL — SEMI-DYNAMIC — METADATA-HEAVY — FAKE-DYNAMIC IN APPROVAL/ESCALATION
+
+| Label | Applies? | Rationale |
+|-------|----------|-----------|
+| enterprise-ready | NO | No unified BPM, delegation, SLA product, or approver ACL |
+| partially operational | YES | Core engine + 7 step types + publish governance + tests |
+| overengineered | PARTIAL | Large governance analytics surface; dual type systems |
+| underdefined | PARTIAL | Employee UX and cross-module approval model gaps |
+| dynamic | PARTIAL | Definitions/triggers/steps in JSONB DB |
+| fake-dynamic | YES | approvalType/onTimeout/department_head config without runtime |
+| metadata-heavy | YES | Rich schema comments, version snapshots, audit rows |
+| runtime-accurate | PARTIAL | Executor matches most docs; validator header stale; UI oversells |
+
+================================================================================
+2. SYSTEM QUALITY ASSESSMENT
+================================================================================
+
+Scalable?
+  MODERATE. In-process synchronous resume limits throughput. DB polling scheduler
+  is multi-instance safe for delays. Rate limit 100 exec/min/workspace. Role fanout
+  capped at 50. Monolithic workflows route file is maintenance risk.
+
+Maintainable?
+  MODERATE-LOW. Three approval systems + package drift (core-workflows vs api-server).
+  Strong test suite helps. Excellent inline schema documentation.
+
+Operationally meaningful?
+  YES FOR ADMINS / OPS. Event-driven automation for tickets, forms, notifications,
+  tasks, delays works. NO FOR EMPLOYEES seeking unified approvals/tracking.
+
+================================================================================
+3. RISKS & BOTTLENECKS
+================================================================================
+
+Hardcoded bottlenecks:
+  - workflow.manage required to approve any execution
+  - 24h execution TTL (not per-step)
+  - 50 notification recipient cap
+  - 7 fixed step types
+  - Ticket-only legacy approvals table
+
+Architectural risks:
+  - Dual/triple approval models (workflow_approvals, approvals, leave_approval_steps)
+  - Form submission status decoupled from workflow terminal state
+  - In-process resume crash window (stuck running)
+  - core-workflows / core-approvals not wired — future refactor debt
+  - Naming collision: governance_workflow_actions vs workflow_executions
+
+Runtime inconsistencies:
+  - waiting_approval not shown in my-submissions enrichment
+  - Multi/parallel approval types ≠ behavior
+  - onTimeout escalate in seeds ≠ executor
+  - No approvers → step skipped (success), not failed
+  - department_head in types, not in resolver
+
+Dangerous complexity:
+  - Admins configure escalation/parallel modes believing they work
+  - Silent auto-bypass when approver resolution fails
+  - Any workflow.manage user can approve any pending execution
+
+================================================================================
+4. CAN THIS BECOME A REAL ENTERPRISE WORKFLOW PLATFORM?
+================================================================================
+
+Answer: YES — WITH FOCUSED STABILIZATION, NOT GREENFIELD REWRITE.
+
+Existing assets worth keeping:
+  - workflow_definitions + versions + executions + step audit
+  - Event bus trigger model + form hint routing
+  - Approval pause/resume with guarded transitions
+  - Delay scheduler + TTL + publish validation
+  - 30+ automated tests
+
+Missing for enterprise grade:
+  - Single approval abstraction (or clear deprecation of legacy)
+  - Approver-scoped authorization + delegation + reassignment
+  - Per-step timeout/escalation worker
+  - Employee inbox + deep-linked notifications
+  - Form/workflow status synchronization
+  - Optional queue for long-running resume
+  - Wire core-workflows / core-approvals packages
+
+================================================================================
+5. RECOMMENDED NEXT PHASES (DOCUMENTATION ONLY — NOT EXECUTED)
+================================================================================
+
+REBUILD (targeted, not full):
+  - Unified approval inbox model spanning workflow + leave (+ migrate ticket legacy)
+  - Approver ACL layer on execution approve routes
+
+SIMPLIFICATION:
+  - Remove or hide UI options without runtime (parallel approval, onTimeout)
+  - Consolidate notification types (assigned → ticket_assigned)
+  - Split routes/workflows.ts governance analytics from tenant CRUD
+
+STABILIZATION:
+  - Sync form submission status from execution events
+  - Fix my-submissions to include waiting_approval
+  - Fail approval step when no approvers (configurable policy)
+  - Add notification links to approve surfaces
+
+GOVERNANCE:
+  - Document canonical paths per domain (leave, tickets, forms)
+  - Publish lifecycle enforcement already strong — extend to UX labels
+
+CLEANUP (later, after stabilization):
+  - Deprecate approvals table or generalize entity FK
+  - Merge core-workflows types with api-server types
+  - Retire legacy leave mode per workspace
+
+================================================================================
+6. FINAL SCORECARD (1-5)
+================================================================================
+
+Engine core runtime .............. 4/5
+Data model / auditability ........ 4/5
+Publish governance ............. 4/5
+Approval semantics ............. 2/5
+Self-service integration ....... 2/5
+Employee UX .................... 2/5
+Notifications/reminders ........ 2/5
+Enterprise completeness ........ 2/5
+Test coverage .................. 4/5
+Overall platform readiness ..... 2.5/5 (internal automation) / 1.5/5 (employee-facing BPM)
+
+================================================================================
+END OF FINAL EVALUATION
+================================================================================

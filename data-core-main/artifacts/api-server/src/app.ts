@@ -4,6 +4,7 @@ import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { UPLOAD_LIMITS } from "./lib/workforce/upload-config";
 
 const app: Express = express();
 
@@ -23,8 +24,8 @@ app.use(
 
 app.use(cors({ credentials: true, origin: true }));
 app.use(cookieParser());
-app.use(express.json({ limit: "200mb" }));
-app.use(express.urlencoded({ extended: true, limit: "200mb" }));
+app.use(express.json({ limit: UPLOAD_LIMITS.jsonBodyBytes }));
+app.use(express.urlencoded({ extended: true, limit: UPLOAD_LIMITS.jsonBodyBytes }));
 
 app.use("/api", router);
 

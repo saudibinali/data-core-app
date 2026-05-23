@@ -1,0 +1,115 @@
+PHASE 4 — ENTERPRISE WORKFORCE OPERATIONS & EMPLOYEE FILE RUNTIME
+FINAL REPORT
+Generated: 2026-05-20
+================================================================================
+
+OBJECTIVE
+---------
+Transform employee from record → Workforce Operating Entity (additive, no legacy
+deletion, no API breaks, default modes preserve production behavior).
+
+STATUS: SUCCESS (foundation complete)
+================================================================================
+
+DELIVERABLES
+------------
+[x] employee-file-runtime.md
+[x] workforce-lifecycle-runtime.md
+[x] employee-documents-runtime.md
+[x] workforce-timeline-runtime.md
+[x] hr-movement-runtime.md
+[x] workforce-governance-enforcement.md
+[x] upload-runtime-safety-phase4.md
+[x] production-workforce-safety.md
+[x] phase-4-final-report.txt
+
+MIGRATION
+---------
+File: lib/db/drizzle/0027_workforce_operations_foundation.sql
+Script: scripts/migrate-workforce-operations.cjs
+Validate: scripts/validate-workforce-operations.cjs
+Properties: additive, idempotent, rollback-safe
+
+NEW TABLES
+----------
+- employee_movements
+- workforce_lifecycle_events
+- workforce_timeline_events
+- workforce_audit_log
+
+SETTINGS (hr_workspace_settings)
+--------------------------------
+- workforce_governance_mode (default: legacy)
+- workforce_activation_requires (jsonb, optional)
+
+DOCUMENT EXTENSIONS
+-------------------
+- category_code, is_signed, signed_at on hr_employee_documents
+
+API (NEW — legacy routes unchanged)
+-----------------------------------
+GET  /hr/employees/:id/file
+GET  /hr/employees/:id/timeline
+GET  /hr/employees/:id/movements
+POST /hr/employees/:id/movements
+GET  /hr/employees/:id/lifecycle
+POST /hr/employees/:id/lifecycle
+POST /hr/employees/:id/lifecycle/:eventId/complete
+
+SERVICES
+--------
+artifacts/api-server/src/lib/workforce/operations/
+  employee-file-service.ts
+  movement-service.ts
+  lifecycle-service.ts
+  timeline-service.ts
+  governance-service.ts
+  audit-service.ts
+  document-hooks.ts
+  schema-guard.ts
+  workforce-ops-startup.ts
+  settings.ts
+
+STARTUP
+-------
+init-sequence.ts → runWorkforceOpsStartupChecks() after approval checks
+Schema mismatch → exit(1) at startup
+
+UI
+--
+ops-platform hr-employee-detail.tsx:
+  - Employee File tab (aggregate summary)
+  - Timeline tab (unified feed)
+
+TESTS
+-----
+artifacts/api-server/src/lib/workforce/operations/__tests__/workforce-operations.test.ts
+  4 passed
+
+SUCCESS CRITERIA
+----------------
+[x] Employee file runtime API works
+[x] PDF uploads stable (Phase 1 + Phase 4 metadata)
+[x] Employee timeline works
+[x] Workforce lifecycle foundation works
+[x] Org transitions via movement runtime
+[x] Governance enforcement (legacy default)
+[x] No HTTP 500 on schema mismatch (503 + hint)
+[x] Production deployment startup verify
+[x] Legacy APIs compatible — no cleanup, no deletion
+
+NOT IN SCOPE (as requested)
+---------------------------
+- Position runtime (full)
+- Delegation runtime (full)
+- Legacy cleanup / deletion
+
+PROMOTION PATH
+--------------
+1. node scripts/migrate-workforce-operations.cjs
+2. Deploy api-server (startup verify passes)
+3. Per workspace: workforceGovernanceMode shadow → active
+4. Per workspace: approvalRuntimeMode dual/unified for lifecycle approvals
+
+================================================================================
+END PHASE 4 REPORT

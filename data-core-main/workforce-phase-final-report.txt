@@ -1,0 +1,83 @@
+================================================================================
+WORKFORCE PHASE ONE — FINAL REPORT
+Enterprise Workforce Platform Refactor
+================================================================================
+Phase: 1 — Workforce Canonicalization & HR Runtime Unification
+Date: 2026-05-20
+Status: PLANNING COMPLETE — implementation not started in this deliverable set
+
+================================================================================
+OBJECTIVE RECAP
+================================================================================
+Unify HR entities under one canonical runtime:
+  employees (workforce truth)
+  hr_org_units (org truth)
+  Compatibility layer for users, departments, lineManagerId (temporary)
+
+================================================================================
+DELIVERABLES (PHASE 1)
+================================================================================
+✓ workforce-runtime-plan.md
+✓ canonical-workforce-mapping.md
+✓ legacy-compatibility-plan.md
+✓ workforce-runtime-validation.md
+✓ workforce-phase-final-report.txt (this file)
+
+================================================================================
+KEY DECISIONS
+================================================================================
+1. employees + hr_org_units = canonical; users = identity + mirrored compat fields
+2. Three-mode rollout: legacy → shadow → active (per workspace)
+3. No legacy table/API removal in Phase 1
+4. Idempotent backfill + exception log; no destructive migrations
+5. Unified manager resolver feeds leave + workflow via adapter
+6. department → org_unit mapping table (legacy_department_org_map)
+7. Additive schema only: workspace flags, map table, audit tables
+
+================================================================================
+IMPLEMENTATION ORDER (RECOMMENDED)
+================================================================================
+Week 1-2: lib/workforce package + flags migration + resolver unit tests
+Week 3:   legacy_department_org_map + backfill script
+Week 4:   User/Employee compat adapters (shadow mode)
+Week 5:   Workflow + leave wired to resolver; validation script
+Week 6:   Employee detail UI org edit; pilot workspace active mode
+Week 7-8: Staging hardening + production runbook
+
+================================================================================
+PRODUCTION SAFETY
+================================================================================
+• Default workforceCanonicalMode=legacy for all tenants
+• Mirror sync failures must not block primary HR writes
+• Deploy fail-safe if migrations not applied
+• Backfill run as explicit ops step post-deploy (not silent auto)
+• Reversible via flag downgrade to legacy
+
+================================================================================
+SUCCESS METRICS
+================================================================================
+• API contract tests: 100% pass (no breaking changes)
+• Integrity script: 0 ERROR per active workspace
+• Shadow mismatch rate < 1% before active promotion
+• Single resolver code path for leave + workflow manager approval
+
+================================================================================
+HANDOFF TO PHASE 2
+================================================================================
+Prerequisites before Phase 2 (Position Runtime):
+  • Phase 1 active on ≥1 production workspace
+  • org tree API stable
+  • Manager resolver production-proven
+  • Foundation UI branch type aligned with schema
+
+Phase 2 will add: positionId assignment, occupancy, org traversal, reporting graph
+
+================================================================================
+REFERENCES
+================================================================================
+Prior audits: employee-model-audit.md, hr-foundation-model-audit.md,
+  workflow-org-dependency-analysis.md, workforce-structure-full-audit-report.txt
+
+================================================================================
+END PHASE ONE REPORT
+================================================================================

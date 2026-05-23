@@ -1,0 +1,103 @@
+PHASE 5 — ENTERPRISE CLEANUP, STABILIZATION & RUNTIME OPTIMIZATION
+FINAL REPORT
+Generated: 2026-05-20
+================================================================================
+
+OBJECTIVE
+---------
+Gradual legacy deprecation with audit-first telemetry — NO big bang deletion.
+
+STATUS: SUCCESS (foundation + gates; no legacy drops)
+================================================================================
+
+DELIVERABLES
+------------
+[x] legacy-runtime-audit.md
+[x] runtime-usage-tracking.md
+[x] cleanup-staging-plan.md
+[x] performance-optimization-report.md
+[x] production-hardening-report.md
+[x] deployment-stabilization.md
+[x] architecture-refinement.md
+[x] governance-finalization.md
+[x] observability-monitoring.md
+[x] phase-5-final-report.txt
+
+MIGRATION
+---------
+File: lib/db/drizzle/0028_legacy_compat_stabilization.sql
+Script: scripts/migrate-legacy-compat.cjs
+
+NEW TABLES
+----------
+- legacy_compat_usage_events
+- legacy_cutover_snapshot
+- runtime_schema_registry
+
+NEW SETTINGS
+------------
+- workforce_cleanup_stage (default: none)
+- legacy_write_policy (optional jsonb)
+
+SERVICES
+--------
+artifacts/api-server/src/lib/workforce/stabilization/
+  legacy-audit-inventory.ts
+  usage-telemetry.ts
+  cleanup-staging.ts
+  runtime-health-service.ts
+  legacy-compat-startup.ts
+  observability-metrics.ts
+  org-cache.ts
+  governance-finalization.ts
+  schema-guard.ts
+
+API
+---
+GET /health/workforce
+GET /health/workforce/schema
+GET /health/workforce/metrics
+GET /hr/legacy-audit
+GET /hr/legacy-usage
+GET /hr/settings/cutover-readiness
+
+SCRIPTS
+-------
+validate-schema-drift.cjs
+validate-legacy-readiness.cjs
+aggregate-legacy-usage.cjs
+migrate-legacy-compat.cjs
+
+STAGED CLEANUP (NO DELETION)
+----------------------------
+stage1: block legacy writes (409)
+stage2: monitor + daily snapshots
+stage3: skip adapters (mirror/sync)
+stage4: archival plan only
+
+PERFORMANCE
+-----------
+Performance indexes in 0028
+Org unit 60s cache
+Approval inbox pagination limit
+
+SUCCESS CRITERIA
+----------------
+[x] Legacy dependencies audited
+[x] Runtime telemetry operational
+[x] Cleanup staged safely (default none)
+[x] Performance indexes + cache
+[x] Deployment flow unified
+[x] Governance readiness endpoint
+[x] Observability tables + health endpoints
+[x] No HTTP 500 on schema mismatch (503)
+[x] NO legacy table/column drops
+[x] NO big bang cleanup
+
+NEXT (POST-PHASE-5)
+-------------------
+Per workspace: 30d zero traffic → promote cleanup stage1
+Only after legal/compliance sign-off: plan stage4 archival (manual)
+
+================================================================================
+END PHASE 5 REPORT

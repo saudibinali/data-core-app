@@ -79,6 +79,8 @@ import {
 import { incrementLeaveMetric, getLeaveCutoverMetrics } from "../lib/leave-cutover-metrics";
 import { leaveCutoverStatusForWorkspace, resolveLeaveCutoverStatus } from "../lib/leave-cutover-flags";
 import { getLeaveRuntimeMode } from "../lib/hr/hcm-workspace-settings";
+import { resolveLeaveApprover } from "../lib/workforce/manager-resolver";
+import { startLeaveApproval, syncLeaveStepDecision } from "../lib/approval/runtime-service";
 const router: IRouter = Router();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -214,49 +216,9 @@ async function findApproverForEmployee(
   employeeId: number,
   requestedByUserId: number,
 ): Promise<{ approverUserId: number; approverRole: string } | null> {
-  // 1. Check if employee has a direct manager with an active user account
-  const [emp] = await db
-    .select({
-      directManagerId: employeesTable.directManagerId,
-    })
-    .from(employeesTable)
-    .where(eq(employeesTable.id, employeeId))
-    .limit(1);
-
-  if (emp?.directManagerId) {
-    const [mgr] = await db
-      .select({
-        userId:  employeesTable.userId,
-        status:  employeesTable.status,
-      })
-      .from(employeesTable)
-      .where(eq(employeesTable.id, emp.directManagerId))
-      .limit(1);
-
-    if (mgr?.userId && mgr.status === "active") {
-      return { approverUserId: mgr.userId, approverRole: "manager" };
-    }
-  }
-
-  // 2. Fallback: first active workspace admin (excluding the requester)
-  const [adminUser] = await db
-    .select({ id: usersTable.id })
-    .from(usersTable)
-    .where(
-      and(
-        eq(usersTable.workspaceId, workspaceId),
-        eq(usersTable.status, "active"),
-        or(eq(usersTable.role, "admin"), eq(usersTable.role, "super_admin")),
-        ne(usersTable.id, requestedByUserId),
-      ),
-    )
-    .limit(1);
-
-  if (adminUser) {
-    return { approverUserId: adminUser.id, approverRole: "admin" };
-  }
-
-  return null;
+  const resolved = await resolveLeaveApprover(workspaceId, employeeId, requestedByUserId);
+  if (!resolved) return null;
+  return { approverUserId: resolved.approverUserId, approverRole: resolved.approverRole };
 }
 
 /** Ensures every pending_approval request has an approver step (P18-D4). */
@@ -557,6 +519,17 @@ router.post("/hr/leave-requests", requireAuth, async (req: AuthRequest, res): Pr
 
   // ── HTTP response ─────────────────────────────────────────────────────────────
   res.status(201).json({ leaveRequest, leaveApprovalStep });
+
+  if (requiresApproval && leaveApprovalStep) {
+    void startLeaveApproval(
+      workspaceId,
+      leaveRequest.id,
+      employee.id,
+      userId,
+      { leaveType, startDate, endDate, daysRequested: businessDaysCount },
+      leaveApprovalStep.id,
+    ).catch((err) => logger.warn({ err, leaveRequestId: leaveRequest.id }, "Unified approval dual-write skipped"));
+  }
 
   if (attachmentUrls?.length) {
     const { bridgeLeaveAttachments } = await import("../lib/documents/document-bridge");
@@ -888,6 +861,8 @@ router.patch("/hr/leave-requests/:id/approve", requireAuth, async (req: AuthRequ
   incrementLeaveMetric("canonical_approve_total");
   res.json(updated);
 
+  void syncLeaveStepDecision(workspaceId, id, "approved", userId, comment ?? null).catch(() => undefined);
+
   // ── Bus: leave.approved ───────────────────────────────────────────────────────
   void appEventBus.emit({
     type:      EVENT_TYPES.LEAVE_APPROVED,
@@ -1023,6 +998,8 @@ router.patch("/hr/leave-requests/:id/reject", requireAuth, async (req: AuthReque
 
   incrementLeaveMetric("canonical_reject_total");
   res.json(rejectedReq);
+
+  void syncLeaveStepDecision(workspaceId, id, "rejected", userId, comment ?? null).catch(() => undefined);
 
   // ── Bus: leave.rejected ───────────────────────────────────────────────────────
   void appEventBus.emit({

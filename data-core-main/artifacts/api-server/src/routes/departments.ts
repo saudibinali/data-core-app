@@ -4,6 +4,8 @@ import { departmentsTable, usersTable } from "@workspace/db";
 import { eq, and, sql } from "drizzle-orm";
 import { CreateDepartmentBody, GetDepartmentParams, UpdateDepartmentBody, UpdateDepartmentParams, DeleteDepartmentParams } from "@workspace/api-zod";
 import { type AuthRequest, requireAuth, requirePermission } from "../middlewares/requireAuth";
+import { assertLegacyWriteAllowed } from "../lib/workforce/stabilization/cleanup-staging";
+import { recordLegacyUsage } from "../lib/workforce/stabilization/usage-telemetry";
 
 const router: IRouter = Router();
 
@@ -31,12 +33,31 @@ router.get("/departments", requireAuth, requirePermission("departments.view"), a
     .where(eq(departmentsTable.workspaceId, req.workspaceId))
     .orderBy(departmentsTable.name);
 
+  void recordLegacyUsage({
+    workspaceId: req.workspaceId,
+    eventType: "route_hit",
+    legacySurface: "departments",
+    sourcePath: "GET /departments",
+  }).catch(() => undefined);
+
   res.json(departments);
 });
 
 router.post("/departments", requireAuth, requirePermission("departments.create"), async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) {
     res.status(400).json({ error: "No workspace assigned" });
+    return;
+  }
+
+  const writeCheck = await assertLegacyWriteAllowed(req.workspaceId, "departments", "POST /departments");
+  if (!writeCheck.ok) {
+    void recordLegacyUsage({
+      workspaceId: req.workspaceId,
+      eventType: "write_blocked",
+      legacySurface: "departments",
+      sourcePath: "POST /departments",
+    }).catch(() => undefined);
+    res.status(writeCheck.status).json({ error: writeCheck.error, code: writeCheck.code });
     return;
   }
 

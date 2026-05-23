@@ -1,0 +1,57 @@
+================================================================================
+ORG RUNTIME PHASE TWO — FINAL REPORT
+================================================================================
+Phase: 2 — Organizational Hierarchy & Position Runtime Engine
+Date: 2026-05-20
+Status: PLANNING COMPLETE
+
+================================================================================
+OBJECTIVE
+================================================================================
+Transform hr_org_units + hr_positions from metadata into operational org graph
+with position incumbents, reporting hierarchy, and traversal services.
+
+================================================================================
+DELIVERABLES
+================================================================================
+✓ org-runtime-architecture.md
+✓ position-runtime-engine.md
+✓ reporting-hierarchy-runtime.md
+✓ org-traversal-specification.md
+✓ org-runtime-final-report.txt (this file)
+
+================================================================================
+KEY CAPABILITIES PLANNED
+================================================================================
+• Position assign/vacate runtime + occupancy sync
+• employees.positionId wired end-to-end
+• Org tree API + traversal CTEs
+• Reporting chain resolver (person + position + org head)
+• Delegation + executive override schema (foundation for Phase 3)
+• Optional matrix assignments table (2.5)
+
+================================================================================
+DEPENDENCIES
+================================================================================
+REQUIRES Phase 1 active:
+  • Canonical employee/org/manager
+  • legacy_department_org_map stable
+  • Integrity validation passing
+
+================================================================================
+MIGRATION SAFETY
+================================================================================
+• All schema additive (reports_to_position_id, manager_employee_id, etc.)
+• Position backfill suggest-only by default; auto-assign behind flag
+• Employees without position remain valid until Phase 4 gate
+• Idempotent occupancy recompute script
+
+================================================================================
+HANDOFF TO PHASE 3
+================================================================================
+OrgRoutingService + ReportingHierarchyService become approval routing inputs
+for embedded workflow rebuild.
+
+================================================================================
+END PHASE TWO REPORT
+================================================================================

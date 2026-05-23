@@ -1,0 +1,50 @@
+================================================================================
+WORKFLOW PHASE THREE — FINAL REPORT
+================================================================================
+Phase: 3 — Embedded Workflow & Enterprise Approval Runtime
+Date: 2026-05-20
+Status: PLANNING COMPLETE
+
+================================================================================
+OBJECTIVE
+================================================================================
+Replace technical workflow UX with embedded business processes and unified
+org-aware approval runtime (delegation, escalation, SLA).
+
+================================================================================
+DELIVERABLES
+================================================================================
+✓ workflow-runtime-rebuild.md
+✓ approval-runtime-specification.md
+✓ delegation-runtime-plan.md
+✓ workflow-ux-redesign.md
+✓ workflow-phase-final-report.txt (this file)
+
+================================================================================
+KEY OUTCOMES
+================================================================================
+• approval_instances + approval_steps unified model
+• ApprovalRuntimeService with org routing from Phase 2
+• Deprecate tenant workflow builder; process templates instead
+• Single self-service approval inbox with deep links
+• SLA worker replaces fake onTimeout simulation
+• Dual-write migration from leave_approval_steps / workflow_approvals
+
+================================================================================
+DEPENDENCIES
+================================================================================
+REQUIRES Phase 1 + 2:
+  • ReportingHierarchyService, OrgRoutingService
+  • workforce_delegations table
+  • Canonical manager resolution production-stable
+
+================================================================================
+NON-BREAKING GUARANTEES
+================================================================================
+• Leave submit API shape preserved during dual-write
+• Existing workflow_executions run to completion
+• workflow.manage restricted scope documented before enforcement
+
+================================================================================
+END PHASE THREE REPORT
+================================================================================

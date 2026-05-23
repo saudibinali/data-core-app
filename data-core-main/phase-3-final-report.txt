@@ -1,0 +1,72 @@
+PHASE 3 — ENTERPRISE WORKFLOW & APPROVAL RUNTIME
+Final Report
+Generated: 2026-05-20
+
+STATUS: IMPLEMENTATION COMPLETE (additive, backward compatible)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+[PASS] Unified approval runtime (instances + steps + policies)
+[PASS] Org-aware routing resolver (no hardcoded approvers)
+[PASS] Embedded leave dual-write (approvalRuntimeMode dual/unified)
+[PASS] Unified approval inbox API + UI
+[PASS] Business process templates UI (no trigger_event for tenants)
+[PASS] Delegation foundation (resolver + CRUD API)
+[PASS] SLA escalation on startup
+[PASS] Schema mismatch → 503
+[PASS] Legacy workflow engine preserved
+[PASS] Build + unit tests passing
+
+DEFAULT: approvalRuntimeMode = legacy
+
+================================================================================
+KEY ARTIFACTS
+================================================================================
+lib/db/drizzle/0026_approval_runtime_foundation.sql
+lib/db/src/schema/approval-runtime.ts
+artifacts/api-server/src/lib/approval/*
+artifacts/api-server/src/routes/approval-inbox.ts
+artifacts/ops-platform/src/pages/approval-inbox.tsx
+artifacts/ops-platform/src/pages/process-templates.tsx
+scripts/migrate-approval-runtime.cjs
+
+================================================================================
+API ROUTES
+================================================================================
+GET  /self-service/approvals
+GET  /self-service/approvals/:instanceId
+PATCH /self-service/approvals/:instanceId/steps/:stepId/approve|reject
+GET  /hr/approval-templates
+GET/POST /hr/delegations
+PATCH /hr/settings → approvalRuntimeMode
+
+================================================================================
+DEPLOYMENT
+================================================================================
+1. Deploy app (auto-migrate 0026)
+2. node scripts/migrate-approval-runtime.cjs (optional)
+3. Pilot: approvalRuntimeMode = dual
+4. Validate leave flow + inbox
+5. Promote to unified when stable
+
+================================================================================
+NOT DONE (by design)
+================================================================================
+- Legacy workflow / ticket approvals deletion
+- Full delegation lifecycle
+- Position runtime
+- Hide workflow engine entirely for all roles
+- workflow_approvals consolidation
+
+================================================================================
+DOCS
+================================================================================
+workflow-runtime-rebuild.md
+approval-runtime-engine.md
+approval-routing-architecture.md
+workflow-ux-redesign.md
+approval-inbox-runtime.md
+delegation-foundation.md
+production-workflow-safety.md
+phase-3-final-report.txt

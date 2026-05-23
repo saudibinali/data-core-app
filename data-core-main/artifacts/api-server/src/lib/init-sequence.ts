@@ -21,6 +21,11 @@ import { startScheduledReportScheduler } from "./reports/scheduled-report-schedu
 import { seedAllWorkspaceAttendanceSources } from "./workforce-attendance/source-seed";
 import { attendancePolicyService } from "./workforce-attendance/attendance-policy-service";
 import { startAttendanceSyncWorker } from "./workforce-integration/sync-worker";
+import { runOrgRuntimeStartupChecks } from "./workforce/org/org-runtime-startup";
+import { runApprovalRuntimeStartupChecks } from "./approval/approval-startup";
+import { runWorkforceOpsStartupChecks } from "./workforce/operations/workforce-ops-startup";
+import { runLegacyCompatStartupChecks } from "./workforce/stabilization/legacy-compat-startup";
+import { pool } from "@workspace/db";
 
 export async function runInitSequence(): Promise<void> {
   // 1. Apply pending migrations
@@ -29,6 +34,38 @@ export async function runInitSequence(): Promise<void> {
   } catch (err) {
     logger.error({ err }, "Database migration failed");
     throw err; // surface to caller so wizard can report the failure
+  }
+
+  // 1b. Org runtime schema verification + idempotent backfill (Phase 2)
+  try {
+    await runOrgRuntimeStartupChecks(pool);
+  } catch (err) {
+    logger.error({ err }, "Org runtime startup checks failed");
+    throw err;
+  }
+
+  // 1c. Approval runtime schema verification + SLA escalation sweep (Phase 3)
+  try {
+    await runApprovalRuntimeStartupChecks(pool);
+  } catch (err) {
+    logger.error({ err }, "Approval runtime startup checks failed");
+    throw err;
+  }
+
+  // 1d. Workforce operations schema verification (Phase 4)
+  try {
+    await runWorkforceOpsStartupChecks(pool);
+  } catch (err) {
+    logger.error({ err }, "Workforce operations startup checks failed");
+    throw err;
+  }
+
+  // 1e. Legacy compat telemetry + schema registry (Phase 5)
+  try {
+    await runLegacyCompatStartupChecks(pool);
+  } catch (err) {
+    logger.error({ err }, "Legacy compat startup checks failed");
+    throw err;
   }
 
   // 2. Start workflow engine (includes P6-A delay scheduler)

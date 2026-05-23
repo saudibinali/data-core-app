@@ -97,6 +97,21 @@ function useSubResource<T>(url: string, deps: unknown[]) {
   return { data, loading, reload };
 }
 
+function useJsonObject<T>(url: string, deps: unknown[]) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const apiFetch = useApiFetch();
+  const reload = useCallback(() => {
+    setLoading(true);
+    apiFetch(url)
+      .then(r => r.json())
+      .then(d => { setData(d && typeof d === "object" && !Array.isArray(d) ? d as T : null); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [url, apiFetch]);
+  useEffect(() => { reload(); }, [reload, ...deps]);
+  return { data, loading, reload };
+}
+
 // ── Employee ↔ user account (P-HCM2) ─────────────────────────────────────────
 
 function EmployeeAccountCard({
@@ -294,6 +309,8 @@ export default function HrEmployeeDetailPage() {
   const posHistory    = useSubResource<any>(`/api/hr/employees/${id}/position-history`,[id]);
   const notes         = useSubResource<any>(`/api/hr/employees/${id}/notes`,           [id]);
   const activity      = useSubResource<any>(`/api/hr/employees/${id}/activity`,        [id]);
+  const timeline      = useSubResource<any>(`/api/hr/employees/${id}/timeline`,        [id]);
+  const employeeFile  = useJsonObject<any>(`/api/hr/employees/${id}/file`,            [id]);
   const customFields  = useSubResource<any>(`/api/hr/employees/${id}/custom-fields`,   [id]);
 
   // ── Loading / not found ───────────────────────────────────────────────────
@@ -410,6 +427,8 @@ export default function HrEmployeeDetailPage() {
           <TabsTrigger value="documents"    className="text-xs"><FileBadge className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الوثائق" : "Documents"}</TabsTrigger>
           <TabsTrigger value="leaves"       className="text-xs"><Plane     className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الإجازات" : "Leaves"}</TabsTrigger>
           <TabsTrigger value="movements"    className="text-xs"><GitBranch className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الحركات الوظيفية" : "Job Movements"}</TabsTrigger>
+          <TabsTrigger value="file"         className="text-xs"><Briefcase className="w-3.5 h-3.5 mr-1.5" />{isAr ? "ملف الموظف" : "Employee File"}</TabsTrigger>
+          <TabsTrigger value="timeline"     className="text-xs"><History   className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الجدول الزمني" : "Timeline"}</TabsTrigger>
           <TabsTrigger value="notes"        className="text-xs"><StickyNote className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الملاحظات" : "Notes"}</TabsTrigger>
           <TabsTrigger value="custom"       className="text-xs"><Settings  className="w-3.5 h-3.5 mr-1.5" />{isAr ? "حقول مخصصة" : "Custom Fields"}</TabsTrigger>
           <TabsTrigger value="activity"     className="text-xs"><Activity  className="w-3.5 h-3.5 mr-1.5" />{isAr ? "سجل النشاط" : "Activity"}</TabsTrigger>
@@ -617,6 +636,16 @@ export default function HrEmployeeDetailPage() {
         {/* ── Job Movements ────────────────────────────────────────────────── */}
         <TabsContent value="movements" className="mt-4">
           <MovementsTab empId={Number(id)} isAdmin={isAdmin} isAr={isAr} state={posHistory} />
+        </TabsContent>
+
+        {/* ── Employee File Runtime ───────────────────────────────────────── */}
+        <TabsContent value="file" className="mt-4">
+          <EmployeeFileTab isAr={isAr} state={employeeFile} />
+        </TabsContent>
+
+        {/* ── Workforce Timeline ─────────────────────────────────────────── */}
+        <TabsContent value="timeline" className="mt-4">
+          <TimelineTab isAr={isAr} state={timeline} />
         </TabsContent>
 
         {/* ── Notes ───────────────────────────────────────────────────────── */}
@@ -1243,6 +1272,76 @@ function CustomFieldsTab({ empId, isAdmin, isAr, state }: { empId: number; isAdm
             </div>
           </CardContent>
         </Card>
+      ))}
+    </div>
+  );
+}
+
+function EmployeeFileTab({ isAr, state }: { isAr: boolean; state: { data: any; loading: boolean } }) {
+  if (state.loading) return <Skeleton className="h-48 w-full" />;
+  const file = state.data;
+  if (!file) return <EmptyState text={isAr ? "تعذر تحميل ملف الموظف" : "Could not load employee file"} />;
+
+  const summary = file.summary ?? {};
+  const sections = file.sections ?? {};
+  const compliance = summary.documentCompliance ?? { required: 0, met: 0, missing: [] };
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader><CardTitle className="text-base">{isAr ? "ملخص الملف التشغيلي" : "Operational Summary"}</CardTitle></CardHeader>
+        <CardContent className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <InfoRow label={isAr ? "حالة دورة الحياة" : "Lifecycle state"} value={summary.lifecycleState ?? "-"} />
+          <InfoRow label={isAr ? "المدير" : "Manager"} value={summary.managerName ?? "-"} />
+          <InfoRow label={isAr ? "المسمى" : "Job title"} value={summary.jobTitleName ?? "-"} />
+          <InfoRow label={isAr ? "عمق سلسلة الت reporting" : "Reporting depth"} value={String(summary.reportingChainDepth ?? 0)} />
+          <InfoRow label={isAr ? "الوثائق المطلوبة" : "Document compliance"} value={`${compliance.met}/${compliance.required}`} />
+          <InfoRow label={isAr ? "وضع الحوكمة" : "Governance mode"} value={file.runtime?.governanceMode ?? "legacy"} />
+        </CardContent>
+      </Card>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: isAr ? "الوثائق" : "Documents", count: sections.documents?.length ?? 0 },
+          { label: isAr ? "العقود" : "Contracts", count: sections.contracts?.length ?? 0 },
+          { label: isAr ? "الحركات" : "Movements", count: sections.movements?.length ?? 0 },
+          { label: isAr ? "الموافقات" : "Approvals", count: sections.approvals?.length ?? 0 },
+        ].map((item) => (
+          <Card key={item.label}><CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold">{item.count}</p>
+            <p className="text-xs text-muted-foreground">{item.label}</p>
+          </CardContent></Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TimelineTab({ isAr, state }: { isAr: boolean; state: any }) {
+  if (state.loading) return <Skeleton className="h-40 w-full" />;
+  if (!state.data.length) return <EmptyState text={isAr ? "لا توجد أحداث في الجدول الزمني" : "No timeline events yet"} />;
+
+  const CATEGORY_COLORS: Record<string, string> = {
+    movement: "text-rose-500",
+    lifecycle: "text-violet-500",
+    document: "text-amber-500",
+    profile: "text-blue-500",
+    approval: "text-emerald-500",
+  };
+
+  return (
+    <div className="space-y-2">
+      {state.data.map((ev: any) => (
+        <div key={ev.id} className="flex items-start gap-3 p-3 rounded-lg border bg-card">
+          <History className={`w-4 h-4 mt-0.5 shrink-0 ${CATEGORY_COLORS[ev.eventCategory] ?? "text-muted-foreground"}`} />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium">{ev.title}</p>
+            {ev.description && <p className="text-xs text-muted-foreground mt-0.5">{ev.description}</p>}
+            <div className="flex items-center gap-2 mt-1">
+              <Badge variant="outline" className="text-[10px]">{ev.eventCategory}</Badge>
+              <span className="text-xs text-muted-foreground">{new Date(ev.occurredAt).toLocaleString()}</span>
+            </div>
+          </div>
+        </div>
       ))}
     </div>
   );

@@ -42,6 +42,7 @@ app.listen(port, async (err) => {
   try {
     await runInitSequence();
   } catch (err) {
-    logger.error({ err }, "Initialization sequence failed - server may be partially operational");
+    logger.error({ err }, "Initialization sequence failed — API cannot start safely");
+    process.exit(1);
   }
 });

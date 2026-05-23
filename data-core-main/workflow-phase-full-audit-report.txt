@@ -1,0 +1,219 @@
+================================================================================
+WORKFLOW ENGINE — FULL ARCHITECTURE & RUNTIME AUDIT
+PHASE REPORT (INTEGRATED)
+================================================================================
+Project: data-core-main
+Date: 2026-05-20
+Mode: AUDIT & DISCOVERY ONLY — zero code/DB/API/UI changes
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+The platform implements a genuine event-driven Workflow Engine in api-server
+(artifacts/api-server/src/lib/workflows/) with database-backed definitions,
+executions, step audit, approval pause/resume, delay scheduling, and publish
+versioning. This is the CANONICAL automation path for workspace tenants.
+
+However, "workflow" and "approval" are NOT single concepts in this codebase.
+Parallel systems remain active: legacy ticket approvals (approvals table),
+canonical leave approval steps (leave_approval_steps), domain policy gates
+(procurement, inventory, payroll), and platform governance workflows
+(governance_workflow_actions) — unrelated to tenant workflow_definitions.
+
+Shared packages @workspace/core-workflows and @workspace/core-approvals are
+foundation placeholders (types only) not connected to runtime.
+
+Classification: PARTIALLY OPERATIONAL | SEMI-DYNAMIC | METADATA-HEAVY |
+FAKE-DYNAMIC for enterprise approval/escalation features exposed in config/UI.
+
+================================================================================
+DELIVERABLES PRODUCED
+================================================================================
+
+1. workflow-engine-architecture-audit.md    — Phase 1: components, canonical vs legacy
+2. workflow-data-model-audit.md             — Phase 2: tables, relations, storage patterns
+3. workflow-runtime-analysis.md             — Phase 3: full lifecycle step-by-step
+4. workflow-selfservice-integration.md      — Phase 4: forms, HR, self-service wiring
+5. approval-engine-audit.md                 — Phase 5: all approval channels analyzed
+6. workflow-ui-ux-audit.md                  — Phase 6: builder, tracking, confusion points
+7. workflow-notifications-audit.md          — Phase 7: notifications, email, reminders
+8. workflow-engine-final-evaluation.txt     — Phase 8: scores, risks, recommendations
+9. workflow-phase-full-audit-report.txt     — This integrated summary
+
+================================================================================
+KEY FINDINGS (CROSS-PHASE)
+================================================================================
+
+WHAT IS REAL RUNTIME
+--------------------
+• WorkflowEngine listens on eventDispatcher, matches trigger_event + form hints
+• Executor runs 7 step types with guarded status transitions
+• Approval pause (waiting_approval) + resume/reject via API
+• Delay pause (waiting_delay) + scheduler poll resume
+• Execution TTL (24h default), cancellation flag, steps_snapshot immutability
+• Publish pipeline with workflow_definition_versions
+• In-app notifications from notification/approval steps + bus listeners
+• Form submit → form.submitted → optional workflow start
+• Extensive unit/integration tests under lib/workflows/__tests__/
+
+WHAT IS UI / CONFIG ONLY
+------------------------
+• approvalType multi/sequential/parallel/conditional (single decision resumes)
+• onTimeout auto_approve/reject/escalate (simulation.ts only)
+• approverType department_head (not in approval step resolver)
+• round_robin assignment (blocked at validation)
+• Parallel "Governance Workflows" naming vs tenant Workflows
+
+WHAT IS LEGACY / PARALLEL
+-------------------------
+• approvals table — ticket_id NOT NULL — routes/approvals.ts
+• leave_approval_steps — canonical leave in routes/leave.ts
+• hr_employee_leaves vs leave_requests (migration modes)
+• PayrollRunWorkflow service class — not workflow_definitions
+• governance_workflow_actions — platform violation remediation
+
+WHAT IS MISSING
+---------------
+• Delegation, reassignment, fallback approvers
+• Approval reminders and escalation workers
+• Employee workflow approval inbox
+• Form status sync with execution outcome
+• Email as default workflow notification channel
+• Unified process engine / BPMN
+• core-workflows / core-approvals package wiring
+
+================================================================================
+RUNTIME FLOW (CONDENSED)
+================================================================================
+
+Create Request:
+  Form → form_submissions | Leave → leave_requests | Ticket → tickets
+
+Submit:
+  Route emits bus event → workspace_event_logs → WorkflowEngine
+
+Validate:
+  Form fields (route) | Publish validator (admin) | Engine conditions
+
+Assignment:
+  task step → workflow_tasks | assignment step → ticket assignee
+
+Approval:
+  approval step → waiting_approval → POST /executions/:id/approve (workflow.manage)
+  OR legacy PATCH /approvals OR leave step decision
+
+Rejection:
+  rejectExecution → failed + workflow_approvals OR domain-specific reject
+
+Escalation:
+  NOT RUNTIME for tenant automation (config fiction)
+
+Delegation:
+  NOT IMPLEMENTED
+
+Completion:
+  runStepLoop terminal → completed | failed | cancelled | timed_out
+
+Archival:
+  Soft-delete workflow definition; retain execution/version history
+
+================================================================================
+DATA MODEL HIGHLIGHTS
+================================================================================
+
+Core automation (lib/db/src/schema/workflows.ts):
+  workflow_definitions
+  workflow_definition_versions
+  workflow_executions
+  workflow_execution_steps
+  workflow_tasks
+  workflow_approvals
+
+Forms (lib/db/src/schema/forms.ts):
+  form_definitions, form_fields, form_submissions, form_submission_files
+  — no FK to executions; link via context.submissionId
+
+Notifications (lib/db/src/schema/notifications.ts):
+  notifications + notification_jobs (communication.ts) for email queue
+
+================================================================================
+SELF-SERVICE INTEGRATION
+================================================================================
+
+Portal: ops-platform/src/pages/self-service.tsx
+API: GET /self-service/forms, POST submit, GET /my-submissions
+
+Routing: form_definitions.workflow_event → workflowEventHint on form.submitted
+
+Dynamic: forms, fields, hints, workflow steps (admin-configured)
+Hardcoded: UI icons/categories, seed templates
+
+Gap: My Requests joins running executions + tasks only — misses waiting_approval
+Gap: Pending Approvals tab uses legacy ticket approvals API
+
+================================================================================
+APPROVAL ENGINE VERDICT
+================================================================================
+
+Operational:
+  • Single-decision workflow approval with audit row
+  • Sequential approval STEPS in workflow array
+  • Legacy ticket queue
+  • Canonical leave chain
+  • Manager/role/specific approver resolution
+
+Fake enterprise:
+  • Multi-approver modes on one step
+  • Timeout escalation policies
+  • Department head approver type
+
+Security gap:
+  • workflow.manage approves any execution — not limited to notified approvers
+
+================================================================================
+UI/UX VERDICT
+================================================================================
+
+Strong: admin workflow list/detail, execution step logs
+Weak: employee approve path, unified inbox, accurate progress tracking
+Confusing: duplicate approval surfaces, governance vs tenant workflow naming
+
+================================================================================
+NOTIFICATIONS VERDICT
+================================================================================
+
+Real: workflow + approval step inserts, bus listeners (ticket/leave/legacy approval)
+Partial: form confirmation email
+Absent: approval reminders, escalation nudges, form.submitted recipients
+Broken UX: approval_request notifications have link=null
+
+================================================================================
+FINAL RECOMMENDATION
+================================================================================
+
+Do NOT rebuild from scratch. Stabilize and simplify:
+
+Priority 1 — Stabilization
+  • Unified employee approval inbox (workflow + leave)
+  • Approver-scoped approve permission
+  • Form status sync with execution
+  • my-submissions include waiting_approval
+
+Priority 2 — Simplification
+  • Hide/remove non-functional approval config in UI
+  • Document single canonical path per domain
+  • Split governance analytics from tenant workflow routes
+
+Priority 3 — Enterprise features (later)
+  • Delegation, reminders, per-step timeout worker
+  • Wire core-approvals / core-workflows
+  • Optional async queue for resume
+
+Overall readiness:
+  Internal admin automation: ~50-65% toward enterprise
+  Employee-facing process platform: ~30% toward enterprise
+
+================================================================================
+AUDIT COMPLETE — NO MODIFICATIONS MADE
+================================================================================

@@ -68,6 +68,32 @@ import {
   bridgeContractAttachments,
 } from "../lib/documents/document-bridge";
 import { reportService } from "../lib/reports/report-service";
+import {
+  buildOrgTree,
+  wouldCreateOrgCycle,
+  handleWorkforceRouteError,
+  parseHrDocumentUpload,
+  buildEmployeeFileStorageKey,
+  saveEmployeeFile,
+  objectPathFromStorageKey,
+  syncLegacyUserFieldsFromEmployee,
+  normalizeOrgUnitType,
+  isValidOrgUnitType,
+  validateOrgParentType,
+  getOrgUnitAncestors,
+  getOrgUnitDescendantIds,
+  getEmployeesInOrgSubtree,
+  getFullReportingChain,
+  ManagerCycleError,
+  validateEmployeeOrgLinking,
+  loadWorkspaceOrgUnits,
+  getOrgUnitById,
+} from "../lib/workforce";
+import { validateWorkforceGovernance } from "../lib/workforce/operations/governance-service";
+import { onEmployeeDocumentUploaded } from "../lib/workforce/operations/document-hooks";
+import { appendTimelineEvent } from "../lib/workforce/operations/timeline-service";
+import { assertLegacyWriteAllowed } from "../lib/workforce/stabilization/cleanup-staging";
+import { recordLegacyUsage } from "../lib/workforce/stabilization/usage-telemetry";
 
 const router: IRouter = Router();
 
@@ -148,7 +174,20 @@ router.get("/hr/settings", requireAuth, requirePermission("hr.view"), async (req
     .where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId));
 
   // Return defaults if no row yet
-  res.json(row ?? { workspaceId, numberingMode: "auto", numberingStartFrom: null, leaveRuntimeMode: "transition" });
+  res.json(row ?? {
+    workspaceId,
+    numberingMode: "auto",
+    numberingStartFrom: null,
+    leaveRuntimeMode: "transition",
+    workforceCanonicalMode: "legacy",
+    workforceSyncDirection: "none",
+    orgRuntimeMode: "legacy",
+    approvalRuntimeMode: "legacy",
+    workforceGovernanceMode: "legacy",
+    workforceActivationRequires: null,
+    workforceCleanupStage: "none",
+    legacyWritePolicy: null,
+  });
 });
 
 // ── PATCH /hr/settings ────────────────────────────────────────────────────────
@@ -157,10 +196,18 @@ router.patch("/hr/settings", requireAuth, requireWorkspaceAdmin, async (req: Aut
   const workspaceId = req.workspaceId;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
-  const { numberingMode, numberingStartFrom, leaveRuntimeMode } = req.body as {
+  const { numberingMode, numberingStartFrom, leaveRuntimeMode, workforceCanonicalMode, workforceSyncDirection, orgRuntimeMode, approvalRuntimeMode, workforceGovernanceMode, workforceActivationRequires, workforceCleanupStage, legacyWritePolicy } = req.body as {
     numberingMode?: string;
     numberingStartFrom?: number | null;
     leaveRuntimeMode?: string;
+    workforceCanonicalMode?: string;
+    workforceSyncDirection?: string;
+    orgRuntimeMode?: string;
+    approvalRuntimeMode?: string;
+    workforceGovernanceMode?: string;
+    workforceActivationRequires?: Record<string, unknown> | null;
+    workforceCleanupStage?: string;
+    legacyWritePolicy?: Record<string, unknown> | null;
   };
 
   const validModes = ["auto", "manual", "hybrid"];
@@ -173,10 +220,48 @@ router.patch("/hr/settings", requireAuth, requireWorkspaceAdmin, async (req: Aut
     res.status(400).json({ error: "leaveRuntimeMode must be legacy | transition | canonical" }); return;
   }
 
+  const validWorkforceModes = ["legacy", "shadow", "active"];
+  if (workforceCanonicalMode !== undefined && !validWorkforceModes.includes(workforceCanonicalMode)) {
+    res.status(400).json({ error: "workforceCanonicalMode must be legacy | shadow | active" }); return;
+  }
+
+  const validSyncDirections = ["none", "employee_to_user", "bidirectional"];
+  if (workforceSyncDirection !== undefined && !validSyncDirections.includes(workforceSyncDirection)) {
+    res.status(400).json({ error: "workforceSyncDirection must be none | employee_to_user | bidirectional" }); return;
+  }
+
+  const validOrgModes = ["legacy", "shadow", "active"];
+  if (orgRuntimeMode !== undefined && !validOrgModes.includes(orgRuntimeMode)) {
+    res.status(400).json({ error: "orgRuntimeMode must be legacy | shadow | active" }); return;
+  }
+
+  const validApprovalModes = ["legacy", "dual", "unified"];
+  if (approvalRuntimeMode !== undefined && !validApprovalModes.includes(approvalRuntimeMode)) {
+    res.status(400).json({ error: "approvalRuntimeMode must be legacy | dual | unified" }); return;
+  }
+
+  const validGovernanceModes = ["legacy", "shadow", "active"];
+  if (workforceGovernanceMode !== undefined && !validGovernanceModes.includes(workforceGovernanceMode)) {
+    res.status(400).json({ error: "workforceGovernanceMode must be legacy | shadow | active" }); return;
+  }
+
+  const validCleanupStages = ["none", "stage1", "stage2", "stage3", "stage4"];
+  if (workforceCleanupStage !== undefined && !validCleanupStages.includes(workforceCleanupStage)) {
+    res.status(400).json({ error: "workforceCleanupStage must be none | stage1 | stage2 | stage3 | stage4" }); return;
+  }
+
   const updates: Record<string, unknown> = {};
   if (numberingMode !== undefined) updates.numberingMode = numberingMode;
   if (numberingStartFrom !== undefined) updates.numberingStartFrom = numberingStartFrom;
   if (leaveRuntimeMode !== undefined) updates.leaveRuntimeMode = leaveRuntimeMode;
+  if (workforceCanonicalMode !== undefined) updates.workforceCanonicalMode = workforceCanonicalMode;
+  if (workforceSyncDirection !== undefined) updates.workforceSyncDirection = workforceSyncDirection;
+  if (orgRuntimeMode !== undefined) updates.orgRuntimeMode = orgRuntimeMode;
+  if (approvalRuntimeMode !== undefined) updates.approvalRuntimeMode = approvalRuntimeMode;
+  if (workforceGovernanceMode !== undefined) updates.workforceGovernanceMode = workforceGovernanceMode;
+  if (workforceActivationRequires !== undefined) updates.workforceActivationRequires = workforceActivationRequires;
+  if (workforceCleanupStage !== undefined) updates.workforceCleanupStage = workforceCleanupStage;
+  if (legacyWritePolicy !== undefined) updates.legacyWritePolicy = legacyWritePolicy;
 
   const [row] = await db
     .insert(hrWorkspaceSettingsTable)
@@ -1023,6 +1108,16 @@ router.post("/hr/employees", requireAuth, requireWorkspaceAdmin, async (req: Aut
     if (existing) { res.status(409).json({ error: "Employee profile already exists for this user" }); return; }
   }
 
+  const orgCheck = await validateEmployeeOrgLinking(workspaceId, null, {
+    status: status ?? "active",
+    orgUnitId: orgUnitId ?? null,
+    directManagerId: directManagerId ?? null,
+  });
+  if (!orgCheck.ok) {
+    res.status(orgCheck.status).json({ error: orgCheck.error, code: orgCheck.code });
+    return;
+  }
+
   const [emp] = await db.insert(employeesTable).values({
     workspaceId,
     userId: userId ?? null,
@@ -1100,12 +1195,54 @@ router.patch("/hr/employees/:id", requireAuth, requirePermission("hr.manage"), a
 
   if (Object.keys(updates).length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
 
+  const nextStatus = (updates.status !== undefined ? updates.status : existing.status) as string;
+  const nextOrgUnitId = (updates.orgUnitId !== undefined ? updates.orgUnitId : existing.orgUnitId) as number | null;
+  const nextManagerId = (updates.directManagerId !== undefined ? updates.directManagerId : existing.directManagerId) as number | null;
+  const nextEmploymentType = (updates.employmentType !== undefined ? updates.employmentType : existing.employmentType) as string | null;
+  const nextJobTitleId = (updates.jobTitleId !== undefined ? updates.jobTitleId : existing.jobTitleId) as number | null;
+
+  const orgCheck = await validateEmployeeOrgLinking(workspaceId, id, {
+    status: nextStatus,
+    orgUnitId: nextOrgUnitId,
+    directManagerId: nextManagerId,
+  });
+  if (!orgCheck.ok) {
+    res.status(orgCheck.status).json({ error: orgCheck.error, code: orgCheck.code });
+    return;
+  }
+
+  const govCheck = await validateWorkforceGovernance(workspaceId, id, {
+    status: nextStatus,
+    orgUnitId: nextOrgUnitId,
+    directManagerId: nextManagerId,
+    employmentType: nextEmploymentType,
+    jobTitleId: nextJobTitleId,
+  });
+  if (!govCheck.ok) {
+    res.status(govCheck.status).json({ error: govCheck.error, code: govCheck.code });
+    return;
+  }
+
   const [updated] = await db.update(employeesTable)
     .set(updates as any)
     .where(eq(employeesTable.id, id))
     .returning();
 
   await logActivity(workspaceId, id, "profile_updated", "Employee profile updated", req.userId, null, { before, after: updates });
+
+  void appendTimelineEvent({
+    workspaceId,
+    employeeId: id,
+    eventCategory: "profile",
+    eventType: "profile_updated",
+    title: "Profile updated",
+    actorUserId: req.userId,
+    metadata: { fields: Object.keys(updates) },
+  }).catch(() => undefined);
+
+  if ("directManagerId" in updates || "orgUnitId" in updates) {
+    void syncLegacyUserFieldsFromEmployee(workspaceId, id).catch(() => undefined);
+  }
 
   res.json(updated);
 });
@@ -1129,46 +1266,194 @@ router.delete("/hr/employees/:id", requireAuth, requireWorkspaceAdmin, async (re
 
 router.get("/hr/org-units", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.json([]); return; }
-  const rows = await db.select().from(hrOrgUnitsTable)
-    .where(and(eq(hrOrgUnitsTable.workspaceId, req.workspaceId), eq(hrOrgUnitsTable.isActive, true)))
-    .orderBy(asc(hrOrgUnitsTable.type), asc(hrOrgUnitsTable.displayOrder), asc(hrOrgUnitsTable.name));
-  res.json(rows);
+  try {
+    const rows = await db.select().from(hrOrgUnitsTable)
+      .where(and(eq(hrOrgUnitsTable.workspaceId, req.workspaceId), eq(hrOrgUnitsTable.isActive, true)))
+      .orderBy(asc(hrOrgUnitsTable.type), asc(hrOrgUnitsTable.displayOrder), asc(hrOrgUnitsTable.name));
+    res.json(rows);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/org-units" })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/org-units/tree", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  if (!req.workspaceId) { res.json([]); return; }
+  try {
+    const rows = await db.select().from(hrOrgUnitsTable)
+      .where(and(eq(hrOrgUnitsTable.workspaceId, req.workspaceId), eq(hrOrgUnitsTable.isActive, true)));
+    res.json(buildOrgTree(rows));
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/org-units/tree" })) return;
+    throw e;
+  }
 });
 
 router.post("/hr/org-units", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.status(400).json({ error: "No workspace" }); return; }
-  const { name, nameAr, type, parentId, color, displayOrder, _computedCode } = req.body;
+  const { name, nameAr, type, parentId, color, displayOrder, managerEmployeeId, _computedCode } = req.body;
   if (!name?.trim()) { res.status(400).json({ error: "name is required" }); return; }
-  const code = String(_computedCode || toCode(name) || 'unit') || null;
-  const [row] = await db.insert(hrOrgUnitsTable).values({
-    workspaceId: req.workspaceId,
-    name: name.trim(), nameAr: nameAr?.trim() ?? null,
-    type: type ?? "department", parentId: parentId ? Number(parentId) : null,
-    code, color: color ?? "#6366f1",
-    displayOrder: displayOrder ?? 0,
-  }).returning();
-  res.status(201).json(row);
+
+  const normalizedType = normalizeOrgUnitType(type ?? "department");
+  if (!isValidOrgUnitType(normalizedType)) {
+    res.status(400).json({ error: "Invalid org unit type", allowed: ["company", "branch", "division", "department", "team", "unit"] });
+    return;
+  }
+
+  try {
+    const pid = parentId ? Number(parentId) : null;
+    if (pid != null) {
+      const parent = await getOrgUnitById(req.workspaceId, pid);
+      if (!parent) { res.status(400).json({ error: "Parent org unit not found" }); return; }
+      const parentCheck = validateOrgParentType(normalizedType, parent.type);
+      if (!parentCheck.ok) { res.status(400).json({ error: parentCheck.error }); return; }
+    } else {
+      const rootCheck = validateOrgParentType(normalizedType, null);
+      if (!rootCheck.ok) { res.status(400).json({ error: rootCheck.error }); return; }
+    }
+
+    if (managerEmployeeId != null) {
+      const [mgr] = await db.select({ id: employeesTable.id })
+        .from(employeesTable)
+        .where(and(eq(employeesTable.id, Number(managerEmployeeId)), eq(employeesTable.workspaceId, req.workspaceId)));
+      if (!mgr) { res.status(400).json({ error: "managerEmployeeId must reference a workspace employee" }); return; }
+    }
+
+    const code = String(_computedCode || toCode(name) || "unit") || null;
+    const [row] = await db.insert(hrOrgUnitsTable).values({
+      workspaceId: req.workspaceId,
+      name: name.trim(), nameAr: nameAr?.trim() ?? null,
+      type: normalizedType, parentId: pid,
+      managerEmployeeId: managerEmployeeId ? Number(managerEmployeeId) : null,
+      code, color: color ?? "#6366f1",
+      displayOrder: displayOrder ?? 0,
+    }).returning();
+    res.status(201).json(row);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "POST /hr/org-units" })) return;
+    throw e;
+  }
 });
 
 router.patch("/hr/org-units/:id", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.status(400).json({ error: "No workspace" }); return; }
   const id = parseId(req.params.id);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
-  const { name, nameAr, type, parentId, code, color, displayOrder, isActive } = req.body;
+  const { name, nameAr, type, parentId, code, color, displayOrder, isActive, managerEmployeeId } = req.body;
   const updates: Record<string, unknown> = {};
   if (name !== undefined) updates.name = name.trim();
   if (nameAr !== undefined) updates.nameAr = nameAr;
-  if (type !== undefined) updates.type = type;
+  if (type !== undefined) {
+    const normalizedType = normalizeOrgUnitType(type);
+    if (!isValidOrgUnitType(normalizedType)) {
+      res.status(400).json({ error: "Invalid org unit type" }); return;
+    }
+    updates.type = normalizedType;
+  }
   if (parentId !== undefined) updates.parentId = parentId;
   if (code !== undefined) updates.code = code;
   if (color !== undefined) updates.color = color;
   if (displayOrder !== undefined) updates.displayOrder = displayOrder;
   if (isActive !== undefined) updates.isActive = isActive;
+  if (managerEmployeeId !== undefined) updates.managerEmployeeId = managerEmployeeId ? Number(managerEmployeeId) : null;
   if (!Object.keys(updates).length) { res.status(400).json({ error: "No fields" }); return; }
-  const [updated] = await db.update(hrOrgUnitsTable).set(updates as any)
-    .where(and(eq(hrOrgUnitsTable.id, id), eq(hrOrgUnitsTable.workspaceId, req.workspaceId))).returning();
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(updated);
+
+  try {
+    const [existing] = await db.select().from(hrOrgUnitsTable)
+      .where(and(eq(hrOrgUnitsTable.id, id), eq(hrOrgUnitsTable.workspaceId, req.workspaceId)));
+    if (!existing) { res.status(404).json({ error: "Not found" }); return; }
+
+    if (managerEmployeeId != null) {
+      const [mgr] = await db.select({ id: employeesTable.id })
+        .from(employeesTable)
+        .where(and(eq(employeesTable.id, Number(managerEmployeeId)), eq(employeesTable.workspaceId, req.workspaceId)));
+      if (!mgr) { res.status(400).json({ error: "managerEmployeeId must reference a workspace employee" }); return; }
+    }
+
+    const units = await loadWorkspaceOrgUnits(req.workspaceId);
+    if (parentId !== undefined) {
+      const newParent = parentId === null || parentId === "" ? null : Number(parentId);
+      if (newParent != null && wouldCreateOrgCycle(id, newParent, units)) {
+        res.status(400).json({ error: "Invalid parent: would create hierarchy cycle" });
+        return;
+      }
+      updates.parentId = newParent;
+    }
+
+    const nextType = (updates.type as string | undefined) ?? existing.type;
+    const nextParentId = updates.parentId !== undefined
+      ? (updates.parentId as number | null)
+      : existing.parentId;
+    if (nextParentId != null) {
+      const parent = units.find((u) => u.id === nextParentId);
+      if (!parent) { res.status(400).json({ error: "Parent org unit not found" }); return; }
+      const parentCheck = validateOrgParentType(nextType, parent.type);
+      if (!parentCheck.ok) { res.status(400).json({ error: parentCheck.error }); return; }
+    } else {
+      const rootCheck = validateOrgParentType(nextType, null);
+      if (!rootCheck.ok) { res.status(400).json({ error: rootCheck.error }); return; }
+    }
+
+    const [updated] = await db.update(hrOrgUnitsTable).set(updates as any)
+      .where(and(eq(hrOrgUnitsTable.id, id), eq(hrOrgUnitsTable.workspaceId, req.workspaceId))).returning();
+    if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(updated);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "PATCH /hr/org-units/:id", orgUnitId: id })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/org-units/:id/ancestors", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  const id = parseId(req.params.id);
+  if (!id || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
+  try {
+    const ancestors = await getOrgUnitAncestors(req.workspaceId, id);
+    res.json(ancestors);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/org-units/:id/ancestors", orgUnitId: id })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/org-units/:id/descendants", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  const id = parseId(req.params.id);
+  if (!id || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
+  try {
+    const ids = await getOrgUnitDescendantIds(req.workspaceId, id);
+    res.json({ orgUnitId: id, descendantIds: ids });
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/org-units/:id/descendants", orgUnitId: id })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/org-units/:id/employees", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  const id = parseId(req.params.id);
+  if (!id || !req.workspaceId) { res.json([]); return; }
+  try {
+    const rows = await getEmployeesInOrgSubtree(req.workspaceId, id);
+    res.json(rows);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/org-units/:id/employees", orgUnitId: id })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/employees/:id/reporting-chain", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  const id = parseId(req.params.id);
+  if (!id || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
+  try {
+    const chain = await getFullReportingChain(req.workspaceId, id);
+    res.json(chain);
+  } catch (e) {
+    if (e instanceof ManagerCycleError) {
+      res.status(400).json({ error: e.message, code: "MANAGER_CYCLE" });
+      return;
+    }
+    if (handleWorkforceRouteError(res, e, { route: "GET /hr/employees/:id/reporting-chain", employeeId: id })) return;
+    throw e;
+  }
 });
 
 router.delete("/hr/org-units/:id", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
@@ -1450,30 +1735,123 @@ router.get("/hr/employees/:id/documents", requireAuth, requirePermission("hr.vie
 router.post("/hr/employees/:id/documents", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
   const empId = parseId(req.params.id);
   if (!empId || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
-  const { documentType, name, documentNumber, issueDate, expiryDate, objectPath, fileName, fileSize, notes } = req.body;
+  const { documentType, name, documentNumber, issueDate, expiryDate, objectPath, fileName, fileSize, notes, mimeType, checksum, storageKey, categoryCode, isSigned } = req.body;
   if (!name?.trim()) { res.status(400).json({ error: "name is required" }); return; }
-  const [row] = await db.insert(hrEmployeeDocumentsTable).values({
-    workspaceId: req.workspaceId, employeeId: empId,
-    documentType: documentType ?? "other", name: name.trim(),
-    documentNumber: documentNumber ?? null, issueDate: issueDate ?? null,
-    expiryDate: expiryDate ?? null, objectPath: objectPath ?? null,
-    fileName: fileName ?? null, fileSize: fileSize ?? null,
-    notes: notes ?? null, createdBy: req.userId ?? null,
-  }).returning();
-  await logActivity(req.workspaceId, empId, "document_added", `Document "${name}" added`, req.userId);
-  if (req.userId && objectPath) {
-    void bridgeHrEmployeeDocument({
+  try {
+    const [row] = await db.insert(hrEmployeeDocumentsTable).values({
+      workspaceId: req.workspaceId, employeeId: empId,
+      documentType: documentType ?? "other", name: name.trim(),
+      documentNumber: documentNumber ?? null, issueDate: issueDate ?? null,
+      expiryDate: expiryDate ?? null, objectPath: objectPath ?? null,
+      fileName: fileName ?? null, fileSize: fileSize ?? null,
+      mimeType: mimeType ?? null, checksum: checksum ?? null, storageKey: storageKey ?? null,
+      categoryCode: categoryCode ?? documentType ?? null,
+      isSigned: isSigned ?? false,
+      signedAt: isSigned ? new Date() : null,
+      notes: notes ?? null, createdBy: req.userId ?? null,
+    }).returning();
+    await logActivity(req.workspaceId, empId, "document_added", `Document "${name}" added`, req.userId);
+    void onEmployeeDocumentUploaded({
       workspaceId: req.workspaceId,
-      userId: req.userId,
       employeeId: empId,
+      documentId: row!.id,
       name: name.trim(),
-      objectPath,
-      fileName: fileName ?? null,
-      fileSize: fileSize ?? null,
-    });
+      documentType: documentType ?? "other",
+      categoryCode: categoryCode ?? documentType ?? null,
+      isSigned: isSigned ?? false,
+      actorUserId: req.userId,
+    }).catch(() => undefined);
+    const pathForBridge = objectPath ?? storageKey ?? null;
+    if (req.userId && pathForBridge) {
+      void bridgeHrEmployeeDocument({
+        workspaceId: req.workspaceId,
+        userId: req.userId,
+        employeeId: empId,
+        name: name.trim(),
+        objectPath: pathForBridge,
+        fileName: fileName ?? null,
+        fileSize: fileSize ?? null,
+      });
+    }
+    res.status(201).json(row);
+  } catch (e) {
+    if (handleWorkforceRouteError(res, e, { route: "POST /hr/employees/:id/documents", employeeId: empId })) return;
+    throw e;
   }
-  res.status(201).json(row);
 });
+
+router.post(
+  "/hr/employees/:id/documents/upload",
+  requireAuth,
+  requirePermission("hr.manage"),
+  parseHrDocumentUpload,
+  async (req: AuthRequest, res): Promise<void> => {
+    const empId = parseId(req.params.id);
+    if (!empId || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
+    const upload = req.hrDocumentUpload;
+    if (!upload) { res.status(400).json({ error: "File is required" }); return; }
+
+    const documentType = typeof req.body?.documentType === "string" ? req.body.documentType : "other";
+    const categoryCode = typeof req.body?.categoryCode === "string" ? req.body.categoryCode : documentType;
+    const isSigned = req.body?.isSigned === true || req.body?.isSigned === "true";
+    const name = typeof req.body?.name === "string" && req.body.name.trim()
+      ? req.body.name.trim()
+      : upload.originalFileName;
+
+    try {
+      const ext = upload.originalFileName.includes(".")
+        ? upload.originalFileName.split(".").pop()!
+        : "pdf";
+      const storageKey = buildEmployeeFileStorageKey(req.workspaceId, empId, ext);
+      const { checksum } = await saveEmployeeFile(storageKey, upload.buffer);
+      const objectPath = objectPathFromStorageKey(storageKey);
+
+      const [row] = await db.insert(hrEmployeeDocumentsTable).values({
+        workspaceId: req.workspaceId,
+        employeeId: empId,
+        documentType,
+        categoryCode,
+        isSigned,
+        signedAt: isSigned ? new Date() : null,
+        name,
+        objectPath,
+        storageKey,
+        fileName: upload.originalFileName,
+        fileSize: upload.buffer.length,
+        mimeType: upload.mimeType,
+        checksum,
+        createdBy: req.userId ?? null,
+      }).returning();
+
+      await logActivity(req.workspaceId, empId, "document_uploaded", `Document "${name}" uploaded`, req.userId);
+      void onEmployeeDocumentUploaded({
+        workspaceId: req.workspaceId,
+        employeeId: empId,
+        documentId: row!.id,
+        name,
+        documentType,
+        categoryCode,
+        isSigned,
+        actorUserId: req.userId,
+      }).catch(() => undefined);
+      if (req.userId) {
+        void bridgeHrEmployeeDocument({
+          workspaceId: req.workspaceId,
+          userId: req.userId,
+          employeeId: empId,
+          name,
+          objectPath,
+          fileName: upload.originalFileName,
+          fileSize: upload.buffer.length,
+        });
+      }
+      res.status(201).json(row);
+    } catch (e) {
+      if (handleWorkforceRouteError(res, e, { route: "POST /hr/employees/:id/documents/upload", employeeId: empId })) return;
+      throw e;
+    }
+  },
+);
 
 router.delete("/hr/employees/:id/documents/:did", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
   const empId = parseId(req.params.id);
@@ -1535,6 +1913,14 @@ router.patch("/hr/employees/:id/leaves/:lid", requireAuth, requirePermission("hr
 router.get("/hr/employees/:id/position-history", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
   const id = parseId(req.params.id);
   if (!id || !req.workspaceId) { res.json([]); return; }
+  void recordLegacyUsage({
+    workspaceId: req.workspaceId,
+    eventType: "route_hit",
+    legacySurface: "hr_employee_position_history",
+    sourcePath: "GET /hr/employees/:id/position-history",
+    entityType: "employee",
+    entityId: id,
+  }).catch(() => undefined);
   const rows = await db.select().from(hrEmployeePositionHistoryTable)
     .where(and(eq(hrEmployeePositionHistoryTable.employeeId, id), eq(hrEmployeePositionHistoryTable.workspaceId, req.workspaceId)))
     .orderBy(desc(hrEmployeePositionHistoryTable.effectiveDate));
@@ -1544,6 +1930,25 @@ router.get("/hr/employees/:id/position-history", requireAuth, requirePermission(
 router.post("/hr/employees/:id/position-history", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
   const empId = parseId(req.params.id);
   if (!empId || !req.workspaceId) { res.status(400).json({ error: "Invalid" }); return; }
+
+  const writeCheck = await assertLegacyWriteAllowed(
+    req.workspaceId,
+    "hr_employee_position_history",
+    "POST /hr/employees/:id/position-history",
+  );
+  if (!writeCheck.ok) {
+    void recordLegacyUsage({
+      workspaceId: req.workspaceId,
+      eventType: "write_blocked",
+      legacySurface: "hr_employee_position_history",
+      sourcePath: "POST /hr/employees/:id/position-history",
+      entityType: "employee",
+      entityId: empId,
+    }).catch(() => undefined);
+    res.status(writeCheck.status).json({ error: writeCheck.error, code: writeCheck.code });
+    return;
+  }
+
   const { changeType, effectiveDate, fromTitle, toTitle, fromOrgUnitId, toOrgUnitId, fromGrade, toGrade, fromManagerId, toManagerId, notes } = req.body;
   if (!effectiveDate) { res.status(400).json({ error: "effectiveDate is required" }); return; }
   const [row] = await db.insert(hrEmployeePositionHistoryTable).values({
@@ -1556,6 +1961,14 @@ router.post("/hr/employees/:id/position-history", requireAuth, requirePermission
     notes: notes ?? null, createdBy: req.userId ?? null,
   }).returning();
   await logActivity(req.workspaceId, empId, "position_change", `${changeType ?? "Job movement"} recorded`, req.userId);
+  void recordLegacyUsage({
+    workspaceId: req.workspaceId,
+    eventType: "adapter_write",
+    legacySurface: "hr_employee_position_history",
+    sourcePath: "POST /hr/employees/:id/position-history",
+    entityType: "employee",
+    entityId: empId,
+  }).catch(() => undefined);
   res.status(201).json(row);
 });
 

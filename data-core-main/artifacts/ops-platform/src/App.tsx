@@ -59,6 +59,8 @@ import PlatformActivatePage from "@/pages/platform-activate";
 import CalendarPage from "@/pages/calendar";
 import RolesPage from "@/pages/roles";
 import WorkflowsPage from "@/pages/workflows";
+import ProcessTemplatesPage from "@/pages/process-templates";
+import ApprovalInboxPage from "@/pages/approval-inbox";
 import WorkflowDetailPage from "@/pages/workflow-detail";
 import GovernanceDashboard from "@/pages/governance-dashboard";
 import GovernanceHistoryPage from "@/pages/governance-history";
@@ -634,6 +636,8 @@ function AppRoutes() {
         <Route path="/roles">{() => <ProtectedRoute component={RolesPage} requiredPermission="roles.view" moduleKey="roles" />}</Route>
         <Route path="/workflows">{() => <ProtectedRoute component={WorkflowsPage} requiredPermission="workflow.view" moduleKey="workflows" />}</Route>
         <Route path="/workflows/:id">{() => <ProtectedRoute component={WorkflowDetailPage} requiredPermission="workflow.view" moduleKey="workflows" />}</Route>
+        <Route path="/process-templates">{() => <ProtectedRoute component={ProcessTemplatesPage} requiredPermission="workflow.view" moduleKey="workflows" />}</Route>
+        <Route path="/self-service/approvals">{() => <ProtectedRoute component={ApprovalInboxPage} requiredPermission="self_service.view" moduleKey="self-service" />}</Route>
         <Route path="/governance/history">{() => <ProtectedRoute component={GovernanceHistoryPage} requiredRoles={["admin", "super_admin"]} />}</Route>
         <Route path="/governance">{() => <ProtectedRoute component={GovernanceDashboard} requiredRoles={["admin", "super_admin"]} />}</Route>
         <Route path="/forms">{() => <Redirect to="/self-service" />}</Route>

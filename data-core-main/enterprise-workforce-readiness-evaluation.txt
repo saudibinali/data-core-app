@@ -1,0 +1,136 @@
+================================================================================
+ENTERPRISE WORKFORCE READINESS EVALUATION
+HR Foundation / Core Workforce Configuration
+================================================================================
+Date: 2026-05-20
+Scope: Read-only audit — no modifications
+Base: data-core-main/
+
+================================================================================
+1. SYSTEM CLASSIFICATION
+================================================================================
+
+| Label | Applies? | Evidence |
+|-------|----------|----------|
+| Enterprise Workforce Platform | NO | Dual org/manager models; foundation loosely bound |
+| Basic HR CRUD | PARTIAL | Exceeded by foundation + leave canonical |
+| Semi-structured HCM | YES | Rich schema + partial FK wiring |
+| Metadata-heavy HR shell | YES | Many lookup tables without runtime enforcement |
+
+Primary classification:
+  **Semi-structured HCM with metadata-heavy HR foundation shell**
+
+================================================================================
+2. ENTERPRISE CAPABILITY MATRIX
+================================================================================
+
+| Capability | Can support today? | Notes |
+|------------|-------------------|-------|
+| Enterprise hierarchy | PARTIAL | hr_org_units tree stored; not consumed by routing |
+| Advanced approvals | NO | Single-step leave; workflow uses user manager |
+| Dynamic workflow routing | PARTIAL | Event + role based; not org/grade based |
+| Delegation | NO | Not implemented |
+| Executive overrides | PARTIAL | Admin role fallback only |
+| Matrix organizations | NO | Single orgUnitId |
+| Branch hierarchies | PARTIAL | branch type in schema; missing in UI |
+| Cross-functional approvals | NO | No team matrix or committee model |
+
+================================================================================
+3. FOUNDATION ARCHITECTURE TRUTH
+================================================================================
+
+REAL FOUNDATION (operational hooks):
+  • hr_org_units + employees.orgUnitId
+  • hr_job_titles / hr_job_grades + employee FKs
+  • hr_leave_policies + leave requests + balances
+  • hr_work_locations (underused)
+  • POST /hr/foundation/seed
+
+METADATA / LOOKUP ONLY:
+  • hr_employee_statuses (employees.status text parallel)
+  • hr_employment_types (employees.employmentType text parallel)
+  • hr_contract_types (contracts.contractType text parallel)
+  • hr_document_types (documents.documentType text parallel)
+  • hr_probation_policies (no employee FK)
+  • hr_positions seats (employees.positionId unwired)
+  • Leave policy annualDays/accrualType (no accrual engine)
+
+NOT ORGANIZATIONAL INTELLIGENCE:
+  • No org graph traversal for approvals
+  • No inheritance
+  • No unit head resolver
+  • No position incumbent lifecycle
+
+================================================================================
+4. WHAT SHOULD CHANGE LATER (PLANNING — NOT EXECUTED)
+================================================================================
+
+REDESIGN (targeted):
+  • Unified org model (deprecate or sync legacy departments)
+  • Position seat ↔ employee incumbent binding
+  • Single ApproverResolutionService (employee graph + org heads)
+  • FK foundation lookups on employee/contract/document rows
+
+SIMPLIFY:
+  • Remove or hide unwired foundation tabs until bound
+  • Consolidate API under /hr/foundation/*
+  • Align UI terminology (Position vs Title vs Role)
+  • Single "Department" concept in admin UX
+
+CONVERT TO RUNTIME ENTITIES:
+  • hr_positions + occupancy from assignments
+  • hr_leave_policies → accrual worker using annualDays/accrualType
+  • hr_probation_policies → auto probationEndDate on hire
+  • hr_employee_statuses → FK or enforced code sync
+
+MAKE MANDATORY (enterprise tier):
+  • orgUnitId on employee activation
+  • directManagerId (except defined root roles)
+  • jobTitleId or positionId
+  • userId link when self-service modules enabled
+
+KEEP CONFIGURABLE:
+  • Leave policy catalog per workspace
+  • Custom field definitions
+  • Document type catalog (once enforced)
+  • Work location catalog
+  • Display order / bilingual labels
+
+================================================================================
+5. READINESS SCORECARD (1-5)
+================================================================================
+
+Foundation UI / admin CRUD .............. 4/5
+Foundation schema depth ................. 4/5
+Lookup → runtime binding ................ 2/5
+Org structure operational use ........... 2.5/5
+Position / seat model ................... 1.5/5
+Leave policy integration ................ 3.5/5
+Workflow/org integration ................ 1.5/5
+Enterprise governance ................... 1.5/5
+
+Overall HR Foundation readiness ......... 2.4/5 (enterprise lens)
+                                         3.8/5 (SMB configurable HR lens)
+
+================================================================================
+6. FINAL ANSWER
+================================================================================
+
+Does the system have a REAL Foundation HR Architecture?
+  YES — as a **workspace metadata configuration layer**.
+  NO — as **Runtime Organizational Intelligence**.
+
+Is org structure operational?
+  PARTIALLY — employee placement and display only.
+
+Does the platform think Enterprise Workforce?
+  ASPIRATIONALLY (schema + copy + UI)
+  NOT YET in runtime enforcement and automation coupling.
+
+Can this foundation support future approvals/workflows/delegation?
+  YES — with binding layer + graph services on existing tables.
+  Current foundation is necessary but NOT sufficient alone.
+
+================================================================================
+END OF EVALUATION
+================================================================================

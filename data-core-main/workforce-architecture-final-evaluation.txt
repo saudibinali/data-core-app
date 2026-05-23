@@ -1,0 +1,136 @@
+================================================================================
+WORKFORCE ARCHITECTURE — FINAL EVALUATION
+================================================================================
+Date: 2026-05-20
+Scope: Read-only audit — no modifications
+Base: data-core-main/
+
+================================================================================
+1. SYSTEM CLASSIFICATION
+================================================================================
+
+| Label | Applies? | Notes |
+|-------|----------|-------|
+| HR-ready | PARTIAL | Employee CRUD, leave, payroll, attendance exist; org governance weak |
+| enterprise-ready | NO | Dual org/manager models, optional structure, no enforcement |
+| operationally safe | NO | Missing manager → admin/requester approver fallbacks |
+| structurally weak | YES | Two parallel org systems, split identity |
+| over-flexible | YES | Only fullName required; all org relations optional |
+| under-governed | YES | No FK/cycle checks; no mandatory invariants |
+
+================================================================================
+2. HIERARCHY & APPROVAL TRUTH
+================================================================================
+
+employee hierarchy real?
+  PARTIAL. directManagerId on employees supports tree IF populated.
+  No DB FK, no UI maintenance on detail, no sync with users.lineManagerId.
+
+org structure real?
+  PARTIAL. hr_org_units tree is real in schema/API.
+  Legacy departments flat model still drives users/workflows.
+  No org chart; dual directories.
+
+approvals operable?
+  YES WITH CAVEATS. Leave uses employee manager + admin fallback.
+  Workflows use user lineManagerId — different chain.
+  Incomplete structure → wrong approver or skipped steps.
+
+workflow hierarchy scalable?
+  LOW-MEDIUM. Workflow engine can target "manager" but reads wrong table
+  for HCM tenants. department_head not implemented.
+  Cannot scale org-based routing without consolidation.
+
+================================================================================
+3. MANDATORY vs OPTIONAL vs RISKS
+================================================================================
+
+SHOULD BECOME MANDATORY (enterprise target — not current state):
+  • employees.orgUnitId (or equivalent) at hire completion
+  • employees.directManagerId for non-top-level roles
+  • jobTitleId OR positionId (once wired)
+  • employees.userId for self-service-enabled workspaces
+  • Single canonical org tree (deprecate or sync legacy departments)
+
+SHOULD REMAIN OPTIONAL (valid cases):
+  • userId for non-login workforce (contractors, pre-boarding)
+  • endDate / probation for permanent staff
+  • custom fields per workspace policy
+  • Multiple user departments IF matrix org formally supported (not today)
+
+ARCHITECTURAL RISKS:
+  • Dual org + dual manager — reporting and approvals disagree
+  • positionId schema without application wiring
+  • Position history without employee row update
+  • Admin fallback approver masks data quality issues
+  • No tree validation on org unit parentId
+
+FAKE FLEXIBILITY:
+  • "Organization structure" entitlement vs optional orgUnitId
+  • hr_positions headcount/occupancy without assignment
+  • Job movements tab implying transfer workflow without state update
+  • Workflow department_head approver type
+  • Text company/branch fields parallel to structured org units
+
+================================================================================
+4. USER MANAGEMENT vs ENTERPRISE WORKFORCE PLATFORM
+================================================================================
+
+Answer: CLOSER TO **USER MANAGEMENT + HR MODULE ADD-ON** than unified
+enterprise workforce platform.
+
+Evidence:
+  • users table predates / parallels employees
+  • Workflows, tickets, legacy departments anchor on users
+  • HCM org tree serves HR routes but not platform-wide
+  • No enforced workforce invariants
+  • Strong employee schema + weak governance = "metadata-rich, runtime-soft"
+
+Maturity estimate:
+  User / access directory .............. 70%
+  HR employee records .................... 65%
+  Organizational structure (unified) ..... 35%
+  Reporting / manager hierarchy .......... 40%
+  Enterprise HCM governance .............. 25%
+
+================================================================================
+5. RECOMMENDED DIRECTION (DOCUMENTATION ONLY — NOT EXECUTED)
+================================================================================
+
+Phase A — Canonical model decision
+  Declare hr_org_units + employees as workforce source of truth.
+  Document legacy departments as compatibility layer with sync or sunset plan.
+
+Phase B — Enforcement
+  Workspace policy flags: require org/manager on employee activate.
+  Validate manager in workspace; prevent cycles; FK or app-level integrity.
+
+Phase C — UX consolidation
+  Org edit on employee detail; org chart; single directory; link user wizard.
+
+Phase D — Runtime unification
+  Teach workflow manager resolution to use employees.directManagerId via userId.
+  Implement department_head OR-shell org walk if needed.
+
+Phase E — Position seats
+  Wire positionId assignment OR remove from schema until ready.
+
+================================================================================
+6. SCORECARD (1-5)
+================================================================================
+
+Employee data model depth .......... 4/5
+Org unit tree (HCM) ................ 3/5
+Legacy org coexistence ............. 1/5
+Manager / reporting lines .......... 2/5
+Position seat model ................ 1/5
+UI lifecycle completeness .......... 2/5
+HR process integration ............. 3/5
+Enterprise governance .............. 1.5/5
+
+Overall workforce architecture ..... 2.2/5 (enterprise lens)
+                                    3.5/5 (SMB flexible HR lens)
+
+================================================================================
+END OF FINAL EVALUATION
+================================================================================

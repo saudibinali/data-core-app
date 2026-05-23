@@ -3,6 +3,9 @@ import { notificationsTable, usersTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { logger } from "../../logger";
 import type { ApprovalStep, ExecutionContext, StepResult } from "../types";
+import { resolveManagerUserIdForTrigger, resolveEmployeeByUserId } from "../../workforce/manager-resolver";
+import { resolveManagerUserIdForEmployee } from "../../workforce/org/reporting-hierarchy-service";
+import { getOrgRuntimeMode } from "../../workforce/org/org-runtime-settings";
 
 // ── Governance: approver notification cap (Phase 3 - P3-D) ───────────────────
 //
@@ -49,11 +52,39 @@ export async function executeApprovalStep(
   } else if (config.approverType === "manager") {
     const triggerId = ctx.triggeredBy ?? (data["employeeId"] as number | undefined);
     if (triggerId) {
-      const [user] = await db
-        .select({ lineManagerId: usersTable.lineManagerId })
-        .from(usersTable)
-        .where(eq(usersTable.id, triggerId));
-      if (user?.lineManagerId) approverIds = [user.lineManagerId];
+      const employee = await resolveEmployeeByUserId(ctx.workspaceId, triggerId);
+      const orgMode = await getOrgRuntimeMode(ctx.workspaceId);
+
+      if (employee && (orgMode === "active" || orgMode === "shadow")) {
+        const resolved = await resolveManagerUserIdForEmployee(ctx.workspaceId, employee.id);
+        if (resolved) {
+          if (orgMode === "shadow") {
+            const [legacyUser] = await db
+              .select({ lineManagerId: usersTable.lineManagerId })
+              .from(usersTable)
+              .where(eq(usersTable.id, triggerId));
+            if (legacyUser?.lineManagerId !== resolved.userId) {
+              logger.info(
+                {
+                  workspaceId: ctx.workspaceId,
+                  triggerUserId: triggerId,
+                  resolved,
+                  legacy: legacyUser?.lineManagerId,
+                },
+                "Org runtime shadow: workflow manager mismatch",
+              );
+            }
+          }
+          if (orgMode === "active") {
+            approverIds = [resolved.userId];
+          }
+        }
+      }
+
+      if (!approverIds.length) {
+        const mgrUserId = await resolveManagerUserIdForTrigger(ctx.workspaceId, triggerId);
+        if (mgrUserId) approverIds = [mgrUserId];
+      }
     }
   }
 
@@ -101,7 +132,7 @@ export async function executeApprovalStep(
       type: "approval_request",
       title: `Approval Required: ${config.title}`,
       message: `Your approval is required for: ${entityTitle}`,
-      link: null,
+      link: `/self-service/approvals`,
     })),
   );
 
