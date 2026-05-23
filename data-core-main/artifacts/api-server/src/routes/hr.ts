@@ -94,6 +94,10 @@ import { onEmployeeDocumentUploaded } from "../lib/workforce/operations/document
 import { appendTimelineEvent } from "../lib/workforce/operations/timeline-service";
 import { assertLegacyWriteAllowed } from "../lib/workforce/stabilization/cleanup-staging";
 import { recordLegacyUsage } from "../lib/workforce/stabilization/usage-telemetry";
+import { loadDynamicEmploymentTypes, loadDynamicEmployeeStatuses } from "../lib/hr-import/catalog/dynamic-enum-loader";
+import { getImportRuntimeSettings } from "../lib/hr-import/runtime-settings";
+import { recordImportTelemetry, countUnresolvedFromWarnings } from "../lib/hr-import/telemetry/import-telemetry";
+import { runShadowValidationPipeline } from "../lib/hr-import/validation/shadow-validation-runner";
 
 const router: IRouter = Router();
 
@@ -598,6 +602,15 @@ router.get("/hr/employees/import-template", requireAuth, requirePermission("hr.m
   }
 
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  void getImportRuntimeSettings(workspaceId).then((runtimeSettings) =>
+    recordImportTelemetry({
+      workspaceId,
+      phase: "template",
+      sourcePath: "GET /hr/employees/import-template",
+      runtimeSettings,
+      metrics: { rowCount: 0 },
+    }),
+  );
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="employee_import_template.xlsx"`);
   res.send(buf);
@@ -611,8 +624,8 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
 
   const rawRows: Record<string, string>[] = Array.isArray(req.body.rows) ? req.body.rows : [];
 
-  // Load reference lookups in parallel
-  const [orgUnits, jobTitles, jobGrades, positions, workLocations, customFields, existingEmps, settings] = await Promise.all([
+  // Load reference lookups in parallel (dynamic enums merged with legacy fallback)
+  const [orgUnits, jobTitles, jobGrades, positions, workLocations, customFields, existingEmps, settings, employmentTypesDynamic, statusesDynamic, importRuntimeSettings] = await Promise.all([
     db.select({ id: hrOrgUnitsTable.id, name: hrOrgUnitsTable.name }).from(hrOrgUnitsTable).where(eq(hrOrgUnitsTable.workspaceId, workspaceId)),
     db.select({ id: hrJobTitlesTable.id, name: hrJobTitlesTable.name }).from(hrJobTitlesTable).where(eq(hrJobTitlesTable.workspaceId, workspaceId)),
     db.select({ id: hrJobGradesTable.id, name: hrJobGradesTable.name }).from(hrJobGradesTable).where(eq(hrJobGradesTable.workspaceId, workspaceId)),
@@ -621,6 +634,9 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     db.select({ name: hrCustomFieldDefsTable.name, id: hrCustomFieldDefsTable.id, fieldType: hrCustomFieldDefsTable.fieldType, required: hrCustomFieldDefsTable.required }).from(hrCustomFieldDefsTable).where(and(eq(hrCustomFieldDefsTable.workspaceId, workspaceId), eq(hrCustomFieldDefsTable.isActive, true))),
     db.select({ id: employeesTable.id, employeeNumber: employeesTable.employeeNumber, email: employeesTable.email, fullName: employeesTable.fullName }).from(employeesTable).where(eq(employeesTable.workspaceId, workspaceId)),
     db.select().from(hrWorkspaceSettingsTable).where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId)),
+    loadDynamicEmploymentTypes(workspaceId),
+    loadDynamicEmployeeStatuses(workspaceId),
+    getImportRuntimeSettings(workspaceId),
   ]);
 
   const numberingMode = settings[0]?.numberingMode ?? "auto";
@@ -643,8 +659,8 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  const validEmploymentTypes = new Set(["full_time", "part_time", "contractor", "intern", "temporary"]);
-  const validStatuses = new Set(["active", "on_leave", "suspended", "terminated", "resigned"]);
+  const validEmploymentTypes = employmentTypesDynamic.codes;
+  const validStatuses = statusesDynamic.codes;
   const validGenders = new Set(["male", "female"]);
 
   type PreviewRow = {
@@ -785,6 +801,45 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     errors: previewRows.filter((r) => r.status === "error").length,
   };
 
+  const allWarnings = previewRows.flatMap((r) => r.warnings);
+  const unresolvedMetrics = countUnresolvedFromWarnings(allWarnings);
+
+  const shadowResult = await runShadowValidationPipeline({
+    workspaceId,
+    numberingMode,
+    runtimeSettings: importRuntimeSettings,
+    rawRows,
+    legacyPreviewRows: previewRows.map((r) => ({
+      rowIndex: r.rowIndex,
+      errors: r.errors,
+      warnings: r.warnings,
+      status: r.status,
+    })),
+    sourcePath: "POST /hr/employees/import/preview",
+  });
+
+  void recordImportTelemetry({
+    workspaceId,
+    phase: "preview",
+    sourcePath: "POST /hr/employees/import/preview",
+    runtimeSettings: importRuntimeSettings,
+    metrics: {
+      rowCount: previewRows.length,
+      newCount: summary.new,
+      updateCount: summary.update,
+      errorCount: summary.errors,
+      warningCount: allWarnings.length,
+      validationErrors: summary.errors,
+      ...unresolvedMetrics,
+      dynamicEnumSource: employmentTypesDynamic.source,
+      employmentTypeCount: employmentTypesDynamic.codes.size,
+      statusCount: statusesDynamic.codes.size,
+      shadowValidationRan: shadowResult.ran,
+      shadowParityRatio: shadowResult.summary?.parityRatio,
+      shadowMismatchedRows: shadowResult.summary?.mismatchedRows,
+    },
+  });
+
   res.json({ rows: previewRows, summary });
 });
 
@@ -800,9 +855,10 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
     data: Record<string, unknown>;
   }> = Array.isArray(req.body.rows) ? req.body.rows : [];
 
-  const [settings, allEmps] = await Promise.all([
+  const [settings, allEmps, importRuntimeSettings] = await Promise.all([
     db.select().from(hrWorkspaceSettingsTable).where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId)),
     db.select({ id: employeesTable.id, employeeNumber: employeesTable.employeeNumber }).from(employeesTable).where(eq(employeesTable.workspaceId, workspaceId)),
+    getImportRuntimeSettings(workspaceId),
   ]);
   const numberingMode = settings[0]?.numberingMode ?? "auto";
   const empByNum = new Map(allEmps.map((e) => [String(e.employeeNumber ?? "").toLowerCase(), e.id]));
@@ -904,6 +960,20 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
       errors.push(`Row ${imported + updated + errors.length + 1}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+
+  void recordImportTelemetry({
+    workspaceId,
+    phase: "confirm",
+    sourcePath: "POST /hr/employees/import/confirm",
+    runtimeSettings: importRuntimeSettings,
+    metrics: {
+      rowCount: rows.length,
+      imported,
+      updated,
+      confirmErrors: errors.length,
+      errorCount: errors.length,
+    },
+  });
 
   res.json({ imported, updated, errors });
 });

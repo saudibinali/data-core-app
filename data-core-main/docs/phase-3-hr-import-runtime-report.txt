@@ -1,0 +1,21 @@
+PHASE 3 — HR IMPORT RUNTIME REPORT
+==================================
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Server-side XLSX runtime | Excellent | Multipart upload, workbook parse, metadata/stale/_validation/ref-sheet checks; client parsing preserved |
+| Import sessions | Excellent | Draft → validating → validated → shadow_complete; rows persisted with validation/mapping telemetry |
+| Master data dry-run | Good | Org/title/grade/position/location/type/status/doc dry-run; no live writes; auto-create disabled |
+| Shadow pipeline | Good | Employee v2 simulate-only; dependency + rollback prep; legacy compare remains on Phase 2 preview hook |
+| Dependency ordering | Excellent | Org hierarchy + manager topological sort; cycle detection; unresolved dependency reporting |
+| Diagnostics & results | Excellent | Row-level results/warnings; GET /hr/import/sessions/:id/results|diagnostics + v2 mirrors |
+| Stale template foundation | Good | Validation errors only; no hard blocking; issues stored in session summary |
+| Telemetry | Good | import.v3.* metrics + legacy_compat usage events; parser/validate/shadow timing |
+| Import runtime health | Good | GET /hr/import/v2/runtime/health; schema + catalog cache + metrics snapshot |
+| Import APIs v2 | Excellent | upload/validate/shadow-run/sessions/results/diagnostics mounted; legacy untouched |
+| Rollback foundations | Good | Pre-image metadata rows; executeSessionRollbackDisabled; execution off |
+| Startup guards | Excellent | Non-fatal schema probe; v2 routes 503 if migration 0029 missing |
+| Compatibility | Excellent | Legacy import/template/preview/confirm unchanged; additive only |
+| Risks | Weak | Large XLSX memory; duplicate row upserts on re-validate; no v2 shadow legacy diff API yet |
+| PM2 requirements | Good | Rebuild api-server; restart PM2; ensure migration 0029 applied before enabling v2 routes |
+| Remaining gaps | Weak | No commit path; no auto-create; no strict enforcement; legacy-vs-v2 diff not on v2 shadow-run endpoint |

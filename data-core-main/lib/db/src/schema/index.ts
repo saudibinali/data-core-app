@@ -30,6 +30,7 @@ export * from "./hr";
 export * from "./approval-runtime";
 export * from "./workforce-operations";
 export * from "./legacy-compat";
+export * from "./hr-import-runtime";
 export * from "./platform-settings";
 export * from "./governance";
 export * from "./fairness-policies";

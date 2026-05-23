@@ -1,0 +1,883 @@
+================================================================================
+HR ENTERPRISE MASTER DATA RUNTIME — SAFE-DEPLOYMENT ARCHITECTURE PLAN
+================================================================================
+
+Status: Read-only planning. No code, migrations, or deletions.
+Target: Full dynamic master data runtime with import/export, smart mapping,
+        validation, auto-create, and live-platform safety.
+Baseline: Phases 1–5 (org runtime, approval runtime, workforce operations,
+          legacy compat) plus monolithic employee import in hr.ts and mature
+          attendance import pattern under workforce-attendance/import/.
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+The platform already has strong master data tables and partial runtime
+governance, but employee import is inline, hardcoded, and bypasses org/
+governance validation. Attendance import already demonstrates the target
+architecture: template registry, validator, session/batch tables, dry-run,
+reconciliation, and rollback tokens.
+
+The safe path is additive, feature-flagged, and parallel-run — never replace
+live import until shadow mode proves parity. Reuse Phase 5 runtime_schema_registry,
+legacy_compat_usage_events, and existing startup guard patterns.
+
+Current Live Path:
+  hr-employees.tsx → GET import-template → POST import/preview → POST import/confirm → employees
+
+Target Enterprise Runtime:
+  Import Hub UI → HrImportRuntimeService → Master Data Registry → Validation Engine
+  → Mapping Resolver → Import Sessions DB → Audit + Rollback
+  → Org Runtime + Governance Runtime + Master Data Catalog
+  → employees + master tables
+
+Shadow mode bridges current to target; cutover is per workspace.
+
+================================================================================
+PHASED DEPLOYMENT PLAN
+================================================================================
+
+--------------------------------------------------------------------------------
+Phase 0 — Baseline freeze & observability (Week 0)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Establish parity metrics before any behavioral change.
+
+Affected systems:
+  Telemetry only: legacy_compat_usage_events, import usage logging.
+
+Runtime risks:
+  None (read-only instrumentation).
+
+Compatibility risks:
+  None.
+
+Deployment order:
+  1) Deploy logging hooks on existing import endpoints
+  2) Export baseline counts per workspace
+
+Rollback:
+  Remove telemetry hooks (additive columns/events only).
+
+Required validations:
+  Compare import volume, error rates, field population rates.
+
+PM2 restart:
+  Rolling restart after API deploy; no migration.
+
+Startup guards:
+  None new.
+
+Deliverable:
+  Baseline report — org unit fill rate, manager link rate, work_location_id vs
+  location text, position_id usage.
+
+--------------------------------------------------------------------------------
+Phase 1 — Import runtime foundation (additive schema only)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Introduce session-based import infrastructure without changing live import
+  behavior.
+
+Affected systems:
+  New tables; reuse import_jobs; new lib/hr-import/ module tree.
+
+Runtime risks:
+  Low — new routes behind feature flag.
+
+Compatibility risks:
+  None if old routes untouched.
+
+New additive schema (0029+):
+  - hr_import_sessions — workspace, type, status, template_version, mode
+  - hr_import_session_rows — raw + normalized JSON, validation result, action
+  - hr_import_session_entities — auto-created entity audit trail
+  - hr_import_rollback_snapshots — pre-image JSON per affected row
+  - hr_master_data_registry — entity metadata (canonical keys, auto-create policy)
+  - Extend runtime_schema_registry with component hr_import_runtime
+
+Deployment order:
+  1) Apply migration (offline-safe, IF NOT EXISTS)
+  2) Register in runtime_schema_registry as pending
+  3) Deploy API with new routes disabled (masterDataImportRuntimeEnabled: false)
+  4) Run validate-schema-drift.cjs extension
+  5) PM2 rolling restart
+  6) Startup guard: runHrImportRuntimeStartupChecks — verify tables, mark verified
+
+Rollback:
+  Flag off; tables remain empty; no live impact.
+
+Required validations:
+  Schema drift script; smoke test new endpoints in staging only.
+
+--------------------------------------------------------------------------------
+Phase 2 — Master data catalog & canonical key layer
+--------------------------------------------------------------------------------
+
+Purpose:
+  Unify all HR lookups under one runtime catalog with canonical resolution.
+
+Affected systems:
+  New resolver service; optional normalized_name / normalized_code columns.
+
+Runtime risks:
+  Medium if existing CRUD paths change — must remain read-only wrappers first.
+
+Compatibility risks:
+  Duplicate names today collapse in import Maps — catalog must preserve legacy
+  behavior in legacy mode.
+
+Deployment order:
+  1) Add optional unique indexes (workspace_id, lower(name)) where safe
+  2) Deploy MasterDataCatalogService — loads all foundation + org entities
+  3) Wire catalog into new template generator only (not old template yet)
+  4) Add GET /hr/master-data/export (read-only JSON/XLSX)
+  5) PM2 restart
+
+Rollback:
+  Disable export routes; catalog is read-only cache.
+
+Startup guards:
+  Verify catalog can load for each entity type; 503 on schema mismatch.
+
+Settings:
+  masterDataRuntimeMode: legacy | shadow | active (mirror org runtime pattern).
+
+--------------------------------------------------------------------------------
+Phase 3 — Dynamic template engine v2 (parallel templates)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Replace static hardcoded enums with workspace-driven templates.
+
+Affected systems:
+  New GET /hr/import/templates/:key; keep GET /hr/employees/import-template unchanged.
+
+Runtime risks:
+  Low — new download path.
+
+Compatibility risks:
+  Users on old template must keep working until cutover.
+
+Deployment order:
+  1) Ship ImportTemplateRegistry for HR (mirror attendance pattern)
+  2) Template version in filename: employee-import-v2.1.0.xlsx
+  3) UI: "Download legacy template" vs "Download enterprise template"
+  4) PM2 restart (API only first)
+
+Rollback:
+  Hide v2 download in UI.
+
+Validations:
+  Template metadata sheet matches OpenAPI schema version.
+
+--------------------------------------------------------------------------------
+Phase 4 — Validation engine unification (shadow mode)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Single validation pipeline for manual create, PATCH, and import.
+
+Affected systems:
+  Extract from hr.ts → HrImportValidator; call validateEmployeeOrgLinking,
+  validateWorkforceGovernance.
+
+Runtime risks:
+  High if enforced immediately — shadow first.
+
+Compatibility risks:
+  Existing imports that violate org rules would start failing.
+
+Deployment order:
+  1) Deploy validator in shadow — logs diffs without blocking
+  2) Compare shadow vs legacy preview results per workspace for 2+ weeks
+  3) Fix mapping bugs (position_id, work_location_id) in v2 path only
+  4) PM2 restart
+
+Rollback:
+  importValidationMode: legacy.
+
+Startup guards:
+  Fail startup if validator module cannot load foundation tables (503 on routes).
+
+--------------------------------------------------------------------------------
+Phase 5 — Master data import/export (non-employee)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Full import/export for org units, titles, grades, positions, lookups.
+
+Affected systems:
+  New routes; org graph service; foundation CRUD.
+
+Runtime risks:
+  High — org tree corruption, cycle introduction.
+
+Compatibility risks:
+  Existing org units referenced by employees.
+
+Deployment order:
+  1) Export first (always safe)
+  2) Import in dry-run only
+  3) Topological import order: grades → titles → locations → org units → positions
+  4) Require admin approval queue for org unit import when orgRuntimeMode=active
+  5) PM2 restart
+
+Rollback:
+  Revert session via rollback snapshots; never DELETE existing org rows in v1.
+
+Validations:
+  Cycle detection, parent type rules, duplicate code prevention.
+
+--------------------------------------------------------------------------------
+Phase 6 — Employee import v2 with smart mapping
+--------------------------------------------------------------------------------
+
+Purpose:
+  Session-based employee import with two-phase commit.
+
+Affected systems:
+  Replace confirm path for opted-in workspaces only.
+
+Runtime risks:
+  Highest — partial imports, manager ordering, data loss on update.
+
+Compatibility risks:
+  Old clients sending JSON rows to old endpoints.
+
+Two-phase commit design:
+  Phase A: Resolve/create master data (if auto-create enabled)
+  Phase B: Insert/update employees in dependency order (managers before reports)
+  Single DB transaction per session (or savepoint per row with rollback token)
+
+Deployment order:
+  1) employeeImportRuntimeMode: legacy | shadow | active per workspace
+  2) Shadow: run v2 in parallel, don't commit; compare
+  3) Active: route confirm to v2; keep legacy endpoint for 90 days
+  4) PM2 restart
+
+Rollback:
+  Flip workspace setting to legacy; use rollback snapshots for committed v2 sessions.
+
+Fixes required before active:
+  - Write work_location_id not just location text
+  - Write position_id when resolved
+  - Full update field parity
+  - Call org + governance validation
+  - Sync legacy user fields when canonical mode active
+  - Emit workforce timeline events (Phase 4)
+
+--------------------------------------------------------------------------------
+Phase 7 — Auto-create (gated)
+--------------------------------------------------------------------------------
+
+Purpose:
+  Controlled auto-provisioning of missing master data during import.
+
+Affected systems:
+  Auto-create service; approval workflow integration.
+
+Runtime risks:
+  Duplicate entities, org sprawl, approval chain breakage.
+
+Compatibility risks:
+  Silent ignores today → auto-create changes data shape.
+
+Deployment order:
+  1) Default all auto-create OFF
+  2) Enable per entity type per workspace via hr_master_data_registry
+  3) Require approval for org units + positions in active org mode
+  4) PM2 restart
+
+Rollback:
+  Disable auto-create flags; manual cleanup via audit trail.
+
+--------------------------------------------------------------------------------
+Phase 8 — Gender/nationality as managed lookups
+--------------------------------------------------------------------------------
+
+Purpose:
+  Promote free-text fields to optional lookup tables with backward compat.
+
+Affected systems:
+  New hr_genders, hr_nationalities tables; employees keep text column.
+
+Runtime risks:
+  Low if text remains source of truth during transition.
+
+Compatibility risks:
+  Import allowlists currently hardcoded.
+
+Deployment order:
+  1) Add lookup tables + seed defaults
+  2) Import accepts code OR name OR legacy text
+  3) Dual-write: populate lookup_id when matched, always keep text
+  4) PM2 restart
+
+Rollback:
+  Ignore lookup_id; text column still authoritative.
+
+--------------------------------------------------------------------------------
+Phase 9 — Live cutover & legacy deprecation
+--------------------------------------------------------------------------------
+
+Purpose:
+  Workspace-by-workspace cutover; retire monolithic import.
+
+Affected systems:
+  hr.ts import block; UI default template.
+
+Runtime risks:
+  Medium — stragglers on old template.
+
+Compatibility risks:
+  Saved Excel files with old key row.
+
+Deployment order:
+  1) Cutover checklist per workspace (shadow parity 100%, zero critical diffs)
+  2) Set employeeImportRuntimeMode=active
+  3) Default UI to v2 template; legacy link for 6 months
+  4) Telemetry on legacy endpoint usage via Phase 5 events
+  5) PM2 restart
+
+Rollback:
+  Per-workspace revert to legacy mode.
+
+Final validation:
+  validate-legacy-readiness.cjs extended for import runtime.
+
+================================================================================
+IMPORT/EXPORT RUNTIME ARCHITECTURE
+================================================================================
+
+DESIGN PRINCIPLES
+-----------------
+1. Mirror attendance import — proven pattern in AttendanceImportService
+2. Never break legacy endpoints until workspace cutover
+3. Session-first — every import is auditable and reversible
+4. Server-side parse option — client JSON (legacy) + multipart XLSX (enterprise)
+5. Workspace isolation — all queries scoped; no cross-workspace resolution
+
+COMPONENT MAP
+-------------
+lib/hr-import/
+├── template/
+│   ├── template-registry.ts      # Entity + employee template defs
+│   ├── template-generator.ts     # XLSX with dropdowns + metadata
+│   └── template-metadata.ts      # Machine-readable validation schema
+├── catalog/
+│   ├── master-data-catalog.ts    # Workspace snapshot cache (TTL)
+│   └── canonical-resolver.ts     # code > name > alias resolution
+├── session/
+│   ├── import-session-service.ts # CRUD sessions
+│   └── import-row-store.ts       # Persist raw + normalized rows
+├── validation/
+│   ├── import-validator.ts       # Row-level rules
+│   ├── org-import-validator.ts   # Delegates to employee-org-validation
+│   └── governance-import-validator.ts
+├── mapping/
+│   ├── field-mapper.ts           # Column key → canonical field
+│   ├── reference-resolver.ts     # FK resolution
+│   └── dependency-sorter.ts      # Manager/org parent ordering
+├── auto-create/
+│   ├── auto-create-policy.ts     # Per-entity rules
+│   └── auto-create-executor.ts   # Idempotent create
+├── commit/
+│   ├── employee-committer.ts     # Insert/update with full fields
+│   ├── master-data-committer.ts  # Org/title/etc.
+│   └── transaction-manager.ts    # TX boundaries
+├── rollback/
+│   └── rollback-service.ts       # Restore snapshots
+├── export/
+│   ├── master-data-exporter.ts
+│   └── employee-exporter.ts
+└── routes/
+    └── hr-import-routes.ts       # New router mounted alongside hr.ts
+
+MASTER DATA IMPORT RUNTIME
+--------------------------
+Stage       | Behavior
+------------|--------------------------------------------------
+Upload      | Multipart → documents + import_jobs + artifact storage
+Parse       | Server XLSX parse; validate sheet name + template version
+Normalize   | Trim, NFC unicode, lowercase codes, alias map
+Validate    | Entity-specific rules + referential integrity
+Dry-run     | Full validation, no commit; return diff report
+Commit      | Topological order; transaction per entity type
+Audit       | hr_import_session_entities + workforce_audit_log
+
+Import types: master.org_units, master.job_titles, master.job_grades,
+master.positions, master.employment_types, master.contract_types,
+master.statuses, master.work_locations, master.document_types,
+master.leave_policies, master.probation_policies, master.genders,
+master.nationalities, master.custom_field_defs
+
+MASTER DATA EXPORT RUNTIME
+--------------------------
+- GET /hr/master-data/export?entities=...&format=xlsx|json
+- Includes canonical keys, codes, IDs, active flag, display order
+- Org units export includes parent_code path for re-import
+- Positions export includes title_code, org_code, grade_code, location_code
+
+EMPLOYEE IMPORT RUNTIME
+-----------------------
+Stage       | Legacy (keep)     | Enterprise v2
+------------|-------------------|----------------------------------
+Parse       | Client-side       | Server-side optional
+Preview     | Inline hr.ts      | Session + validator
+Confirm     | Row loop, no TX   | Two-phase + TX
+Master refs | Warn & ignore     | Resolve or auto-create
+Manager     | Order-sensitive   | Topological sort
+Org rules   | Skipped           | Enforced when mode=active
+
+EMPLOYEE EXPORT RUNTIME
+-----------------------
+- GET /hr/employees/export?format=xlsx
+- Columns match active template version
+- Export codes not just IDs (human re-importable)
+- Include custom fields dynamically
+
+IMPORT SESSION RUNTIME
+----------------------
+Reuse/extend import_jobs:
+
+Field                  | Purpose
+-----------------------|--------------------------------------------------
+import_type            | e.g. hr.employee.v2, master.org_units.v1
+status                 | draft → validating → validated → committing →
+                       | committed / failed / rolled_back
+dry_run                | boolean
+template_key           | Registry lookup
+template_version       | Registry lookup
+mapping_json           | Smart column mapping overrides
+revert_token           | Rollback authorization
+
+IMPORT AUDIT RUNTIME
+--------------------
+- Every session → workforce_audit_log entry on commit
+- Auto-created entities tagged source: import_auto_create
+- Phase 5 telemetry event: hr_import_v2_used
+
+IMPORT VALIDATION RUNTIME
+-------------------------
+Layer stack (bottom-up):
+1. Schema layer — Zod/OpenAPI from template metadata
+2. Catalog layer — value exists in workspace catalog OR allowed auto-create
+3. Referential layer — FK targets exist or staged in same session
+4. Org runtime layer — validateEmployeeOrgLinking (mode-aware)
+5. Governance layer — validateWorkforceGovernance for active employees
+6. Business layer — numbering mode, duplicate email/emp#, headcount
+
+Modes: legacy (warn), shadow (log diff), strict (block)
+
+IMPORT ROLLBACK RUNTIME
+-----------------------
+- Pre-commit snapshot: employee row JSON + custom field values + created master IDs
+- Rollback window: configurable (default 72h)
+- POST /hr/import/sessions/:id/rollback with revert_token
+- Soft rollback preferred: deactivate auto-created masters if unused
+
+================================================================================
+DYNAMIC TEMPLATE ARCHITECTURE
+================================================================================
+
+TEMPLATE REGISTRY
+-----------------
+Each template definition includes:
+  key: hr.employee.enterprise.v2
+  version: 2.0.0
+  entityType: employee
+  columns: ImportColumnDef[]
+  referenceSheets: ReferenceSheetDef[]
+  dropdownBindings: DropdownBinding[]
+  validationSchemaRef: openapi://HrEmployeeImportRowV2
+  compatibility: { minApiVersion: "1.28.0" }
+
+RUNTIME-GENERATED EXCEL
+-----------------------
+Sheet          | Content
+---------------|--------------------------------------------------
+Data           | Row 1 AR, Row 2 EN, Row 3 keys, Row 4+ data
+_metadata      | template_key, version, workspace_id, generated_at
+_validation    | JSON column rules (hidden/protected)
+Ref: *         | One sheet per lookup; dropdown source ranges
+
+DYNAMIC DROPDOWN INJECTION
+--------------------------
+- Excel data validation lists pointing to reference sheet ranges
+- Employment types / statuses loaded from DB, not hardcoded
+- Custom field dropdowns from hr_custom_field_defs.options
+- Org units: flat list with code | name for disambiguation
+
+WORKSPACE-AWARE VALUES
+----------------------
+- Template generation requires auth + workspace context
+- Cache templates 5 min per workspace (invalidate on master data change)
+- Include workspace numbering mode in Instructions sheet
+
+VALIDATION METADATA
+-------------------
+- _validation sheet: { key, required, type, enumRef, pattern, fkEntity }
+- Server validates template version on upload — reject stale templates
+- Client can optionally read metadata for pre-validation
+
+CANONICAL KEY STRATEGY
+----------------------
+Entity          | Primary key | Secondary              | Import match order
+----------------|-------------|------------------------|---------------------------
+Org unit        | code        | normalized_name+parent | code → path → name
+Job title       | code        | normalized_name        | code → name
+Job grade       | code        | level + name           | code → name
+Position        | code        | title+org+grade        | code → composite
+Lookups         | code        | name                   | code → name
+Employee        | employee_number | email              | emp# → email
+Gender/nationality| code      | name                   | code → name → free text
+
+Normalization: trim → lowercase → NFKC → collapse whitespace → slug for code
+
+LOCALIZATION STRATEGY
+---------------------
+- Headers: AR row 1, EN row 2 (keep current convention)
+- Reference sheets: code, name_en, name_ar
+- Error messages: locale from Accept-Language or user preference
+- Instructions sheet: bilingual
+
+ENUM SYNCHRONIZATION
+--------------------
+- Single source of truth: database lookup tables
+- Template generator queries catalog at generation time
+- Validator loads same catalog at validation time (shared TTL cache)
+- Foundation seed remains bootstrap only — not validation source
+- draft and custom statuses automatically appear in template when active
+
+================================================================================
+AUTO-CREATE STRATEGY
+================================================================================
+
+POLICY MATRIX
+-------------
+Entity            | Auto-create | Approval | Runtime-sensitive | Notes
+                  | default     | required |
+------------------|-------------|----------|-------------------|------------------
+Job grade         | OFF         | No       | Low               | Safe if code unique
+Job title         | OFF         | No       | Low               | Link grade optional
+Work location     | OFF         | No       | Medium            | Prefer code match
+Employment type   | NEVER       | Yes      | High              | Payroll/approval
+Employee status   | NEVER       | Yes      | High              | Governance
+Contract type     | NEVER       | Yes      | High              | Legal
+Document type     | OFF         | Yes      | Medium            | Compliance
+Leave policy      | NEVER       | Yes      | High              | Accrual math
+Probation policy  | NEVER       | Yes      | High              | HR policy
+Org unit          | OFF         | Yes (active) | Critical          | Tree integrity
+Position          | OFF         | Yes      | Critical          | Headcount
+Gender            | OFF         | No       | Low               | Seed defaults
+Nationality       | OFF         | No       | Low               | ISO list recommended
+Custom field def  | NEVER       | Yes      | High              | Schema change
+
+CANONICAL SLUG GENERATION
+-------------------------
+- Reuse existing toCode() + uniquifyCode() from foundation routes
+- Auto-create always sets code = uniquifyCode(slug(name))
+- Store created_via = 'import_auto_create' and import_session_id
+
+DUPLICATE PREVENTION
+--------------------
+- Upsert on (workspace_id, code) where unique index exists
+- For entities without unique name index: check normalized name + parent scope
+- Collision → hard error in strict mode; approval queue item in gated mode
+
+NORMALIZATION RULES
+-------------------
+- Names: trim, collapse spaces, preserve original display name
+- Codes: ASCII slug, max 64 chars
+- Org parent: must resolve in same session before child
+- Manager: must exist or be created in earlier row pass
+
+================================================================================
+RUNTIME SAFETY RULES
+================================================================================
+
+STARTUP GUARDS (extend init-sequence.ts)
+----------------------------------------
+New step 1f. HR import runtime checks:
+1. Verify 0029+ tables exist → else fail startup
+2. Register component in runtime_schema_registry
+3. Warm template registry (no DB)
+4. Verify MasterDataCatalogService can query each entity table
+5. Non-fatal: log if foundation empty (workspace not seeded)
+
+Pattern: match runLegacyCompatStartupChecks — missing schema = throw at startup,
+not HTTP 500 mid-request.
+
+VALIDATION LAYERS
+-----------------
+Layer              | When           | Failure mode
+-------------------|----------------|----------------------------
+Route schema guard | Request ingress| 400
+Template version   | Upload         | 409 STALE_TEMPLATE
+Catalog resolution | Preview        | Error or warning by mode
+Org/governance     | Pre-commit     | 422 with code
+DB constraints     | Commit         | Catch → row error, not 500
+
+ANTI-DUPLICATE PROTECTIONS
+--------------------------
+- Unique (workspace_id, employee_number) — pre-check in session
+- In-file duplicate detection in preview
+- Idempotent auto-create on (workspace_id, code)
+- Session-level advisory lock per workspace during commit
+
+WORKSPACE ISOLATION
+-------------------
+- Every query includes workspace_id
+- Import session belongs to one workspace; cross-workspace FK rejected
+- Export never leaks other workspace codes in reference sheets
+
+SCHEMA DRIFT PROTECTIONS
+------------------------
+- Extend validate-schema-drift.cjs for 0029+
+- runtime_schema_registry row per component
+- Routes use handleLegacyCompatRouteError pattern → 503 not 500
+
+HTTP 500 PREVENTION
+-------------------
+- Wrap commit loops in try/catch per row
+- Use schema guards before touching new tables
+- Never assume catalog non-empty — return actionable 400
+- Transaction rollback on unexpected errors
+- Log structured errors; return generic message to client
+
+LEGACY COMPATIBILITY SETTINGS
+-----------------------------
+Setting                    | Values              | Behavior
+---------------------------|---------------------|----------------------------------
+employeeImportRuntimeMode  | legacy/shadow/active| Controls which pipeline
+masterDataRuntimeMode      | legacy/shadow/active| Catalog enforcement
+importValidationMode       | warn/shadow/strict  | Validation depth
+orgRuntimeMode             | existing modes      | Already in production
+workforceGovernanceMode    | existing modes      | Enforced on v2 initially
+
+Dual-write period: Keep employees.location text populated from work location
+name when work_location_id set (for legacy reports).
+
+================================================================================
+DATABASE STRATEGY
+================================================================================
+
+ADDITIVE MIGRATIONS ONLY
+------------------------
+- No DROP COLUMN, no DELETE TABLE, no ALTER TYPE breaking changes
+- New columns nullable with defaults
+- New tables use IF NOT EXISTS
+
+SAFE INDEXES
+------------
+Table              | Index                              | Purpose
+-------------------|------------------------------------|-------------
+hr_org_units       | (workspace_id, lower(name))        | Dedup
+hr_job_titles      | (workspace_id, lower(name))        | Dedup
+hr_import_sessions | (workspace_id, status, created_at) | Admin UI
+hr_import_session_rows | (session_id, row_number) unique | Row lookup
+
+UNIQUE CONSTRAINTS
+------------------
+- Prefer (workspace_id, code) — already on most foundation tables
+- Add (workspace_id, normalized_name, parent_id) for org units in Phase 2
+- Document types: add unique on (workspace_id, code) where code not null
+
+RUNTIME REGISTRIES
+------------------
+- runtime_schema_registry — Migration verification (extend)
+- hr_master_data_registry — Entity policies, auto-create flags
+- ImportTemplateRegistry — Code registry (versioned)
+
+AUDIT TABLES
+------------
+- Reuse workforce_audit_log (Phase 4)
+- Reuse legacy_compat_usage_events for pipeline telemetry
+- New hr_import_session_entities for auto-create trace
+
+IMPORT SESSIONS
+---------------
+- FK to import_jobs for unified job monitor UI
+- Status machine enforced in service layer
+- Rows stored as JSONB for flexibility
+
+ROLLBACK TABLES
+---------------
+- hr_import_rollback_snapshots: session_id, entity_type, entity_id, action,
+  before_json, after_json
+- Retention: 90 days; archive to cold storage optional
+
+================================================================================
+LIVE PLATFORM SAFETY
+================================================================================
+
+DEPLOYMENT PLAYBOOK (ZERO-DOWNTIME)
+-----------------------------------
+1. Apply additive migration 0029
+2. Run validate-schema-drift.cjs
+3. Deploy API (flags OFF)
+4. pm2 reload api-server (rolling)
+5. Startup guards verify schema
+6. Deploy UI (legacy default)
+7. Enable shadow mode on test workspace
+8. Parity validation 2 weeks
+9. Per-workspace active cutover
+
+AVOID RUNTIME CRASHES
+---------------------
+- Startup fails fast if migration not applied
+- Feature flags default OFF
+- New routes return 503 if schema missing
+- Load test import sessions in staging with production-size files
+
+AVOID BREAKING EXISTING IMPORTS
+-------------------------------
+- Keep POST /hr/employees/import/preview and /confirm unchanged
+- Keep GET /hr/employees/import-template generating identical layout until cutover
+- v2 uses different URLs: /hr/import/v2/...
+- Old UI continues working without redeploy if API backward compatible
+
+AVOID CORRUPTING ORG RUNTIME
+----------------------------
+- Org import disabled when orgRuntimeMode=active until Phase 5 approval queue live
+- Never auto-create org units in active mode without approval
+- Import validates cycles before commit
+- Run org import in maintenance window first time per tenant
+
+AVOID BREAKING APPROVAL RUNTIME
+-------------------------------
+- Don't change employee status codes without alias map
+- Approval triggers use manager resolution — import must sync users.lineManagerId
+- Test approval workflows in shadow after import v2
+
+AVOID DOWNTIME
+--------------
+- Additive migrations only
+- PM2 reload not restart (rolling)
+- DB migration before API deploy
+- UI deploy independent; feature flags server-side
+- Rollback = flip flag, not revert migration
+
+================================================================================
+ARCHITECTURE BLUEPRINT
+================================================================================
+
+TARGET STATE
+------------
+┌─────────────────────────────────────────────────────────────────┐
+│                     HR Enterprise Runtime                        │
+├─────────────────────────────────────────────────────────────────┤
+│  UI: Import Hub │ Master Data Admin │ Employee Admin             │
+├─────────────────────────────────────────────────────────────────┤
+│  API: /hr/import/* │ /hr/master-data/* │ /hr/foundation/* (keep) │
+├─────────────────────────────────────────────────────────────────┤
+│  Services: Catalog │ Validator │ Mapper │ AutoCreate │ Rollback │
+├─────────────────────────────────────────────────────────────────┤
+│  Existing: Org Runtime │ Approval Runtime │ Workforce Ops        │
+├─────────────────────────────────────────────────────────────────┤
+│  DB: Master Tables │ Import Sessions │ Audit │ Schema Registry  │
+└─────────────────────────────────────────────────────────────────┘
+
+RUNTIME DEPENDENCY MAP
+----------------------
+Template Registry
+    └── Master Data Catalog (DB lookups + org graph)
+            └── Canonical Resolver
+                    └── Import Validator
+                            ├── Org Runtime (validateEmployeeOrgLinking)
+                            ├── Governance Runtime (validateWorkforceGovernance)
+                            └── Auto-Create Policy
+                                    └── Commit Service
+                                            ├── employees
+                                            ├── hr_custom_field_values
+                                            ├── workforce_timeline_events
+                                            └── legacy user sync (when active)
+
+================================================================================
+RISK ASSESSMENT
+================================================================================
+
+Risk                              | Severity | Mitigation
+----------------------------------|----------|----------------------------------
+Partial import corrupts data      | Critical | Transactions + rollback snapshots
+Import bypasses org rules         | Critical | Shadow → strict enforcement
+Manager order in batch            | High     | Topological sort
+position_id / work_location_id    | High     | Fix in v2 only; parity tests
+Duplicate master names            | High     | Canonical codes + unique indexes
+Schema not migrated               | High     | Startup fail-fast + 503 guards
+Old Excel templates break         | Medium   | Version check + legacy endpoint
+Auto-create org sprawl            | High     | Approval gate + default OFF
+Approval workflows break          | High     | Legacy sync + shadow testing
+Performance on large imports      | Medium   | Batch inserts, session chunking
+PM2 reload mid-import             | Low      | Idempotent sessions; client retry
+
+================================================================================
+ROLLBACK STRATEGY (SUMMARY)
+================================================================================
+
+Level              | Action                              | RTO
+-------------------|-------------------------------------|-------------
+L1 Feature flag    | Set employeeImportRuntimeMode=legacy| Immediate
+L2 Session rollback| POST rollback with revert_token     | Minutes
+L3 API deploy      | Previous PM2 artifact               | 5–15 min
+L4 Migration       | Do NOT rollback migrations          | N/A
+L5 Data restore    | DB point-in-time recovery           | Hours
+
+Rule: Never roll back additive migrations on live DB; only disable code paths.
+
+================================================================================
+EXECUTION SEQUENCE (CONDENSED)
+================================================================================
+
+Step | Action                              | Gate
+-----|-------------------------------------|-----------------------------
+1    | Phase 0 baseline telemetry          | Metrics captured
+2    | Migration 0029 (sessions, registry)   | Drift script pass
+3    | API deploy, flags OFF               | Startup guards green
+4    | Master data export                  | Admin verified
+5    | Template v2 + catalog                 | Staging download OK
+6    | Shadow validation                   | 0 critical diffs
+7    | Master data import (dry-run)        | Org cycles = 0
+8    | Employee import v2 shadow           | Parity ≥ 99%
+9    | Pilot workspace active cutover      | 1 week stable
+10   | Auto-create enabled (grades/titles) | Audit clean
+11   | Rollout all workspaces              | Legacy usage < 5%
+12   | Deprecate legacy import             | 90-day notice
+
+================================================================================
+PM2 & OPERATIONS CHECKLIST
+================================================================================
+
+Event           | PM2 action              | Pre-check              | Post-check
+----------------|-------------------------|------------------------|------------------
+Schema migration| None (DB only)          | Backup                 | validate-schema-drift
+API deploy      | pm2 reload api-server   | Health endpoint        | Startup logs 1f pass
+UI deploy       | pm2 reload ops-platform | —                      | Template download
+Flag change     | None                    | —                      | /workforce-health
+Rollback deploy | pm2 reload previous     | —                      | Legacy import smoke
+
+Required scripts (extend existing):
+- migrate-hr-import-runtime.cjs
+- validate-hr-import-schema.cjs
+- validate-import-parity.cjs (shadow vs legacy)
+
+================================================================================
+FINAL RECOMMENDATION
+================================================================================
+
+Build the enterprise runtime ALONGSIDE the live monolithic import using the
+attendance import architecture as the template. Use Phase 5 infrastructure
+(schema registry, telemetry, health routes) for safe rollout. Enforce org and
+governance validation only after shadow parity proves the v2 mapper fixes known
+bugs (position, work location, update parity, manager ordering).
+
+DO NOT cut over any production workspace until Phase 4 shadow validation passes.
+
+================================================================================
+Planning complete. No code, migrations, or files were modified (except this doc).
+Generated: 2026-05-20
+================================================================================

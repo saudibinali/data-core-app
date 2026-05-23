@@ -1,0 +1,299 @@
+================================================================================
+PHASE 0 + PHASE 1 IMPLEMENTATION REPORT
+HR Universal Import/Export Runtime Foundation
+================================================================================
+
+Generated: 2026-05-23
+Status: IMPLEMENTED (additive only, legacy preserved)
+Environment: Local development first, live-platform safe rollout
+
+================================================================================
+1. MODIFIED FILES
+================================================================================
+
+SCHEMA / DATABASE
+-----------------
+- lib/db/drizzle/0029_hr_import_runtime_foundation.sql          (NEW migration)
+- lib/db/drizzle/meta/_journal.json                             (added 0029 entry)
+- lib/db/src/schema/hr-import-runtime.ts                        (NEW Drizzle schema)
+- lib/db/src/schema/hr.ts                                       (feature flag columns)
+- lib/db/src/schema/index.ts                                    (export hr-import-runtime)
+
+API SERVER — CORE
+-----------------
+- artifacts/api-server/src/lib/init-sequence.ts                 (startup step 1f)
+- artifacts/api-server/src/routes/index.ts                        (mount hr-import router)
+- artifacts/api-server/src/routes/hr.ts                           (Phase 0 telemetry + dynamic enums)
+- artifacts/api-server/src/routes/hr-import-runtime.ts            (NEW v2 routes)
+
+API SERVER — HR IMPORT RUNTIME (NEW)
+------------------------------------
+- artifacts/api-server/src/lib/hr-import/index.ts
+- artifacts/api-server/src/lib/hr-import/normalization.ts
+- artifacts/api-server/src/lib/hr-import/runtime-settings.ts
+- artifacts/api-server/src/lib/hr-import/schema-guard.ts
+- artifacts/api-server/src/lib/hr-import/hr-import-startup.ts
+- artifacts/api-server/src/lib/hr-import/catalog/dynamic-enum-loader.ts
+- artifacts/api-server/src/lib/hr-import/catalog/master-data-catalog.ts
+- artifacts/api-server/src/lib/hr-import/session/import-session-service.ts
+- artifacts/api-server/src/lib/hr-import/validation/import-validation-foundation.ts
+- artifacts/api-server/src/lib/hr-import/mapping/mapping-foundation.ts
+- artifacts/api-server/src/lib/hr-import/template/template-registry.ts
+- artifacts/api-server/src/lib/hr-import/export/export-foundation.ts
+- artifacts/api-server/src/lib/hr-import/commit/commit-foundation.ts
+- artifacts/api-server/src/lib/hr-import/rollback/rollback-foundation.ts
+- artifacts/api-server/src/lib/hr-import/telemetry/import-telemetry.ts
+
+STABILIZATION / OBSERVABILITY
+-----------------------------
+- artifacts/api-server/src/lib/workforce/stabilization/runtime-health-service.ts
+- artifacts/api-server/src/lib/workforce/stabilization/observability-metrics.ts
+
+SCRIPTS
+-------
+- scripts/migrate-hr-import-runtime.cjs                         (NEW)
+- scripts/validate-schema-drift.cjs                             (extended for 0029)
+
+================================================================================
+2. ADDED RUNTIME MODULES
+================================================================================
+
+lib/hr-import/
+├── template/          HrImportTemplateRegistry (foundation templates)
+├── catalog/           MasterDataCatalogService + dynamic enum loaders
+├── session/           ImportSessionService (CRUD, dry-run default)
+├── validation/        Shared normalization/validation helpers
+├── mapping/           Catalog lookup resolution (read-only)
+├── commit/            Phase 1 stub (COMMIT_NOT_ENABLED)
+├── rollback/          Snapshot recording stub + rollback disabled
+├── export/            JSON export for master data + employees
+├── telemetry/         Phase 0 import metrics (legacy pipeline)
+└── routes/            hr-import-runtime.ts (parallel API surface)
+
+================================================================================
+3. ADDED MIGRATIONS
+================================================================================
+
+Migration: 0029_hr_import_runtime_foundation.sql
+
+NEW TABLES (IF NOT EXISTS):
+- hr_import_sessions
+- hr_import_session_rows
+- hr_import_session_entities
+- hr_import_rollback_snapshots
+- hr_master_data_registry
+
+NEW COLUMNS on hr_workspace_settings (defaults preserve legacy behavior):
+- employee_import_runtime_mode   DEFAULT 'legacy'
+- master_data_runtime_mode       DEFAULT 'legacy'
+- import_validation_mode         DEFAULT 'warn'
+
+REGISTRY:
+- runtime_schema_registry row: hr_import_runtime → 0029
+
+Apply locally:
+  node scripts/migrate-hr-import-runtime.cjs
+
+Verify:
+  node scripts/validate-schema-drift.cjs
+
+================================================================================
+4. ADDED STARTUP GUARDS
+================================================================================
+
+init-sequence.ts step 1f: runHrImportRuntimeStartupChecks(pool)
+
+Behavior (LIVE-SAFE, NON-FATAL):
+- If schema missing → WARN log, registry status 'missing', v2 routes return 503
+- If schema present  → registry status 'ok', template registry warmed
+- Does NOT block server startup (legacy import continues)
+
+Verified tables/columns:
+- hr_import_sessions, hr_import_session_rows, hr_import_session_entities
+- hr_import_rollback_snapshots, hr_master_data_registry
+- hr_workspace_settings.employee_import_runtime_mode
+
+Schema route guard:
+- handleHrImportRuntimeRouteError → 503 HR_IMPORT_RUNTIME_SCHEMA_UNAVAILABLE
+- Never uncaught schema mismatch → HTTP 500
+
+================================================================================
+5. ADDED TELEMETRY (PHASE 0)
+================================================================================
+
+Service: import-telemetry.ts
+
+Hooks on LEGACY endpoints (no behavior change):
+- GET  /hr/employees/import-template  → phase: template
+- POST /hr/employees/import/preview     → phase: preview
+- POST /hr/employees/import/confirm     → phase: confirm
+
+Metrics captured (one event per request, not per row spam):
+- rowCount, newCount, updateCount, errorCount, warningCount
+- validationErrors, mappingFailures
+- unresolvedLookups (org_unit, job_title, job_grade)
+- managerUnresolved, positionUnresolved, workLocationUnresolved
+- dynamicEnumSource, employmentTypeCount, statusCount
+
+Storage:
+- legacy_compat_usage_events (legacySurface: hr.employee.import.legacy)
+- In-process counters via observability-metrics.ts
+
+Query:
+- GET /hr/import/runtime/metrics
+- GET /hr/legacy-usage (existing, includes new events)
+
+================================================================================
+6. ADDED FEATURE FLAGS
+================================================================================
+
+Workspace settings (all default to safe legacy/warn):
+
+employeeImportRuntimeMode:  legacy | shadow | active  (default: legacy)
+masterDataRuntimeMode:        legacy | shadow | active  (default: legacy)
+importValidationMode:         warn | shadow | strict    (default: warn)
+
+API:
+- GET /hr/import/runtime/settings
+
+Note: Flags are stored and exposed; enforcement cutover is Phase 2+.
+
+================================================================================
+7. NEW API ENDPOINTS (PARALLEL — LEGACY UNTOUCHED)
+================================================================================
+
+GET  /hr/import/runtime/health
+GET  /hr/import/runtime/settings
+GET  /hr/import/runtime/metrics
+GET  /hr/import/catalog
+GET  /hr/import/templates
+POST /hr/import/sessions              (dry-run default true)
+GET  /hr/import/sessions/:id
+GET  /hr/import/export/master-data
+GET  /hr/import/export/employees
+
+LEGACY ENDPOINTS PRESERVED (unchanged contracts):
+- GET  /hr/employees/import-template
+- POST /hr/employees/import/preview
+- POST /hr/employees/import/confirm
+- GET  /hr/employees/export
+
+================================================================================
+8. BACKWARD COMPATIBILITY GUARANTEES
+================================================================================
+
+✓ All existing import API URLs and response shapes unchanged
+✓ Legacy import confirm logic NOT rewritten
+✓ Feature flags default to legacy/warn — zero enforcement change
+✓ Dynamic employment/status enums MERGE with hardcoded fallback (superset only)
+✓ No auto-create enabled (registry seeded with 'off' / 'never')
+✓ No org/approval/workforce governance enforcement added to import
+✓ Commit and rollback disabled in Phase 1 (explicit reason codes)
+✓ Missing migration → legacy works; v2 routes return 503 only
+✓ No deletions, no cleanup, no legacy field removal
+
+================================================================================
+9. REMAINING RISKS
+================================================================================
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Migration not applied before v2 route use | Low | 503 + startup warn |
+| Dynamic enum merge accepts new codes | Low | Backward compatible superset |
+| hr_master_data_registry seed on large workspace count | Low | One-time INSERT ON CONFLICT |
+| position/work_location mapping bugs in legacy | Medium | Telemetry now tracks; fix in Phase 2 |
+| In-process metrics reset on PM2 reload | Low | DB telemetry persists |
+| Pre-existing TS errors in monorepo | Low | Unrelated to this phase |
+
+================================================================================
+10. RECOMMENDED PHASE 2 SCOPE
+================================================================================
+
+1. Dynamic template generator v2 (Excel with dropdowns from catalog)
+2. Shadow validation engine — compare legacy preview vs v2 validator
+3. Wire MasterDataCatalogService into shadow import path
+4. Master data import dry-run with topological ordering
+5. Fix legacy mapping gaps (position_id, work_location_id) in v2 only
+6. Extend validate-import-parity.cjs script
+7. Optional: enable importValidationMode=shadow per pilot workspace
+
+================================================================================
+11. DEPLOYMENT SEQUENCE (LOCAL → LIVE)
+================================================================================
+
+LOCAL DEVELOPMENT:
+1. Set DATABASE_URL
+2. node scripts/migrate-hr-import-runtime.cjs
+3. node scripts/validate-schema-drift.cjs
+4. pnpm --filter @workspace/api-server run dev
+5. Verify GET /hr/import/runtime/health → status ok
+6. Verify legacy import still works (template/preview/confirm)
+7. Verify telemetry in GET /hr/legacy-usage
+
+LIVE PRODUCTION (ZERO-DOWNTIME):
+1. DB backup
+2. Apply 0029 migration (maintenance window optional — additive only)
+3. node scripts/validate-schema-drift.cjs
+4. pm2 reload api-server (rolling)
+5. Confirm startup log: "HR import runtime schema verification passed"
+6. Smoke test legacy import on one workspace
+7. Smoke test GET /hr/import/runtime/health
+8. Monitor legacy_compat_usage_events for import telemetry
+9. Do NOT change feature flags from legacy until Phase 2 parity
+
+================================================================================
+12. PM2 RELOAD REQUIREMENTS
+================================================================================
+
+| Step | Action |
+|------|--------|
+| After migration | pm2 reload api-server |
+| After API deploy only | pm2 reload api-server |
+| UI deploy | Not required for Phase 0+1 (no UI changes) |
+| Flag change | No reload needed (DB-backed settings) |
+
+Startup must show:
+- step 1f HR import runtime check (ok or warn)
+- hr_import_runtime in /health/workforce schema registry
+
+================================================================================
+13. VALIDATION CHECKLIST
+================================================================================
+
+[ ] Migration 0029 applied
+[ ] validate-schema-drift.cjs passes (includes hr_import_sessions)
+[ ] runtime_schema_registry.hr_import_runtime = ok
+[ ] GET /hr/import/runtime/health → 200 (after migration)
+[ ] GET /hr/import/runtime/health → 503 (before migration, legacy still works)
+[ ] GET /hr/employees/import-template downloads XLSX
+[ ] POST /hr/employees/import/preview returns same shape as before
+[ ] POST /hr/employees/import/confirm unchanged behavior
+[ ] GET /hr/import/catalog returns workspace master data snapshot
+[ ] GET /hr/import/export/master-data returns JSON
+[ ] GET /hr/import/export/employees returns JSON rows
+[ ] POST /hr/import/sessions creates dry-run session
+[ ] GET /hr/legacy-usage shows hr.employee.import.legacy events
+[ ] Feature flags default: legacy, legacy, warn
+
+================================================================================
+14. ROLLBACK INSTRUCTIONS
+================================================================================
+
+LEVEL 1 — Disable v2 routes (immediate):
+  No action needed; legacy import never depended on v2.
+
+LEVEL 2 — Revert API deploy:
+  pm2 reload previous api-server artifact
+
+LEVEL 3 — Migration rollback:
+  DO NOT drop tables on live DB.
+  New tables empty = harmless.
+  New columns with defaults = harmless.
+  If required: set all workspaces to employee_import_runtime_mode='legacy'
+
+LEVEL 4 — Code revert:
+  Git revert commit; pm2 reload api-server
+
+================================================================================
+END OF REPORT
+================================================================================

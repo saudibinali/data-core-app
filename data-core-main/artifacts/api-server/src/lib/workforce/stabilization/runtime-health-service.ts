@@ -17,6 +17,7 @@ export const RUNTIME_MIGRATION_TARGETS = {
   approval_runtime: "0026_approval_runtime_foundation",
   workforce_operations: "0027_workforce_operations_foundation",
   legacy_compat: "0028_legacy_compat_stabilization",
+  hr_import_runtime: "0029_hr_import_runtime_foundation",
 } as const;
 
 export async function updateSchemaRegistryStatus(
@@ -67,6 +68,9 @@ export async function getWorkspaceCutoverModes(workspaceId: number) {
     approvalRuntimeMode: row?.approvalRuntimeMode ?? "legacy",
     workforceGovernanceMode: row?.workforceGovernanceMode ?? "legacy",
     workforceCleanupStage: row?.workforceCleanupStage ?? "none",
+    employeeImportRuntimeMode: row?.employeeImportRuntimeMode ?? "legacy",
+    masterDataRuntimeMode: row?.masterDataRuntimeMode ?? "legacy",
+    importValidationMode: row?.importValidationMode ?? "warn",
   };
 }
 

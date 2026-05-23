@@ -1,0 +1,24 @@
+| Area | Status | Notes |
+|------|--------|-------|
+| Modified files | Good | catalog, template v2, validator, shadow runner, routes, hr.ts preview hook, runtime-settings, observability-metrics, index exports |
+| MasterDataCatalogService | Excellent | All entities + custom field dropdowns + byAlias indexes + cache hit/miss stats + getEntitySlice |
+| Template registry v2 | Excellent | hr.employee.enterprise.v2 v2.1.0 + master data bundle + versioning metadata |
+| Dynamic XLSX generator | Good | _metadata, _validation, Instructions, Ref_* sheets, Excel list dropdowns via !dataValidation |
+| Excel dropdowns | Good | employment types, statuses, org, titles, grades, positions, locations, custom field dropdowns |
+| Template versioning | Good | template_key/version in _metadata; stale-template-detector; API stale check |
+| HrImportValidator | Good | Catalog + dynamic enums; no enforcement on legacy path |
+| Shadow validation | Good | Runs when importValidationMode=shadow (strict downgraded to shadow); compare + telemetry only |
+| Validation schema API | Excellent | GET /hr/import/validation/schema + _validation sheet export |
+| Template APIs v2 | Excellent | GET /hr/import/templates/v2, GET /hr/import/templates/v2/:key?format=xlsx\|json |
+| Catalog API v2 | Excellent | GET /hr/import/catalog/:entity |
+| Legacy APIs | Excellent | Unchanged: import-template, import/preview, import/confirm |
+| Legacy templates | Excellent | GET /hr/employees/import-template untouched |
+| Feature flags | Good | strict stored but getEffectiveValidationMode forces shadow; strictEnforcementEnabled=false in APIs |
+| Telemetry | Good | template_download_v2, stale_template, catalog_cache_miss, validation_mismatch, shadow metrics |
+| Startup guards | Excellent | Non-fatal; 503 on v2 routes if schema missing; phase 2 in health |
+| Backward compatibility | Excellent | Legacy import response unchanged; shadow is additive async telemetry |
+| Migrations | Excellent | None required (Phase 2 code-only) |
+| Risks | Weak | SheetJS dropdown support varies by Excel client; shadow warning text differs slightly from legacy |
+| Deployment readiness | Good | pm2 reload after deploy; no migration; enable shadow per workspace to test |
+| PM2 requirements | Good | pm2 reload api-server only |
+| Remaining gaps | Weak | No v2 import confirm; no auto-create; no strict mode; master data XLSX bundle template not fully generated |

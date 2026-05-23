@@ -1301,6 +1301,12 @@ export const hrWorkspaceSettingsTable = pgTable("hr_workspace_settings", {
   workforceCleanupStage: text("workforce_cleanup_stage").notNull().default("none"),
   /** Optional per-surface legacy write policy during cleanup */
   legacyWritePolicy: jsonb("legacy_write_policy"),
+  /** warn | shadow | strict — import validation enforcement depth (Phase 0+1) */
+  importValidationMode: text("import_validation_mode").notNull().default("warn"),
+  /** legacy | shadow | active — employee import pipeline cutover (Phase 0+1) */
+  employeeImportRuntimeMode: text("employee_import_runtime_mode").notNull().default("legacy"),
+  /** legacy | shadow | active — master data catalog/import cutover (Phase 0+1) */
+  masterDataRuntimeMode: text("master_data_runtime_mode").notNull().default("legacy"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 

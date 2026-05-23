@@ -1,0 +1,19 @@
+PHASE 5 — HR IMPORT RUNTIME REPORT
+==================================
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Auto-create runtime | Good | Policy engine for job_title/grade/work_location/document_type; org/status/types blocked |
+| Master data commit | Good | Transactional update commit for 4 types; position/org dry-run only; auto-create disabled by default |
+| Strict validation | Good | warn/shadow/strict modes; strict pilot-gated only; default remains shadow downgrade |
+| Approval runtime | Good | Pending queue, approve+commit flow, workforce audit trail; approval required by default |
+| Reconciliation runtime | Good | Import vs catalog diff, conflict/duplicate reporting; report_only; no auto-merge |
+| Pilot activation | Excellent | hr_import_pilot_workspaces registry; pilot_active mode; explicit enablement required |
+| Policy registry | Excellent | auto_create_mode/approval/canonical/duplicate/reconciliation columns; all default disabled/safe |
+| Telemetry | Good | import.v5.* metrics + legacy_compat + workforce_audit_log on create/approve |
+| Startup guards | Excellent | Phase 5 schema probe non-fatal; auto-create routes 503 if migration 0030 missing |
+| Commit APIs v2 | Excellent | auto-create preview/approve/pending, reconciliation, pilot-workspaces mounted |
+| Compatibility | Excellent | Legacy import/APIs/templates unchanged; additive migration 0030 only |
+| Risks | Weak | Auto-create requires pilot+policy enable; strict still off without pilot registry |
+| PM2 requirements | Good | Apply 0030 migration; rebuild api-server; restart PM2; enable pilot workspace explicitly |
+| Remaining gaps | Weak | No global active cutover; no org auto-create; no destructive reconciliation; policies default off |

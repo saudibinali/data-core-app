@@ -25,6 +25,9 @@ import { runOrgRuntimeStartupChecks } from "./workforce/org/org-runtime-startup"
 import { runApprovalRuntimeStartupChecks } from "./approval/approval-startup";
 import { runWorkforceOpsStartupChecks } from "./workforce/operations/workforce-ops-startup";
 import { runLegacyCompatStartupChecks } from "./workforce/stabilization/legacy-compat-startup";
+import { runHrImportRuntimeStartupChecks } from "./hr-import/hr-import-startup";
+import { runHrImportAutoCreateStartupChecks } from "./hr-import/health/auto-create-startup";
+import { runPlatformRuntimeStartupChecks } from "./hr-import/health/platform-runtime-startup";
 import { pool } from "@workspace/db";
 
 export async function runInitSequence(): Promise<void> {
@@ -66,6 +69,27 @@ export async function runInitSequence(): Promise<void> {
   } catch (err) {
     logger.error({ err }, "Legacy compat startup checks failed");
     throw err;
+  }
+
+  // 1f. HR universal import/export runtime foundation (Phase 0+1, non-fatal if schema pending)
+  try {
+    await runHrImportRuntimeStartupChecks(pool);
+  } catch (err) {
+    logger.warn({ err }, "HR import runtime startup checks failed (non-fatal)");
+  }
+
+  // 1g. HR import auto-create Phase 5 (non-fatal if schema pending)
+  try {
+    await runHrImportAutoCreateStartupChecks(pool);
+  } catch (err) {
+    logger.warn({ err }, "HR import auto-create startup checks failed (non-fatal)");
+  }
+
+  // 1h. Platform import/export final phase (non-fatal if schema pending)
+  try {
+    await runPlatformRuntimeStartupChecks(pool);
+  } catch (err) {
+    logger.warn({ err }, "Platform runtime final phase startup checks failed (non-fatal)");
   }
 
   // 2. Start workflow engine (includes P6-A delay scheduler)

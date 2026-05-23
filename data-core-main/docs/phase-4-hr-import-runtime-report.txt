@@ -1,0 +1,21 @@
+PHASE 4 — HR IMPORT RUNTIME REPORT
+==================================
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Transactional runtime | Excellent | Savepoints, row isolation, transaction batch; failure per-row rollback |
+| Commit runtime | Good | controlled_commit gated live writes; shadow mode simulation-only; active never auto-enables |
+| Rollback runtime | Good | Pre-image restore for updates; insert revert via terminated status; no hard deletes |
+| Entity persistence | Good | Employee insert/update with position_id + work_location_id + legacy text fields |
+| Master data persistence | Weak | Update audit-only; auto-create disabled by design |
+| Hierarchy commit | Good | Manager topo-order, self-manager block, cycle/unresolved diagnostics |
+| Shadow parity | Good | Legacy vs v2 commit diff, validation parity, field/dependency/mapping diagnostics |
+| Workforce sync | Good | Timeline events + legacy user/line-manager sync; async-safe additive hooks |
+| Telemetry | Good | import.v4.* commit/rollback/sync/savepoint metrics + legacy_compat events |
+| Commit APIs v2 | Excellent | POST commit/rollback, GET parity/:sessionId, GET commit-health; legacy untouched |
+| Feature flags | Excellent | controlled_commit opt-in only; legacy default; active does not auto-commit |
+| Startup guards | Excellent | Schema 503 unchanged; commit disabled unless controlled_commit |
+| Compatibility | Excellent | Legacy import/preview/confirm unchanged; additive only |
+| Risks | Weak | Manager pass outside main txn; large batch memory; master data commit deferred |
+| PM2 requirements | Good | Rebuild api-server; restart PM2; set employeeImportRuntimeMode=controlled_commit for pilot only |
+| Remaining gaps | Weak | No auto-create; no strict enforcement; no active cutover; master data field writes deferred |

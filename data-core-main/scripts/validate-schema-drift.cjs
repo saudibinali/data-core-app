@@ -13,6 +13,7 @@ const EXPECTED = [
   { component: "approval_runtime", table: "approval_instances", migration: "0026" },
   { component: "workforce_operations", table: "employee_movements", migration: "0027" },
   { component: "legacy_compat", table: "legacy_compat_usage_events", migration: "0028" },
+  { component: "hr_import_runtime", table: "hr_import_sessions", migration: "0029" },
 ];
 
 async function main() {

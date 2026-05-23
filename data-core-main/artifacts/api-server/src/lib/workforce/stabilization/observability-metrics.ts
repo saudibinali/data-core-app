@@ -10,6 +10,18 @@ const counters: Record<string, number> = {
   "employee_file.aggregate": 0,
   "timeline.query": 0,
   "startup.diagnostics": 0,
+  "import.template": 0,
+  "import.preview": 0,
+  "import.confirm": 0,
+  "import.validation_errors": 0,
+  "import.warnings": 0,
+  "import.manager_unresolved": 0,
+  "import.position_unresolved": 0,
+  "import.work_location_unresolved": 0,
+  "import.mapping_failures": 0,
+  "import.catalog_cache_miss": 0,
+  "import.validation_mismatch": 0,
+  "import.stale_template": 0,
 };
 
 export function incrementRuntimeMetric(key: string, by = 1): void {
