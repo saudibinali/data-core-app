@@ -98,6 +98,9 @@ import { loadDynamicEmploymentTypes, loadDynamicEmployeeStatuses } from "../lib/
 import { getImportRuntimeSettings } from "../lib/hr-import/runtime-settings";
 import { recordImportTelemetry, countUnresolvedFromWarnings } from "../lib/hr-import/telemetry/import-telemetry";
 import { runShadowValidationPipeline } from "../lib/hr-import/validation/shadow-validation-runner";
+import { buildEnterpriseImportPreview } from "../lib/hr-import/activation/enterprise-preview-orchestrator";
+import { applyEnterpriseConfirmResolution } from "../lib/hr-import/activation/enterprise-confirm-bridge";
+import { getEnterpriseRuntimeStatus } from "../lib/hr-import/activation/enterprise-runtime-activation";
 
 const router: IRouter = Router();
 
@@ -794,14 +797,22 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     });
   }
 
+  const enterprisePreview = await buildEnterpriseImportPreview({
+    workspaceId,
+    previewRows,
+    rawRows,
+  });
+  const finalPreviewRows = enterprisePreview.rows;
+  const enterpriseStatus = await getEnterpriseRuntimeStatus(workspaceId);
+
   const summary = {
-    total: previewRows.length,
-    new: previewRows.filter((r) => r.status === "new").length,
-    update: previewRows.filter((r) => r.status === "update").length,
-    errors: previewRows.filter((r) => r.status === "error").length,
+    total: finalPreviewRows.length,
+    new: finalPreviewRows.filter((r) => r.status === "new").length,
+    update: finalPreviewRows.filter((r) => r.status === "update").length,
+    errors: finalPreviewRows.filter((r) => r.status === "error").length,
   };
 
-  const allWarnings = previewRows.flatMap((r) => r.warnings);
+  const allWarnings = finalPreviewRows.flatMap((r) => r.warnings);
   const unresolvedMetrics = countUnresolvedFromWarnings(allWarnings);
 
   const shadowResult = await runShadowValidationPipeline({
@@ -809,7 +820,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     numberingMode,
     runtimeSettings: importRuntimeSettings,
     rawRows,
-    legacyPreviewRows: previewRows.map((r) => ({
+    legacyPreviewRows: finalPreviewRows.map((r) => ({
       rowIndex: r.rowIndex,
       errors: r.errors,
       warnings: r.warnings,
@@ -824,7 +835,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     sourcePath: "POST /hr/employees/import/preview",
     runtimeSettings: importRuntimeSettings,
     metrics: {
-      rowCount: previewRows.length,
+      rowCount: finalPreviewRows.length,
       newCount: summary.new,
       updateCount: summary.update,
       errorCount: summary.errors,
@@ -840,7 +851,12 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     },
   });
 
-  res.json({ rows: previewRows, summary });
+  res.json({
+    rows: finalPreviewRows,
+    summary,
+    enterprise: enterprisePreview.enterprise,
+    enterpriseRuntime: enterpriseStatus,
+  });
 });
 
 // ── POST /hr/employees/import/confirm ─────────────────────────────────────────
@@ -863,10 +879,20 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
   const numberingMode = settings[0]?.numberingMode ?? "auto";
   const empByNum = new Map(allEmps.map((e) => [String(e.employeeNumber ?? "").toLowerCase(), e.id]));
 
+  const approveEntityCreates = req.body.approveEntityCreates === true;
+
+  const enterpriseResolution = await applyEnterpriseConfirmResolution({
+    workspaceId,
+    rows,
+    approveEntityCreates,
+    userId: req.userId,
+  });
+  const commitRows = enterpriseResolution.rows;
+
   let imported = 0; let updated = 0;
   const errors: string[] = [];
 
-  for (const row of rows) {
+  for (const row of commitRows) {
     if (row.status === "skip") continue;
     try {
       const d = row.data as Record<string, unknown>;
@@ -967,15 +993,29 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
     sourcePath: "POST /hr/employees/import/confirm",
     runtimeSettings: importRuntimeSettings,
     metrics: {
-      rowCount: rows.length,
+      rowCount: commitRows.length,
       imported,
       updated,
       confirmErrors: errors.length,
       errorCount: errors.length,
+      enterpriseEntitiesCreated: enterpriseResolution.created,
+      enterpriseEntitiesQueued: enterpriseResolution.queued,
+      enterpriseEntitiesSkipped: enterpriseResolution.skipped,
+      enterpriseActive: enterpriseResolution.enterpriseActive,
     },
   });
 
-  res.json({ imported, updated, errors });
+  res.json({
+    imported,
+    updated,
+    errors,
+    enterprise: {
+      active: enterpriseResolution.enterpriseActive,
+      entitiesCreated: enterpriseResolution.created,
+      entitiesQueued: enterpriseResolution.queued,
+      entitiesSkipped: enterpriseResolution.skipped,
+    },
+  });
 });
 
 // ── GET /hr/employees/export ───────────────────────────────────────────────────

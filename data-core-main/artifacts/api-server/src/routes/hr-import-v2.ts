@@ -37,6 +37,12 @@ import { masterDataCatalogService } from "../lib/hr-import/catalog/master-data-c
 import { validateMasterDataImportDryRun } from "../lib/hr-import/execution/master-data-import-runtime";
 import { listPilotWorkspaces, getPilotRolloutDiagnostics } from "../lib/hr-import/pilot/pilot-workspace-service";
 import { getAutoCreateStartupHealth } from "../lib/hr-import/health/auto-create-startup";
+import {
+  activateEnterpriseImportRuntime,
+  deactivateEnterpriseImportRuntime,
+  getEnterpriseRuntimeStatus,
+} from "../lib/hr-import/activation/enterprise-runtime-activation";
+import { getEnterpriseMasterDataCapabilities } from "../lib/hr-import/activation/enterprise-confirm-bridge";
 
 const router: IRouter = Router();
 
@@ -356,6 +362,72 @@ router.get("/hr/import/v2/pilot-workspaces", requireAuth, requirePermission("hr.
   } catch (e) {
     if (handleHrImportRuntimeRouteError(res, e, { route: "GET /hr/import/v2/pilot-workspaces" })) return;
     throw e;
+  }
+});
+
+// POST /hr/import/v2/enterprise/activate
+router.post("/hr/import/v2/enterprise/activate", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!req.workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+  if (!requireSchema(req, res)) return;
+  try {
+    const result = await activateEnterpriseImportRuntime({
+      workspaceId: req.workspaceId,
+      userId: req.userId,
+      targetMode: req.body.targetMode === "pilot_active" ? "pilot_active" : "controlled_commit",
+      explicitConfirmation: req.body.explicitConfirmation === true,
+    });
+    if (!result.ok) {
+      res.status(403).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (e) {
+    if (handleHrImportRuntimeRouteError(res, e, { route: "POST /hr/import/v2/enterprise/activate" })) return;
+    res.status(400).json({ error: e instanceof Error ? e.message : "Activate failed" });
+  }
+});
+
+// POST /hr/import/v2/enterprise/deactivate
+router.post("/hr/import/v2/enterprise/deactivate", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!req.workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+  if (!requireSchema(req, res)) return;
+  try {
+    const result = await deactivateEnterpriseImportRuntime({
+      workspaceId: req.workspaceId,
+      userId: req.userId,
+      explicitConfirmation: req.body.explicitConfirmation === true,
+      targetMode: req.body.targetMode === "legacy" ? "legacy" : "shadow",
+    });
+    if (!result.ok) {
+      res.status(403).json(result);
+      return;
+    }
+    res.json({ ...result, status: await getEnterpriseRuntimeStatus(req.workspaceId) });
+  } catch (e) {
+    if (handleHrImportRuntimeRouteError(res, e, { route: "POST /hr/import/v2/enterprise/deactivate" })) return;
+    res.status(400).json({ error: e instanceof Error ? e.message : "Deactivate failed" });
+  }
+});
+
+// GET /hr/import/v2/enterprise/status
+router.get("/hr/import/v2/enterprise/status", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  if (!req.workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+  try {
+    res.json(await getEnterpriseRuntimeStatus(req.workspaceId));
+  } catch (e) {
+    if (handleHrImportRuntimeRouteError(res, e, { route: "GET /hr/import/v2/enterprise/status" })) return;
+    res.status(400).json({ error: e instanceof Error ? e.message : "Status failed" });
+  }
+});
+
+// GET /hr/import/v2/enterprise/master-data
+router.get("/hr/import/v2/enterprise/master-data", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!req.workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+  try {
+    res.json(await getEnterpriseMasterDataCapabilities(req.workspaceId));
+  } catch (e) {
+    if (handleHrImportRuntimeRouteError(res, e, { route: "GET /hr/import/v2/enterprise/master-data" })) return;
+    res.status(400).json({ error: e instanceof Error ? e.message : "Master data status failed" });
   }
 });
 

@@ -66,3 +66,8 @@ export * from "./platform/rollback-orchestration";
 export * from "./platform/runtime-health-dashboard";
 export * from "./platform/universal-expansion";
 export * from "./telemetry/platform-runtime-telemetry";
+export * from "./activation/enterprise-runtime-activation";
+export * from "./activation/reconciliation-activator";
+export * from "./activation/enterprise-entity-resolver";
+export * from "./activation/enterprise-preview-orchestrator";
+export * from "./activation/enterprise-confirm-bridge";

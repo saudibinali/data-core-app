@@ -1,0 +1,62 @@
+PHASE 6 — ENTERPRISE ACTIVE IMPORT RUNTIME ACTIVATION
+Controlled Production Activation — NO REBUILD
+Generated: 2026-05-20
+
+| Area                   | Status  |
+| ---------------------- | ------- |
+| Runtime Activation     | Good    |
+| Auto-Create Runtime    | Good    |
+| Reconciliation         | Good    |
+| Live Safety            | Excellent |
+| Backward Compatibility | Excellent |
+| Risks                  | Low     |
+
+MODIFIED FILES
+- artifacts/api-server/src/lib/hr-import/activation/enterprise-runtime-activation.ts
+- artifacts/api-server/src/lib/hr-import/activation/reconciliation-activator.ts
+- artifacts/api-server/src/lib/hr-import/activation/enterprise-entity-resolver.ts
+- artifacts/api-server/src/lib/hr-import/activation/enterprise-preview-orchestrator.ts
+- artifacts/api-server/src/lib/hr-import/activation/enterprise-confirm-bridge.ts
+- artifacts/api-server/src/lib/hr-import/index.ts
+- artifacts/api-server/src/routes/hr.ts (legacy preview/confirm hooks only)
+- artifacts/api-server/src/routes/hr-import-v2.ts (enterprise activation routes)
+
+ACTIVATED RUNTIME PATHS
+- isEnterpriseImportRuntimeActive() → controlled_commit | pilot_active | active + rollout.metadata.enterprisePoliciesActivated
+- POST /hr/import/v2/enterprise/activate|deactivate|status
+- GET  /hr/import/v2/enterprise/master-data (bulk import/export capability gate)
+- POST /hr/employees/import/preview → buildEnterpriseImportPreview (matched / proposeCreate / conflicts / ambiguous / blocked / approvalRequired)
+- POST /hr/employees/import/confirm → applyEnterpriseConfirmResolution (reconcile + auto-create with approveEntityCreates)
+- reconcileEntityLookup() on catalog indexes (canonical / normalized / alias / near)
+- resolveOrCreateEntity() per-entity policy (workspace-scoped inserts + audit)
+
+MIGRATIONS ADDED
+- None (uses 0029/0030/0031 tables: hr_master_data_registry, hr_import_workspace_rollout, hr_workspace_settings)
+
+FEATURE FLAGS / CONTROLS AFFECTED
+- hr_workspace_settings.employeeImportRuntimeMode / masterDataRuntimeMode
+- hr_import_workspace_rollout.metadata.enterprisePoliciesActivated
+- hr_master_data_registry autoCreateMode / approvalRequired / reconciliationMode (per workspace on activate/deactivate)
+- Pilot workspace gate required for activation (isPilotWorkspaceEnabled)
+- explicitConfirmation: true required on activate/deactivate
+- approveEntityCreates: true on legacy confirm for approval-required entities (org_unit, position, employment_type, employee_status)
+
+ROLLOUT RECOMMENDATIONS
+1. Enable pilot workspace for target tenant only.
+2. POST /hr/import/v2/enterprise/activate { explicitConfirmation: true, targetMode: "controlled_commit" }
+3. Verify GET /hr/import/v2/enterprise/status → enterpriseActive: true
+4. Run legacy employee import preview; confirm enterprise buckets replace "will be ignored" warnings.
+5. Confirm with approveEntityCreates: true where approval-required entities exist.
+6. Expand to pilot_active after parity/shadow checks pass.
+7. Use GET /hr/import/v2/enterprise/master-data + existing v2 upload/commit for foundation bulk import.
+
+ROLLBACK INSTRUCTIONS
+1. POST /hr/import/v2/enterprise/deactivate { explicitConfirmation: true, targetMode: "shadow" }
+2. Verify enterpriseActive: false and policies reset to disabled/report_only.
+3. Legacy import reverts to warn-and-ignore behavior automatically (no code deploy rollback required beyond revert commit).
+
+BUILD
+- pnpm run build (api-server) — PASS
+
+NOT TOUCHED
+- nginx, PM2, ports, import engine architecture, validator rewrite, session engine rewrite
