@@ -4,14 +4,16 @@
  * Exit 0 = pass, 1 = issues found.
  */
 const { Pool } = require("pg");
+const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const WORKSPACE_ID = process.env.WORKSPACE_ID ? Number(process.env.WORKSPACE_ID) : null;
-
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL is required");
+let DATABASE_URL;
+try {
+  DATABASE_URL = resolveDatabaseUrl();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
   process.exit(1);
 }
+const WORKSPACE_ID = process.env.WORKSPACE_ID ? Number(process.env.WORKSPACE_ID) : null;
 
 const pool = new Pool({ connectionString: DATABASE_URL });
 

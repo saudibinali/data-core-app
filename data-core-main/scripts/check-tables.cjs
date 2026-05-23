@@ -1,6 +1,8 @@
 const pg = require("pg");
+const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+
 const p = new pg.Pool({
-  connectionString: "postgresql://opsuser:changeme@localhost:5432/opsplatform",
+  connectionString: resolveDatabaseUrl(),
 });
 p.query(
   `SELECT table_name FROM information_schema.tables

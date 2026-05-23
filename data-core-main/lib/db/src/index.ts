@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./schema";
+import { tryResolveDatabaseUrl } from "./resolve-database-url";
 
 const { Pool } = pg;
 
@@ -70,11 +71,15 @@ export const db = new Proxy({} as DrizzleDb, {
   },
 });
 
-// ── Boot-time initialization ─────────────────────────────────────────────────
+// ── Boot-time initialization (unified resolver) ─────────────────────────────
 
-if (process.env["DATABASE_URL"]) {
-  initializeDatabase(process.env["DATABASE_URL"]);
+const _bootResolved = tryResolveDatabaseUrl();
+if (_bootResolved) {
+  initializeDatabase(_bootResolved.url);
 }
+
+export { resolveDatabaseUrl, tryResolveDatabaseUrl, readPlatformConfigDatabaseUrl, getPlatformConfigPath } from "./resolve-database-url";
+export type { DatabaseUrlSource, ResolvedDatabaseUrl } from "./resolve-database-url";
 
 // ── Connection test helper ────────────────────────────────────────────────────
 

@@ -10,12 +10,15 @@
 
 const { Pool } = require("pg");
 
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL is required");
+const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+
+let DATABASE_URL;
+try {
+  DATABASE_URL = resolveDatabaseUrl();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
   process.exit(1);
 }
-
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 function mapStatus(p13Status) {

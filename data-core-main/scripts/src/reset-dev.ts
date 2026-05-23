@@ -102,9 +102,12 @@ const DEFAULT_EMAIL            = process.env.DEFAULT_ADMIN_EMAIL ?? "admin@platf
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error("❌  DATABASE_URL is not set.");
+  let databaseUrl: string;
+  try {
+    const { resolveDatabaseUrl } = await import("@workspace/db");
+    databaseUrl = resolveDatabaseUrl();
+  } catch (e) {
+    console.error(`❌  ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
 

@@ -2,11 +2,15 @@
 const { Pool } = require("pg");
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error("DATABASE_URL required");
-    process.exit(1);
-  }
+  const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+
+let DATABASE_URL;
+try {
+  DATABASE_URL = resolveDatabaseUrl();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(1);
+}
   const pool = new Pool({ connectionString: url });
   try {
     const mig = await pool.query(

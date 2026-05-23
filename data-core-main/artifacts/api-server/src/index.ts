@@ -1,7 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { isDatabaseConfigured, initializeDatabase } from "@workspace/db";
-import { loadPlatformConfig } from "./lib/platform-config";
+import { isDatabaseConfigured } from "@workspace/db";
 import { runInitSequence } from "./lib/init-sequence";
 
 // PORT - defaults to 8080 so the server starts without manual env setup.
@@ -11,16 +10,8 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${process.env["PORT"]}"`);
 }
 
-// ── Pre-start: load persisted config if DATABASE_URL not in environment ───────
-// This allows the DB URL to be configured once via the setup wizard and then
-// restored automatically on every subsequent restart.
-if (!isDatabaseConfigured()) {
-  const config = loadPlatformConfig();
-  if (config.databaseUrl) {
-    logger.info("Restoring database connection from saved platform config");
-    initializeDatabase(config.databaseUrl);
-  }
-}
+// Database connection is initialized by @workspace/db unified resolver at import time
+// (process.env.DATABASE_URL → data/.platform.json). Setup wizard still persists via platform-config.
 
 // ── Start HTTP server ─────────────────────────────────────────────────────────
 app.listen(port, async (err) => {

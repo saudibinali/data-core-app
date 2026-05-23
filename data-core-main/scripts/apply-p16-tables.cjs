@@ -133,11 +133,12 @@ CREATE INDEX IF NOT EXISTS workspace_access_enforcement_workspace_id_idx
   ON workspace_access_enforcement (workspace_id);
 `;
 
+const pg = require("pg");
+const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+
 async function main() {
   const p = new pg.Pool({
-    connectionString:
-      process.env.DATABASE_URL ||
-      "postgresql://opsuser:changeme@localhost:5432/opsplatform",
+    connectionString: resolveDatabaseUrl(),
   });
   await p.query(sql);
   const r = await p.query(

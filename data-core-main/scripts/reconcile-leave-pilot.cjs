@@ -4,13 +4,20 @@
  * Usage: DATABASE_URL=... WORKSPACE_ID=123 node scripts/reconcile-leave-pilot.cjs
  */
 const { Pool } = require("pg");
+const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
 
 const WORKSPACE_ID = Number(process.env.WORKSPACE_ID);
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url || !Number.isInteger(WORKSPACE_ID)) {
-    console.error("DATABASE_URL and WORKSPACE_ID required");
+  let url;
+  try {
+    url = resolveDatabaseUrl();
+  } catch (e) {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
+  if (!Number.isInteger(WORKSPACE_ID)) {
+    console.error("WORKSPACE_ID required");
     process.exit(1);
   }
   const pool = new Pool({ connectionString: url });

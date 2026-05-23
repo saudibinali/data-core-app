@@ -39,11 +39,15 @@ function businessDaysSimple(start, end) {
 }
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error("DATABASE_URL required");
-    process.exit(1);
-  }
+  const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+
+let DATABASE_URL;
+try {
+  DATABASE_URL = resolveDatabaseUrl();
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  process.exit(1);
+}
   if (!Number.isInteger(WORKSPACE_ID) || WORKSPACE_ID < 1) {
     console.error("WORKSPACE_ID required (positive integer)");
     process.exit(1);

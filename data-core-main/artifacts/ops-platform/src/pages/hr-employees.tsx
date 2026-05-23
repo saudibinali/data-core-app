@@ -231,7 +231,15 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
         setSelectedRows(new Set(allValid));
         setStep("preview");
       },
-      onError: () => toast({ title: isAr ? "فشل تحليل الملف" : "Failed to parse file", variant: "destructive" }),
+      onError: (err: unknown) => {
+        const raw = err instanceof Error ? err.message : String(err);
+        const detail = raw.replace(/^HTTP \d+[^:]*:\s*/i, "").trim() || raw;
+        toast({
+          title: isAr ? "فشل تحليل الملف" : "Failed to parse file",
+          description: detail,
+          variant: "destructive",
+        });
+      },
     },
   });
 
@@ -246,25 +254,38 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
     },
   });
 
+  function cellToImportString(val: unknown): string {
+    if (val == null || val === "") return "";
+    if (typeof val === "number" && val > 20000 && val < 80000) {
+      const parsed = (XLSX.SSF as { parse_date_code?: (n: number) => { y: number; m: number; d: number } | null }).parse_date_code?.(val);
+      if (parsed?.y && parsed.m && parsed.d) {
+        return `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+      }
+    }
+    return String(val).trim();
+  }
+
   function parseAndPreview(file: File) {
     const reader = new FileReader();
     reader.onload = (e) => {
+      try {
       const data = new Uint8Array(e.target!.result as ArrayBuffer);
-      const wb = XLSX.read(data, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]!]!;
-      const rawAll = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 });
+      const wb = XLSX.read(data, { type: "array", cellDates: true });
+      const sheetName = wb.SheetNames.find((n) => n === "Employee Template") ?? wb.SheetNames[0]!;
+      const ws = wb.Sheets[sheetName]!;
+      const rawAll = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, raw: false, dateNF: "yyyy-mm-dd" });
       if (rawAll.length < 4) {
         toast({ title: isAr ? "الملف فارغ أو غير صحيح" : "File is empty or invalid", variant: "destructive" });
         return;
       }
       // Row index: 0=AR headers, 1=EN headers, 2=keys, 3+=data
       const keyRow = rawAll[2] as string[];
-      const dataRows = rawAll.slice(3) as string[][];
+      const dataRows = rawAll.slice(3) as unknown[][];
       const rows: Record<string, string>[] = dataRows
-        .filter((r) => r.some((c) => c != null && String(c).trim() !== ""))
+        .filter((r) => r.some((c) => c != null && cellToImportString(c) !== ""))
         .map((r) => {
           const obj: Record<string, string> = {};
-          keyRow.forEach((k, i) => { if (k) obj[String(k)] = String(r[i] ?? ""); });
+          keyRow.forEach((k, i) => { if (k) obj[String(k)] = cellToImportString(r[i]); });
           return obj;
         });
       if (rows.length === 0) {
@@ -272,6 +293,13 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
         return;
       }
       previewMut.mutate({ data: { rows } } as any);
+      } catch {
+        toast({
+          title: isAr ? "تعذّر قراءة ملف Excel" : "Could not read Excel file",
+          description: isAr ? "استخدم القالب الرسمي من زر «تحميل القالب»" : "Use the official template from Download Template",
+          variant: "destructive",
+        });
+      }
     };
     reader.readAsArrayBuffer(file);
   }

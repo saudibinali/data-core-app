@@ -8,7 +8,7 @@
 import bcrypt from "bcryptjs";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import { usersTable } from "@workspace/db";
+import { usersTable, resolveDatabaseUrl } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -41,9 +41,11 @@ async function ask(rl: readline.Interface, question: string, hidden = false): Pr
 }
 
 async function main() {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error("❌  DATABASE_URL environment variable is not set.");
+  let databaseUrl: string;
+  try {
+    databaseUrl = resolveDatabaseUrl();
+  } catch (e) {
+    console.error(`❌  ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
 

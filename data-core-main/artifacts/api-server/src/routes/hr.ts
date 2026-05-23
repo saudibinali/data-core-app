@@ -101,6 +101,8 @@ import { runShadowValidationPipeline } from "../lib/hr-import/validation/shadow-
 import { buildEnterpriseImportPreview } from "../lib/hr-import/activation/enterprise-preview-orchestrator";
 import { applyEnterpriseConfirmResolution } from "../lib/hr-import/activation/enterprise-confirm-bridge";
 import { getEnterpriseRuntimeStatus } from "../lib/hr-import/activation/enterprise-runtime-activation";
+import { isSchemaMismatchError } from "../lib/commercial-route-utils";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -625,6 +627,8 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   const workspaceId = req.workspaceId;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
+  try {
+
   const rawRows: Record<string, string>[] = Array.isArray(req.body.rows) ? req.body.rows : [];
 
   // Load reference lookups in parallel (dynamic enums merged with legacy fallback)
@@ -797,13 +801,29 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     });
   }
 
-  const enterprisePreview = await buildEnterpriseImportPreview({
-    workspaceId,
-    previewRows,
-    rawRows,
-  });
-  const finalPreviewRows = enterprisePreview.rows;
-  const enterpriseStatus = await getEnterpriseRuntimeStatus(workspaceId);
+  let finalPreviewRows = previewRows;
+  let enterprisePreview: Awaited<ReturnType<typeof buildEnterpriseImportPreview>> = {
+    rows: previewRows,
+    enterprise: null,
+    enterpriseActive: false,
+  };
+  let enterpriseStatus: Awaited<ReturnType<typeof getEnterpriseRuntimeStatus>> | null = null;
+
+  try {
+    enterprisePreview = await buildEnterpriseImportPreview({
+      workspaceId,
+      previewRows,
+      rawRows,
+    });
+    finalPreviewRows = enterprisePreview.rows;
+    enterpriseStatus = await getEnterpriseRuntimeStatus(workspaceId);
+  } catch (e) {
+    if (isSchemaMismatchError(e)) {
+      logger.warn({ workspaceId, err: e }, "Enterprise preview hook skipped — import runtime schema incomplete");
+    } else {
+      throw e;
+    }
+  }
 
   const summary = {
     total: finalPreviewRows.length,
@@ -857,6 +877,22 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     enterprise: enterprisePreview.enterprise,
     enterpriseRuntime: enterpriseStatus,
   });
+  } catch (e) {
+    if (isSchemaMismatchError(e)) {
+      logger.warn({ workspaceId, err: e }, "Employee import preview blocked by schema");
+      res.status(503).json({
+        error: "HR_IMPORT_RUNTIME_SCHEMA_UNAVAILABLE",
+        message: e instanceof Error ? e.message : "Import runtime schema is not available on this server.",
+        migrationHint: "Run: node scripts/migrate-hr-import-runtime.cjs && node scripts/migrate-hr-import-auto-create-phase5.cjs && node scripts/migrate-platform-runtime-final-phase.cjs",
+      });
+      return;
+    }
+    logger.error({ workspaceId, err: e }, "Employee import preview failed");
+    res.status(500).json({
+      error: "IMPORT_PREVIEW_FAILED",
+      message: e instanceof Error ? e.message : "Import preview failed",
+    });
+  }
 });
 
 // ── POST /hr/employees/import/confirm ─────────────────────────────────────────
@@ -881,12 +917,28 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
 
   const approveEntityCreates = req.body.approveEntityCreates === true;
 
-  const enterpriseResolution = await applyEnterpriseConfirmResolution({
-    workspaceId,
+  let enterpriseResolution: Awaited<ReturnType<typeof applyEnterpriseConfirmResolution>> = {
     rows,
-    approveEntityCreates,
-    userId: req.userId,
-  });
+    created: 0,
+    queued: 0,
+    skipped: 0,
+    enterpriseActive: false,
+  };
+  try {
+    enterpriseResolution = await applyEnterpriseConfirmResolution({
+      workspaceId,
+      rows,
+      approveEntityCreates,
+      userId: req.userId,
+    });
+  } catch (e) {
+    if (isSchemaMismatchError(e)) {
+      logger.warn({ workspaceId, err: e }, "Enterprise confirm hook skipped — import runtime schema incomplete");
+      enterpriseResolution = { rows, created: 0, queued: 0, skipped: 0, enterpriseActive: false };
+    } else {
+      throw e;
+    }
+  }
   const commitRows = enterpriseResolution.rows;
 
   let imported = 0; let updated = 0;

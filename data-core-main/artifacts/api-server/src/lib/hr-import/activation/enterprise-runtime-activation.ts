@@ -4,6 +4,8 @@
 
 import { db, hrMasterDataRegistryTable, hrWorkspaceSettingsTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
+import { isSchemaMismatchError } from "../../commercial-route-utils";
+import { logger } from "../../logger";
 import {
   getImportRuntimeSettings,
   type ImportRuntimeMode,
@@ -38,21 +40,50 @@ export const ENTERPRISE_POLICY_PROFILE: Record<string, EnterprisePolicyProfile> 
 
 export async function isEnterpriseImportRuntimeActive(workspaceId: number): Promise<boolean> {
   const settings = await getImportRuntimeSettings(workspaceId);
-  const rollout = await getWorkspaceRollout(workspaceId);
   const modeOk =
     isControlledCommitMode(settings)
     || isPilotActiveMode(settings)
     || isActiveRuntimeMode(settings);
-  const policiesOn = Boolean(
-    (rollout?.metadata as Record<string, unknown> | null)?.enterprisePoliciesActivated,
-  );
-  return modeOk && policiesOn;
+  if (!modeOk) return false;
+
+  try {
+    const rollout = await getWorkspaceRollout(workspaceId);
+    return Boolean(
+      (rollout?.metadata as Record<string, unknown> | null)?.enterprisePoliciesActivated,
+    );
+  } catch (e) {
+    if (isSchemaMismatchError(e)) {
+      logger.warn({ workspaceId }, "Enterprise rollout table unavailable — treating enterprise as inactive");
+      return false;
+    }
+    throw e;
+  }
 }
 
 export async function getEnterpriseRuntimeStatus(workspaceId: number) {
   const settings = await getImportRuntimeSettings(workspaceId);
-  const rollout = await getWorkspaceRollout(workspaceId);
-  const pilotEnabled = await isPilotWorkspaceEnabled(workspaceId);
+
+  let pilotEnabled = false;
+  try {
+    pilotEnabled = await isPilotWorkspaceEnabled(workspaceId);
+  } catch (e) {
+    if (!isSchemaMismatchError(e)) throw e;
+    logger.warn({ workspaceId }, "Pilot workspace table unavailable for status");
+  }
+
+  let rollout: Awaited<ReturnType<typeof getWorkspaceRollout>> = null;
+  let rolloutSchemaAvailable = true;
+  try {
+    rollout = await getWorkspaceRollout(workspaceId);
+  } catch (e) {
+    if (isSchemaMismatchError(e)) {
+      rolloutSchemaAvailable = false;
+      logger.warn({ workspaceId }, "Enterprise rollout table unavailable for status");
+    } else {
+      throw e;
+    }
+  }
+
   return {
     workspaceId,
     enterpriseActive: await isEnterpriseImportRuntimeActive(workspaceId),
@@ -62,6 +93,7 @@ export async function getEnterpriseRuntimeStatus(workspaceId: number) {
     pilotEnabled,
     policiesActivated: Boolean((rollout?.metadata as Record<string, unknown>)?.enterprisePoliciesActivated),
     rolloutStatus: rollout?.rolloutStatus ?? "not_registered",
+    rolloutSchemaAvailable,
     globalCutover: false,
     legacyPreserved: true,
   };
