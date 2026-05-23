@@ -13,7 +13,11 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -29,6 +33,30 @@ import {
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+const ENTITY_TYPE_LABELS: Record<string, { en: string; ar: string }> = {
+  org_unit: { en: "Department / Org Unit", ar: "الوحدة التنظيمية / القسم" },
+  job_title: { en: "Job Title", ar: "المسمى الوظيفي" },
+  job_grade: { en: "Job Grade", ar: "الدرجة الوظيفية" },
+  position: { en: "Position", ar: "المنصب" },
+  work_location: { en: "Work Location", ar: "موقع العمل" },
+};
+
+type ProposalSummaryItem = {
+  entityType: string;
+  name: string;
+  approvalRequired: boolean;
+  rowIndexes: number[];
+};
+
+type ImportIntelligence = {
+  autoFixes: Array<{ rowIndex: number; field: string; from: string; to: string; matchType: string }>;
+  normalizedEnums: Array<{ rowIndex: number; field: string; from: string; to: string }>;
+  matchedEntities: Array<{ rowIndex: number; entityType: string; name: string; entityId: number; matchType: string }>;
+  proposeCreate: Array<{ rowIndex: number; entityType: string; name: string; approvalRequired: boolean }>;
+  deferredManagers: Array<{ rowIndex: number; managerEmployeeNumber: string }>;
+  unrecognizedValues: Array<{ rowIndex: number; field: string; value: string }>;
+};
 
 const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
   full_time:  "Full-time",
@@ -217,16 +245,30 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
   const [step, setStep] = useState<"upload" | "preview" | "done">("upload");
   const [previewRows, setPreviewRows] = useState<ImportRow[]>([]);
   const [summary, setSummary] = useState<{ total: number; new: number; update: number; errors: number } | null>(null);
-  const [result, setResult] = useState<{ imported: number; updated: number; errors: string[] } | null>(null);
+  const [importIntelligence, setImportIntelligence] = useState<ImportIntelligence | null>(null);
+  const [proposalSummary, setProposalSummary] = useState<ProposalSummaryItem[]>([]);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [result, setResult] = useState<{ imported: number; updated: number; errors: string[]; importIntelligence?: Record<string, unknown> } | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const invalidateHrCaches = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["/hr/employees"] });
+    qc.invalidateQueries({ queryKey: ["/hr/org-units"] });
+    qc.invalidateQueries({ queryKey: ["/hr/job-titles"] });
+    qc.invalidateQueries({ queryKey: ["/hr/job-grades"] });
+    qc.invalidateQueries({ queryKey: ["/hr/foundation/work-locations"] });
+    qc.invalidateQueries({ queryKey: ["/hr/foundation/positions"] });
+  }, [qc]);
 
   const previewMut = usePreviewHrEmployeeImport({
     mutation: {
       onSuccess: (data: any) => {
         setPreviewRows(data.rows ?? []);
         setSummary(data.summary ?? null);
+        setImportIntelligence(data.importIntelligence ?? null);
+        setProposalSummary(data.proposalSummary ?? []);
         const allValid = (data.rows ?? []).filter((r: ImportRow) => r.status !== "error").map((r: ImportRow) => r.rowIndex);
         setSelectedRows(new Set(allValid));
         setStep("preview");
@@ -246,9 +288,19 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
   const confirmMut = useConfirmHrEmployeeImport({
     mutation: {
       onSuccess: (data: any) => {
-        qc.invalidateQueries({ queryKey: ["/hr/employees"] });
+        invalidateHrCaches();
         setResult(data);
         setStep("done");
+        setShowCreateDialog(false);
+        const created = data.importIntelligence?.entitiesCreated ?? 0;
+        if (created > 0) {
+          toast({
+            title: isAr ? "تم إنشاء بيانات مرجعية جديدة" : "New master data created",
+            description: isAr
+              ? `تم إنشاء ${created} عنصر (أقسام، مسميات، درجات، مناصب...) وربطها بالموظفين`
+              : `${created} items (departments, titles, grades, positions...) created and linked to employees`,
+          });
+        }
       },
       onError: () => toast({ title: isAr ? "فشل الاستيراد" : "Import failed", variant: "destructive" }),
     },
@@ -319,7 +371,7 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
     }
   }
 
-  function confirm() {
+  function runConfirm(approveEntityCreates: boolean) {
     const rowsToImport = previewRows
       .filter((r) => selectedRows.has(r.rowIndex) && r.status !== "error")
       .map((r) => ({
@@ -327,20 +379,38 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
         existingEmployeeId: r.existingEmployeeId,
         data: r.data,
       }));
-    confirmMut.mutate({ data: { rows: rowsToImport } } as any);
+    confirmMut.mutate({ data: { rows: rowsToImport, approveEntityCreates } } as any);
+  }
+
+  function confirm() {
+    if (proposalSummary.length > 0) {
+      setShowCreateDialog(true);
+      return;
+    }
+    runConfirm(false);
+  }
+
+  function confirmWithCreates() {
+    runConfirm(true);
   }
 
   function reset() {
     setStep("upload");
     setPreviewRows([]);
     setSummary(null);
+    setImportIntelligence(null);
+    setProposalSummary([]);
+    setShowCreateDialog(false);
     setResult(null);
     setSelectedRows(new Set());
   }
 
   const validCount = previewRows.filter((r) => r.status !== "error" && selectedRows.has(r.rowIndex)).length;
+  const needsApproval = proposalSummary.some((p) => p.approvalRequired);
+  const autoCreateCount = proposalSummary.filter((p) => !p.approvalRequired).length;
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(v) => { if (!v) { reset(); onClose(); } }}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         <DialogHeader>
@@ -415,6 +485,43 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                 <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 p-3 text-sm text-amber-800 dark:text-amber-300 flex gap-2">
                   <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                   {isAr ? `${summary.errors} صف به أخطاء - سيتم استبعادها تلقائياً` : `${summary.errors} rows have errors - they will be skipped`}
+                </div>
+              )}
+
+              {(importIntelligence?.normalizedEnums?.length ?? 0) > 0 && (
+                <div className="rounded-md border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 p-3 text-sm flex gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
+                  <div>
+                    <p className="font-medium text-emerald-800 dark:text-emerald-300">
+                      {isAr ? "تصحيحات تلقائية" : "Auto-corrections"}
+                    </p>
+                    <p className="text-xs mt-1 text-emerald-700 dark:text-emerald-400">
+                      {isAr
+                        ? `تم تطبيع ${importIntelligence!.normalizedEnums.length} قيمة (نوع التوظيف، الحالة، الجنس...)`
+                        : `${importIntelligence!.normalizedEnums.length} values normalized (employment type, status, gender...)`}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {proposalSummary.length > 0 && (
+                <div className="rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 p-3 text-sm flex gap-2">
+                  <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-600" />
+                  <div className="flex-1">
+                    <p className="font-medium text-blue-800 dark:text-blue-300">
+                      {isAr ? "بيانات مرجعية غير موجودة في النظام" : "Missing master data detected"}
+                    </p>
+                    <ul className="text-xs mt-1 space-y-0.5 text-blue-700 dark:text-blue-400">
+                      {proposalSummary.map((p) => (
+                        <li key={`${p.entityType}-${p.name}`}>
+                          • {isAr ? ENTITY_TYPE_LABELS[p.entityType]?.ar : ENTITY_TYPE_LABELS[p.entityType]?.en ?? p.entityType}: <strong>{p.name}</strong>
+                          {p.approvalRequired
+                            ? (isAr ? " (يتطلب موافقتك عند الاستيراد)" : " (requires approval on import)")
+                            : (isAr ? " (سيُنشأ تلقائياً)" : " (auto-created)")}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
               )}
 
@@ -498,6 +605,13 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                   {result.errors.map((e, i) => <p key={i} className="text-xs text-red-700 dark:text-red-400">{e}</p>)}
                 </div>
               )}
+              {typeof result.importIntelligence?.entitiesCreated === "number" && result.importIntelligence.entitiesCreated > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  {isAr
+                    ? `تم إنشاء ${result.importIntelligence.entitiesCreated} عنصر مرجعي جديد في النظام`
+                    : `${result.importIntelligence.entitiesCreated} new master data items created in the system`}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -512,7 +626,9 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
               <Button onClick={confirm} disabled={validCount === 0 || confirmMut.isPending}>
                 {confirmMut.isPending
                   ? (isAr ? "جاري الحفظ..." : "Saving...")
-                  : (isAr ? `استيراد ${validCount} موظف` : `Import ${validCount} employees`)}
+                  : proposalSummary.length > 0
+                    ? (isAr ? `مراجعة واستيراد ${validCount} موظف` : `Review & import ${validCount} employees`)
+                    : (isAr ? `استيراد ${validCount} موظف` : `Import ${validCount} employees`)}
               </Button>
             </>
           )}
@@ -525,6 +641,69 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <AlertDialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
+      <AlertDialogContent className="max-w-lg" dir={isAr ? "rtl" : "ltr"}>
+        <AlertDialogHeader>
+          <AlertDialogTitle className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-500" />
+            {isAr ? "بيانات غير موجودة — هل تريد إنشاءها؟" : "Missing data — create in system?"}
+          </AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3 text-sm text-muted-foreground">
+              <p>
+                {isAr
+                  ? "الملف يحتوي على بيانات مرجعية غير مسجّلة في المنصة. يمكن إنشاؤها تلقائياً وربطها بالموظفين في HR والرواتب:"
+                  : "The file references master data not yet in the platform. These can be created automatically and linked to employees across HR and payroll:"}
+              </p>
+              <ul className="max-h-48 overflow-y-auto space-y-1.5 rounded-md border p-3 bg-muted/30">
+                {proposalSummary.map((p) => (
+                  <li key={`${p.entityType}-${p.name}`} className="flex items-start gap-2">
+                    <Badge variant={p.approvalRequired ? "destructive" : "secondary"} className="text-[10px] shrink-0 mt-0.5">
+                      {isAr ? ENTITY_TYPE_LABELS[p.entityType]?.ar : ENTITY_TYPE_LABELS[p.entityType]?.en ?? p.entityType}
+                    </Badge>
+                    <span>
+                      <strong className="text-foreground">{p.name}</strong>
+                      <span className="text-xs block text-muted-foreground">
+                        {isAr ? `الصفوف: ${p.rowIndexes.join(", ")}` : `Rows: ${p.rowIndexes.join(", ")}`}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {autoCreateCount > 0 && (
+                <p className="text-xs">
+                  {isAr
+                    ? `${autoCreateCount} عنصر (مسمى، درجة، موقع...) سيُنشأ تلقائياً.`
+                    : `${autoCreateCount} items (titles, grades, locations...) will be auto-created.`}
+                </p>
+              )}
+              {needsApproval && (
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  {isAr
+                    ? "الأقسام والمناصب تتطلب موافقتك قبل الإنشاء."
+                    : "Departments and positions require your approval before creation."}
+                </p>
+              )}
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={confirmMut.isPending}>
+            {isAr ? "إلغاء" : "Cancel"}
+          </AlertDialogCancel>
+          <AlertDialogAction
+            disabled={confirmMut.isPending}
+            onClick={(e) => { e.preventDefault(); confirmWithCreates(); }}
+          >
+            {confirmMut.isPending
+              ? (isAr ? "جاري الإنشاء والاستيراد..." : "Creating & importing...")
+              : (isAr ? "نعم، أنشئ واستورد" : "Yes, create & import")}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }
 

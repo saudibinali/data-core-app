@@ -486,19 +486,19 @@ router.get("/hr/employees/import-template", requireAuth, requirePermission("hr.m
     { key: "last_name",           labelEn: "Last Name",             labelAr: "اسم العائلة",          required: false, format: "Text" },
     { key: "email",               labelEn: "Email",                 labelAr: "البريد الإلكتروني",    required: false, format: "valid@email.com" },
     { key: "phone_number",        labelEn: "Phone Number",          labelAr: "رقم الهاتف",           required: false, format: "+966XXXXXXXXX" },
-    { key: "employment_type",     labelEn: "Employment Type",       labelAr: "نوع التوظيف",          required: false, format: "full_time | part_time | contractor | intern | temporary" },
-    { key: "status",              labelEn: "Status",                labelAr: "الحالة",               required: false, format: "active | on_leave | suspended | terminated | resigned" },
+    { key: "employment_type",     labelEn: "Employment Type",       labelAr: "نوع التوظيف",          required: false, format: "Full Time | Part Time | Contractor (any language/case)" },
+    { key: "status",              labelEn: "Status",                labelAr: "الحالة",               required: false, format: "Active | On Leave | Suspended (any language/case)" },
     { key: "hire_date",           labelEn: "Hire Date",             labelAr: "تاريخ التوظيف",        required: false, format: "YYYY-MM-DD" },
     { key: "end_date",            labelEn: "End Date",              labelAr: "تاريخ انتهاء العقد",   required: false, format: "YYYY-MM-DD" },
     { key: "probation_end_date",  labelEn: "Probation End Date",    labelAr: "نهاية فترة الاختبار",  required: false, format: "YYYY-MM-DD" },
-    { key: "org_unit_name",       labelEn: "Org Unit / Department", labelAr: "الوحدة التنظيمية",     required: false, format: "Must match exactly" },
-    { key: "job_title_name",      labelEn: "Job Title",             labelAr: "المسمى الوظيفي",       required: false, format: "Must match exactly" },
-    { key: "job_grade_name",      labelEn: "Job Grade",             labelAr: "الدرجة الوظيفية",      required: false, format: "Must match exactly" },
-    { key: "position_title",      labelEn: "Position",              labelAr: "المنصب",               required: false, format: "Must match exactly" },
+    { key: "org_unit_name",       labelEn: "Org Unit / Department", labelAr: "الوحدة التنظيمية",     required: false, format: "Any name — auto-matched or created on import" },
+    { key: "job_title_name",      labelEn: "Job Title",             labelAr: "المسمى الوظيفي",       required: false, format: "Any name — auto-matched or created on import" },
+    { key: "job_grade_name",      labelEn: "Job Grade",             labelAr: "الدرجة الوظيفية",      required: false, format: "Any name/level e.g. 14 — auto-created if missing" },
+    { key: "position_title",      labelEn: "Position",              labelAr: "المنصب",               required: false, format: "Any title — auto-matched or created on import" },
     { key: "direct_manager_num",  labelEn: "Manager Employee #",    labelAr: "رقم المدير المباشر",   required: false, format: "Employee number of the manager" },
-    { key: "work_location",       labelEn: "Work Location",         labelAr: "موقع العمل",           required: false, format: "Must match exactly" },
+    { key: "work_location",       labelEn: "Work Location",         labelAr: "موقع العمل",           required: false, format: "Any name — auto-matched or created on import" },
     { key: "nationality",         labelEn: "Nationality",           labelAr: "الجنسية",              required: false, format: "Text" },
-    { key: "gender",              labelEn: "Gender",                labelAr: "الجنس",                required: false, format: "male | female" },
+    { key: "gender",              labelEn: "Gender",                labelAr: "الجنس",                required: false, format: "Male | Female | ذكر | أنثى (any case)" },
     { key: "date_of_birth",       labelEn: "Date of Birth",         labelAr: "تاريخ الميلاد",        required: false, format: "YYYY-MM-DD" },
     { key: "marital_status",      labelEn: "Marital Status",        labelAr: "الحالة الاجتماعية",    required: false, format: "single | married | divorced | widowed" },
     { key: "national_id",         labelEn: "National ID",           labelAr: "رقم الهوية",           required: false, format: "Text" },
@@ -565,7 +565,7 @@ router.get("/hr/employees/import-template", requireAuth, requirePermission("hr.m
     ["• Row 1 = Arabic headers, Row 2 = English headers, Row 3 = internal keys (do not edit)", "", "", "", ""],
     ["• Data starts from Row 4", "", "", "", ""],
     [`• Numbering mode: ${numberingMode.toUpperCase()} - ${isManual ? "you MUST enter employee_number" : isHybrid ? "leave employee_number blank to auto-assign" : "leave employee_number blank (always auto-assigned)"}`, "", "", "", ""],
-    ["• Relation columns (org_unit_name, job_title_name, etc.) must match existing names exactly (case-insensitive)", "", "", "", ""],
+    ["• Relation columns accept any name — system will match, suggest, or offer to create missing items", "", "", "", ""],
     ["• Custom fields prefixed with cf_ are workspace-specific", "", "", "", ""],
   ];
   const wsInstr = XLSX.utils.aoa_to_sheet(instrData);
@@ -810,6 +810,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     deferredManagers: [],
     unrecognizedValues: [],
   };
+  let proposalSummary: Awaited<ReturnType<typeof applyImportPreviewIntelligence>>["proposalSummary"] = [];
   let enterprisePreview: Awaited<ReturnType<typeof buildEnterpriseImportPreview>> = {
     rows: previewRows,
     enterprise: null,
@@ -827,6 +828,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     });
     finalPreviewRows = intelligencePreview.rows;
     importIntelligence = intelligencePreview.intelligence;
+    proposalSummary = intelligencePreview.proposalSummary;
 
     enterprisePreview = await buildEnterpriseImportPreview({
       workspaceId,
@@ -893,6 +895,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     rows: finalPreviewRows,
     summary,
     importIntelligence,
+    proposalSummary,
     enterprise: enterprisePreview.enterprise,
     enterpriseRuntime: enterpriseStatus,
   });
@@ -1012,10 +1015,13 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
           address: d.address ? String(d.address) : null,
           company: d.company ? String(d.company) : null,
           branch: d.branch ? String(d.branch) : null,
-          location: d.location ? String(d.location) : null,
+          location: d.location ? String(d.location) : (d.workLocationName ? String(d.workLocationName) : null),
           orgUnitId: d.orgUnitId ? Number(d.orgUnitId) : null,
           jobTitleId: d.jobTitleId ? Number(d.jobTitleId) : null,
           jobGradeId: d.jobGradeId ? Number(d.jobGradeId) : null,
+          positionId: d.positionId ? Number(d.positionId) : null,
+          workLocationId: d.workLocationId ? Number(d.workLocationId) : null,
+          position: d.positionTitle ? String(d.positionTitle) : null,
           directManagerId: managerId,
           emergencyContactName: d.emergencyContactName ? String(d.emergencyContactName) : null,
           emergencyContactPhone: d.emergencyContactPhone ? String(d.emergencyContactPhone) : null,
@@ -1043,18 +1049,48 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
       } else if (row.status === "update" && row.existingEmployeeId) {
         await db.update(employeesTable).set({
           fullName: String(d.fullName ?? "").trim(),
+          firstName: d.firstName ? String(d.firstName) : null,
+          lastName: d.lastName ? String(d.lastName) : null,
           email: d.email ? String(d.email) : null,
           phoneNumber: d.phoneNumber ? String(d.phoneNumber) : null,
           status: (d.status as string) ?? "active",
           employmentType: (d.employmentType as string) ?? "full_time",
           hireDate: d.hireDate ? String(d.hireDate) : null,
           endDate: d.endDate ? String(d.endDate) : null,
+          probationEndDate: d.probationEndDate ? String(d.probationEndDate) : null,
+          dateOfBirth: d.dateOfBirth ? String(d.dateOfBirth) : null,
+          gender: d.gender ? String(d.gender) : null,
+          nationality: d.nationality ? String(d.nationality) : null,
+          maritalStatus: d.maritalStatus ? String(d.maritalStatus) : null,
+          nationalId: d.nationalId ? String(d.nationalId) : null,
+          passportNumber: d.passportNumber ? String(d.passportNumber) : null,
+          address: d.address ? String(d.address) : null,
+          company: d.company ? String(d.company) : null,
+          branch: d.branch ? String(d.branch) : null,
+          location: d.location ? String(d.location) : (d.workLocationName ? String(d.workLocationName) : null),
           orgUnitId: d.orgUnitId ? Number(d.orgUnitId) : null,
           jobTitleId: d.jobTitleId ? Number(d.jobTitleId) : null,
           jobGradeId: d.jobGradeId ? Number(d.jobGradeId) : null,
+          positionId: d.positionId ? Number(d.positionId) : null,
+          workLocationId: d.workLocationId ? Number(d.workLocationId) : null,
+          position: d.positionTitle ? String(d.positionTitle) : null,
           directManagerId: managerId,
+          emergencyContactName: d.emergencyContactName ? String(d.emergencyContactName) : null,
+          emergencyContactPhone: d.emergencyContactPhone ? String(d.emergencyContactPhone) : null,
+          emergencyContactRelation: d.emergencyContactRelation ? String(d.emergencyContactRelation) : null,
           notes: d.notes ? String(d.notes) : null,
         }).where(and(eq(employeesTable.id, row.existingEmployeeId), eq(employeesTable.workspaceId, workspaceId)));
+        const cvs = d.customValues as Record<string, string> | undefined;
+        if (cvs && Object.keys(cvs).length > 0) {
+          const cfDefs = await db.select({ id: hrCustomFieldDefsTable.id, name: hrCustomFieldDefsTable.name })
+            .from(hrCustomFieldDefsTable).where(eq(hrCustomFieldDefsTable.workspaceId, workspaceId));
+          for (const [cfName, cfVal] of Object.entries(cvs)) {
+            const def = cfDefs.find((c) => c.name === cfName);
+            if (def && cfVal) {
+              await db.insert(hrCustomFieldValuesTable).values({ employeeId: row.existingEmployeeId, fieldDefId: def.id, value: String(cfVal) }).onConflictDoUpdate({ target: [hrCustomFieldValuesTable.employeeId, hrCustomFieldValuesTable.fieldDefId], set: { value: String(cfVal) } });
+            }
+          }
+        }
         if (mgrNum && !managerId) {
           deferredManagerLinks.push({ employeeId: row.existingEmployeeId, managerEmployeeNumber: mgrNum });
         }

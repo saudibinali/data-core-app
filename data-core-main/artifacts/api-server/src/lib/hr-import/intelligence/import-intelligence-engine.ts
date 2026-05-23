@@ -115,7 +115,7 @@ export async function applyImportPreviewIntelligence(input: {
   rawRows: Record<string, string>[];
   employmentTypes: DynamicEnumLoadResult;
   statuses: DynamicEnumLoadResult;
-}): Promise<{ rows: PreviewRow[]; intelligence: ImportIntelligenceBuckets }> {
+}): Promise<{ rows: PreviewRow[]; intelligence: ImportIntelligenceBuckets; proposalSummary: ProposalSummaryItem[] }> {
   const catalog = await masterDataCatalogService.loadSnapshot(input.workspaceId, true);
   const buckets: ImportIntelligenceBuckets = {
     autoFixes: [],
@@ -211,7 +211,33 @@ export async function applyImportPreviewIntelligence(input: {
   }
 
   incrementRuntimeMetric("import.intelligence.preview");
-  return { rows, intelligence: buckets };
+  return { rows, intelligence: buckets, proposalSummary: summarizeProposals(buckets) };
+}
+
+export type ProposalSummaryItem = {
+  entityType: string;
+  name: string;
+  approvalRequired: boolean;
+  rowIndexes: number[];
+};
+
+export function summarizeProposals(intelligence: ImportIntelligenceBuckets): ProposalSummaryItem[] {
+  const map = new Map<string, ProposalSummaryItem>();
+  for (const p of intelligence.proposeCreate) {
+    const key = `${p.entityType}::${p.name.trim().toLowerCase()}`;
+    const existing = map.get(key);
+    if (existing) {
+      if (!existing.rowIndexes.includes(p.rowIndex)) existing.rowIndexes.push(p.rowIndex);
+    } else {
+      map.set(key, {
+        entityType: p.entityType,
+        name: p.name,
+        approvalRequired: p.approvalRequired,
+        rowIndexes: [p.rowIndex],
+      });
+    }
+  }
+  return [...map.values()].sort((a, b) => a.entityType.localeCompare(b.entityType) || a.name.localeCompare(b.name));
 }
 
 export type ConfirmRow = {

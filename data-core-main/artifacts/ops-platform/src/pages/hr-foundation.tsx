@@ -27,10 +27,13 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Layers, Building2, Briefcase, Star, UserCheck, FileText,
   MapPin, Calendar, Shield, Tags, Pencil, Trash2, Plus,
-  Sparkles, RefreshCw, Settings, Code2,
+  Sparkles, RefreshCw, Settings, Code2, Download, FileSpreadsheet, Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 import { toCode } from "@/lib/hr-utils";
+import { downloadWithAuth } from "@workspace/api-client-react";
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 type BaseEntity = Record<string, unknown> & { id: number; isActive: boolean };
@@ -456,6 +459,33 @@ export default function HrFoundationPage() {
     maternity: "Maternity", paternity: "Paternity", unpaid: "Unpaid", other: "Other",
   };
 
+  async function downloadEmployeeTemplate() {
+    try {
+      await downloadWithAuth(`${BASE}/api/hr/employees/import-template`, "employee_import_template.xlsx");
+      toast.success(isAr ? "تم تحميل قالب استيراد الموظفين" : "Employee import template downloaded");
+    } catch {
+      toast.error(isAr ? "فشل تحميل القالب" : "Failed to download template");
+    }
+  }
+
+  async function exportMasterData() {
+    try {
+      const r = await apiFetch("/api/hr/import/export/master-data");
+      if (!r.ok) throw new Error("export failed");
+      const data = await r.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `hr_master_data_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(isAr ? "تم تصدير البيانات الأساسية" : "Foundation data exported");
+    } catch {
+      toast.error(isAr ? "فشل التصدير — تأكد من تفعيل نظام الاستيراد" : "Export failed — ensure import runtime is available");
+    }
+  }
+
   // ── Tab definitions ────────────────────────────────────────────────────────
   const tabs = [
     { id: "statuses",         labelEn: "Statuses",        labelAr: "الحالات",          Icon: UserCheck  },
@@ -495,6 +525,34 @@ export default function HrFoundationPage() {
           </Button>
         )}
       </div>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Upload className="w-4 h-4" />
+            {isAr ? "استيراد وتصدير البيانات" : "Import & Export"}
+          </CardTitle>
+          <CardDescription>
+            {isAr
+              ? "حمّل قالب Excel لاستيراد الموظفين — البيانات المرجعية المفقودة (قسم، درجة، منصب...) تُنشأ تلقائياً عند الموافقة وتظهر هنا."
+              : "Download the employee Excel template — missing reference data (departments, grades, positions...) is auto-created on import approval and reflected here."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={downloadEmployeeTemplate}>
+            <FileSpreadsheet className="w-4 h-4 me-2 text-green-600" />
+            {isAr ? "قالب استيراد الموظفين" : "Employee Import Template"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={exportMasterData}>
+            <Download className="w-4 h-4 me-2" />
+            {isAr ? "تصدير البيانات الأساسية (JSON)" : "Export Foundation Data (JSON)"}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void fetchAll()}>
+            <RefreshCw className="w-4 h-4 me-2" />
+            {isAr ? "تحديث القائمة" : "Refresh lists"}
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* ── Tabs ──────────────────────────────────────────────────────────── */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
