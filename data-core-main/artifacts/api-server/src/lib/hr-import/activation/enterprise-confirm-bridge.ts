@@ -1,27 +1,12 @@
 /**
- * Phase 6 — Enterprise confirm resolution bridge (legacy confirm hook).
+ * Phase 6 — Enterprise confirm resolution bridge (delegates to always-on import intelligence).
  */
 
-import { isEnterpriseImportRuntimeActive, getEffectiveEntityPolicy } from "./enterprise-runtime-activation";
-import { resolveOrCreateEntity } from "./enterprise-entity-resolver";
-import { masterDataCatalogService } from "../catalog/master-data-catalog";
-import { reconcileEntityLookup } from "./reconciliation-activator";
-import type { CatalogEntityType } from "../catalog/master-data-catalog";
+import { isEnterpriseImportRuntimeActive } from "./enterprise-runtime-activation";
+import { applyImportConfirmIntelligence, type ConfirmRow } from "../intelligence/import-intelligence-engine";
 import { incrementRuntimeMetric } from "../../workforce/stabilization/observability-metrics";
 
-export type ConfirmRow = {
-  status: "new" | "update" | "skip";
-  existingEmployeeId?: number;
-  data: Record<string, unknown>;
-};
-
-const RESOLVE_FIELDS: Array<{ entityType: CatalogEntityType; idKey: string; nameKey: string }> = [
-  { entityType: "org_unit", idKey: "orgUnitId", nameKey: "orgUnitName" },
-  { entityType: "job_title", idKey: "jobTitleId", nameKey: "jobTitleName" },
-  { entityType: "job_grade", idKey: "jobGradeId", nameKey: "jobGradeName" },
-  { entityType: "position", idKey: "positionId", nameKey: "positionTitle" },
-  { entityType: "work_location", idKey: "workLocationId", nameKey: "workLocationName" },
-];
+export type { ConfirmRow };
 
 export async function applyEnterpriseConfirmResolution(input: {
   workspaceId: number;
@@ -30,68 +15,9 @@ export async function applyEnterpriseConfirmResolution(input: {
   userId?: number;
 }): Promise<{ rows: ConfirmRow[]; created: number; queued: number; skipped: number; enterpriseActive: boolean }> {
   const enterpriseActive = await isEnterpriseImportRuntimeActive(input.workspaceId);
-  if (!enterpriseActive) {
-    return { rows: input.rows, created: 0, queued: 0, skipped: 0, enterpriseActive: false };
-  }
-
-  const catalog = await masterDataCatalogService.loadSnapshot(input.workspaceId, true);
-  let created = 0;
-  let queued = 0;
-  let skipped = 0;
-
-  const resolvedRows: ConfirmRow[] = [];
-
-  for (const row of input.rows) {
-    if (row.status === "skip") {
-      resolvedRows.push(row);
-      continue;
-    }
-
-    const data = { ...row.data };
-
-    for (const field of RESOLVE_FIELDS) {
-      if (data[field.idKey]) continue;
-
-      const nameHint = String(data[field.nameKey] ?? data.location ?? "").trim();
-      if (!nameHint) continue;
-
-      const policy = await getEffectiveEntityPolicy(input.workspaceId, field.entityType);
-      const match = reconcileEntityLookup(catalog, field.entityType, nameHint);
-
-      if (match.entityId && match.confidence >= 0.85) {
-        data[field.idKey] = match.entityId;
-        if (field.entityType === "work_location") {
-          data.location = match.matchedName ?? nameHint;
-        }
-        continue;
-      }
-
-      const result = await resolveOrCreateEntity({
-        workspaceId: input.workspaceId,
-        entityType: field.entityType,
-        name: nameHint,
-        policy,
-        approveCreates: input.approveEntityCreates,
-        userId: input.userId,
-      });
-
-      if (!result) continue;
-      if (result.action === "created" && result.entityId) {
-        data[field.idKey] = result.entityId;
-        if (field.entityType === "work_location") data.location = nameHint;
-        created++;
-      } else if (result.action === "queued_approval") {
-        queued++;
-      } else if (result.action === "skipped") {
-        skipped++;
-      }
-    }
-
-    resolvedRows.push({ ...row, data });
-  }
-
-  incrementRuntimeMetric("import.phase6.confirm_resolution", created);
-  return { rows: resolvedRows, created, queued, skipped, enterpriseActive: true };
+  const result = await applyImportConfirmIntelligence(input);
+  incrementRuntimeMetric("import.phase6.confirm_resolution", result.created);
+  return { ...result, enterpriseActive };
 }
 
 export async function getEnterpriseMasterDataCapabilities(workspaceId: number) {

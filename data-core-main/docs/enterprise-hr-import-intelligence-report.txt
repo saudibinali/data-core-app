@@ -1,0 +1,125 @@
+ENTERPRISE HR IMPORT INTELLIGENCE — IMPLEMENTATION REPORT
+=========================================================
+Date: 2026-05-20
+Scope: Legacy employee import (POST /hr/employees/import/preview + confirm)
+Strategy: Extend existing runtime — no parallel engine, no breaking changes
+
+| Area                 | Status  |
+| -------------------- | ------- |
+| Enum Normalization   | Good    |
+| Auto Master Data     | Good    |
+| Enterprise Readiness | Good    |
+| Runtime Safety       | Excellent |
+| Import Intelligence  | Good    |
+| Risks                | Low     |
+
+FILES MODIFIED
+--------------
+- artifacts/api-server/src/lib/hr-import/intelligence/enum-normalizer.ts (NEW)
+- artifacts/api-server/src/lib/hr-import/intelligence/import-intelligence-engine.ts (NEW)
+- artifacts/api-server/src/lib/hr-import/activation/reconciliation-activator.ts
+- artifacts/api-server/src/lib/hr-import/activation/enterprise-confirm-bridge.ts
+- artifacts/api-server/src/lib/hr-import/index.ts
+- artifacts/api-server/src/routes/hr.ts
+
+NORMALIZATION ARCHITECTURE
+--------------------------
+Layer 1 — Static human aliases (English + Arabic):
+  resolveImportEnum() in enum-normalizer.ts
+  Fields: employment_type, employee_status, gender, marital_status
+  Examples: "Part Time" / "part-time" / "دوام جزئي" → part_time
+            "Female" / "أنثى" → female
+            "Active" / "Suspended" / "نشط" / "موقوف" → active / suspended
+
+Layer 2 — Dynamic catalog codes:
+  loadDynamicEmploymentTypes / loadDynamicEmployeeStatuses merged at preview time
+  normalizeRuntimeKey + normalizeName index for display names and codes
+
+Layer 3 — Case/format insensitivity:
+  aliasKeys() strips spaces, underscores, dashes; NFKC lowercase via normalizeName
+
+Preview hook: applyImportPreviewIntelligence() mutates row.data with canonical values
+Confirm hook: rows already carry normalized enums from preview payload
+
+ALIAS RESOLUTION STRATEGY
+-------------------------
+Master data (org_unit, job_title, job_grade, position, work_location):
+  reconcileEntityLookup() in reconciliation-activator.ts
+  Match order: exact name → code → alias index → near/fuzzy (≥0.85 confidence)
+  Fuzzy includes: substring, compact alphanumeric, acronym ("HR" ↔ "Human Resources")
+
+Enum fields: static alias table + dynamic enum catalog index
+
+AUTO-CREATE FLOW
+----------------
+Preview (applyImportPreviewIntelligence):
+  Unmatched entity → proposeCreate bucket + warning (approval vs auto-create)
+
+Confirm (applyImportConfirmIntelligence via enterprise-confirm-bridge):
+  Always-on for all workspaces (not gated on enterprise activation flag)
+  Policies (IMPORT_INTELLIGENCE_POLICIES):
+    job_title, job_grade, work_location → auto-create without approval
+    org_unit, position → create when approveEntityCreates=true (default false)
+  Enterprise-activated workspaces: getEffectiveEntityPolicy() overrides defaults
+  Uses resolveOrCreateEntity() — same path as Phase 6 enterprise runtime
+
+DEFERRED RELATIONSHIP FLOW
+--------------------------
+Preview: manager employee # stored as deferredManagerEmployeeNumber; warning not blocking
+Confirm insert/update: links manager if already in workspace; else queues deferred pass
+Post-commit: applyDeferredManagerLinks() second pass after all rows imported
+  Re-loads employee numbers, updates directManagerId where manager now exists
+  Returns linked / pending counts in confirm response + telemetry
+
+PREVIEW BEHAVIOR
+----------------
+Response includes importIntelligence bucket:
+  autoFixes          — field-level corrections with matchType
+  normalizedEnums    — enum from → to per row
+  matchedEntities    — fuzzy/exact master-data matches
+  proposeCreate      — entities to create on confirm
+  deferredManagers   — manager links deferred
+  unrecognizedValues — enums that could not be resolved (warning, not hard block)
+
+Legacy strict enum errors REMOVED from preview loop; blocking errors remain:
+  full_name required, email format, date format, required custom fields, manual emp #
+
+ROLLBACK SAFETY
+---------------
+Additive only — no schema migrations required for this feature
+Legacy endpoints unchanged; intelligence wraps existing preview/confirm
+If intelligence throws: preview falls through enterprise try/catch; confirm bridge catches schema mismatch
+Entity auto-create respects existing approval queues and duplicate prevention in resolveOrCreateEntity
+Deferred managers: non-fatal; import rows committed even if second-pass linking fails
+
+VPS DEPLOYMENT COMMANDS
+-----------------------
+# On VPS (production app directory):
+cd /path/to/data-core-main
+
+# Ensure platform.json DB is used (not stale .env DATABASE_URL):
+unset DATABASE_URL
+
+git pull origin main   # or your deploy branch
+
+pnpm install --frozen-lockfile
+pnpm --filter @workspace/api-server run build
+
+pm2 reload datacore    # or your process name — do NOT change ports/nginx
+
+# Optional: verify import preview accepts human enums
+curl -s -X POST https://YOUR_HOST/hr/employees/import/preview \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"rows":[{"full_name":"Test","employment_type":"Part Time","status":"Active","gender":"Female"}]}'
+
+# Optional migrations (only if enterprise runtime tables missing — separate from this feature):
+# node scripts/migrate-hr-import-runtime.cjs
+# node scripts/migrate-hr-import-auto-create-phase5.cjs
+
+KNOWN LIMITATIONS / RISKS (Low)
+-------------------------------
+- Leave types / approval states / worker states: not yet in legacy employee import columns (v2 session path)
+- Org unit / position auto-create still requires approveEntityCreates=true on confirm
+- UI may not yet render importIntelligence buckets (API ready; frontend can consume)
+- Migrations 0030/0031 still manual if enterprise pilot tables needed

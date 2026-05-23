@@ -100,6 +100,7 @@ import { recordImportTelemetry, countUnresolvedFromWarnings } from "../lib/hr-im
 import { runShadowValidationPipeline } from "../lib/hr-import/validation/shadow-validation-runner";
 import { buildEnterpriseImportPreview } from "../lib/hr-import/activation/enterprise-preview-orchestrator";
 import { applyEnterpriseConfirmResolution } from "../lib/hr-import/activation/enterprise-confirm-bridge";
+import { applyImportPreviewIntelligence, applyDeferredManagerLinks } from "../lib/hr-import/intelligence/import-intelligence-engine";
 import { getEnterpriseRuntimeStatus } from "../lib/hr-import/activation/enterprise-runtime-activation";
 import { isSchemaMismatchError } from "../lib/commercial-route-utils";
 import { logger } from "../lib/logger";
@@ -666,10 +667,6 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  const validEmploymentTypes = employmentTypesDynamic.codes;
-  const validStatuses = statusesDynamic.codes;
-  const validGenders = new Set(["male", "female"]);
-
   type PreviewRow = {
     rowIndex: number;
     status: "new" | "update" | "error" | "skip";
@@ -721,10 +718,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
       }
     }
 
-    // Type / status / gender
-    if (empType && !validEmploymentTypes.has(empType)) errors.push(`Invalid employment_type: "${empType}"`);
-    if (status && !validStatuses.has(status)) errors.push(`Invalid status: "${status}"`);
-    if (gender && !validGenders.has(gender)) errors.push(`Invalid gender: "${gender}"`);
+    // Type / status / gender — human-friendly values normalized by import intelligence (below)
 
     // Dates
     for (const [lbl, val] of [["hire_date", hireDate], ["end_date", endDate], ["probation_end_date", probDate], ["date_of_birth", dob]] as [string, string][]) {
@@ -792,8 +786,14 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
         emergencyContactPhone: getField(row, "emergency_phone", "هاتف جهة الطوارئ", "Emergency Contact Phone") || null,
         emergencyContactRelation: getField(row, "emergency_relation", "صلة القرابة للطوارئ", "Emergency Relation") || null,
         orgUnitId: resolvedOrgId ?? null,
+        orgUnitName: orgName || null,
         jobTitleId: resolvedJtId ?? null,
+        jobTitleName: jtName || null,
         jobGradeId: resolvedJgId ?? null,
+        jobGradeName: jgName || null,
+        positionId: resolvedPosId ?? null,
+        positionTitle: posName || null,
+        workLocationName: wlName || null,
         location: resolvedWlName ?? null,
         managerEmployeeNumber: mgrNum || null,
         customValues,
@@ -802,6 +802,14 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   }
 
   let finalPreviewRows = previewRows;
+  let importIntelligence: Awaited<ReturnType<typeof applyImportPreviewIntelligence>>["intelligence"] = {
+    autoFixes: [],
+    normalizedEnums: [],
+    matchedEntities: [],
+    proposeCreate: [],
+    deferredManagers: [],
+    unrecognizedValues: [],
+  };
   let enterprisePreview: Awaited<ReturnType<typeof buildEnterpriseImportPreview>> = {
     rows: previewRows,
     enterprise: null,
@@ -810,9 +818,19 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   let enterpriseStatus: Awaited<ReturnType<typeof getEnterpriseRuntimeStatus>> | null = null;
 
   try {
-    enterprisePreview = await buildEnterpriseImportPreview({
+    const intelligencePreview = await applyImportPreviewIntelligence({
       workspaceId,
       previewRows,
+      rawRows,
+      employmentTypes: employmentTypesDynamic,
+      statuses: statusesDynamic,
+    });
+    finalPreviewRows = intelligencePreview.rows;
+    importIntelligence = intelligencePreview.intelligence;
+
+    enterprisePreview = await buildEnterpriseImportPreview({
+      workspaceId,
+      previewRows: finalPreviewRows,
       rawRows,
     });
     finalPreviewRows = enterprisePreview.rows;
@@ -874,6 +892,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   res.json({
     rows: finalPreviewRows,
     summary,
+    importIntelligence,
     enterprise: enterprisePreview.enterprise,
     enterpriseRuntime: enterpriseStatus,
   });
@@ -943,13 +962,14 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
 
   let imported = 0; let updated = 0;
   const errors: string[] = [];
+  const deferredManagerLinks: Array<{ employeeId: number; managerEmployeeNumber?: string | null }> = [];
 
   for (const row of commitRows) {
     if (row.status === "skip") continue;
     try {
       const d = row.data as Record<string, unknown>;
-      const mgrNum = String(d.managerEmployeeNumber ?? "").toLowerCase();
-      const managerId = mgrNum ? (empByNum.get(mgrNum) ?? null) : null;
+      const mgrNum = String(d.deferredManagerEmployeeNumber ?? d.managerEmployeeNumber ?? "").trim();
+      const managerId = mgrNum ? (empByNum.get(mgrNum.toLowerCase()) ?? null) : null;
 
       // Determine employee number
       let empNumber: string;
@@ -1016,6 +1036,9 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
           }
         }
         empByNum.set(String(empNumber).toLowerCase(), inserted!.id);
+        if (mgrNum && !managerId) {
+          deferredManagerLinks.push({ employeeId: inserted!.id, managerEmployeeNumber: mgrNum });
+        }
         imported++;
       } else if (row.status === "update" && row.existingEmployeeId) {
         await db.update(employeesTable).set({
@@ -1032,11 +1055,21 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
           directManagerId: managerId,
           notes: d.notes ? String(d.notes) : null,
         }).where(and(eq(employeesTable.id, row.existingEmployeeId), eq(employeesTable.workspaceId, workspaceId)));
+        if (mgrNum && !managerId) {
+          deferredManagerLinks.push({ employeeId: row.existingEmployeeId, managerEmployeeNumber: mgrNum });
+        }
         updated++;
       }
     } catch (e: unknown) {
       errors.push(`Row ${imported + updated + errors.length + 1}: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  let managerLinkResult = { linked: 0, pending: 0 };
+  try {
+    managerLinkResult = await applyDeferredManagerLinks({ workspaceId, employeeIds: deferredManagerLinks });
+  } catch (e) {
+    logger.warn({ workspaceId, err: e }, "Deferred manager linking pass failed — import rows committed");
   }
 
   void recordImportTelemetry({
@@ -1054,6 +1087,8 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
       enterpriseEntitiesQueued: enterpriseResolution.queued,
       enterpriseEntitiesSkipped: enterpriseResolution.skipped,
       enterpriseActive: enterpriseResolution.enterpriseActive,
+      deferredManagersLinked: managerLinkResult.linked,
+      deferredManagersPending: managerLinkResult.pending,
     },
   });
 
@@ -1061,6 +1096,13 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
     imported,
     updated,
     errors,
+    importIntelligence: {
+      entitiesCreated: enterpriseResolution.created,
+      entitiesQueued: enterpriseResolution.queued,
+      entitiesSkipped: enterpriseResolution.skipped,
+      deferredManagersLinked: managerLinkResult.linked,
+      deferredManagersPending: managerLinkResult.pending,
+    },
     enterprise: {
       active: enterpriseResolution.enterpriseActive,
       entitiesCreated: enterpriseResolution.created,

@@ -71,3 +71,5 @@ export * from "./activation/reconciliation-activator";
 export * from "./activation/enterprise-entity-resolver";
 export * from "./activation/enterprise-preview-orchestrator";
 export * from "./activation/enterprise-confirm-bridge";
+export * from "./intelligence/enum-normalizer";
+export * from "./intelligence/import-intelligence-engine";

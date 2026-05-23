@@ -15,6 +15,15 @@ export type ReconciliationMatch = {
   suggestions: string[];
 };
 
+function acronymOf(label: string): string {
+  return label
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join("")
+    .toLowerCase();
+}
+
 function scoreNearMatch(input: string, candidate: string): number {
   const a = normalizeName(input);
   const b = normalizeName(candidate);
@@ -22,6 +31,9 @@ function scoreNearMatch(input: string, candidate: string): number {
   if (a === b) return 1;
   if (a.replace(/[^a-z0-9]/g, "") === b.replace(/[^a-z0-9]/g, "")) return 0.95;
   if (a.includes(b) || b.includes(a)) return 0.85;
+  const acr = acronymOf(candidate);
+  const compact = a.replace(/[^a-z0-9]/g, "");
+  if (acr.length >= 2 && (compact === acr || acr === compact)) return 0.9;
   return 0;
 }
 

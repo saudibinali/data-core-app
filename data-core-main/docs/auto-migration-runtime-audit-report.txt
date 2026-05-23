@@ -1,0 +1,298 @@
+AUTO MIGRATION RUNTIME — ARCHITECTURE AUDIT (READ ONLY)
+Generated: 2026-05-20
+Scope: Live VPS analysis — NO changes executed, NO migrations run, NO DB writes
+
+================================================================================
+SHORT SUMMARY
+================================================================================
+The platform DOES run automatic Drizzle migrations at startup (runInitSequence →
+runMigrations), but ONLY for SQL files registered in lib/db/drizzle/meta/_journal.json
+(currently through 0029_hr_import_runtime_foundation).
+
+Phase 5/6 enterprise runtime migrations (0030, 0031) exist as STANDALONE scripts
+and are NOT in the Drizzle journal. They are never auto-applied on git pull +
+pm2 reload.
+
+Startup intentionally treats HR import / auto-create / platform runtime schema
+gaps as NON-FATAL (warn + 503 on gated routes). Core app boots; enterprise paths
+degrade silently until manual scripts run.
+
+Missing table hr_import_pilot_workspaces is expected when 0030 was never applied.
+This is architectural drift by design (dual migration channel), not DB corruption.
+
+================================================================================
+STATUS TABLE
+================================================================================
+| Area                       | Status  |
+| -------------------------- | ------- |
+| Runtime Stability          | Good    |
+| Migration Architecture     | Weak    |
+| Runtime Drift Risk         | High    |
+| Auto Migration Feasibility | Good    |
+| Startup Safety             | Good    |
+| Production Risk            | Medium  |
+
+================================================================================
+1. CURRENT STARTUP FLOW
+================================================================================
+Boot order (artifacts/api-server/src/index.ts):
+
+  1. HTTP server listens (port from env, default 8080)
+  2. @workspace/db resolves DATABASE_URL (env → data/.platform.json)
+  3. If DB configured → runInitSequence()
+  4. If init throws on FATAL checks → process.exit(1)
+  5. If init warns on NON-FATAL HR/platform checks → app continues
+
+runInitSequence() order (artifacts/api-server/src/lib/init-sequence.ts):
+
+  Step 1   runMigrations()                    [FATAL on failure]
+  Step 1b  runOrgRuntimeStartupChecks          [FATAL]
+  Step 1c  runApprovalRuntimeStartupChecks     [FATAL]
+  Step 1d  runWorkforceOpsStartupChecks        [FATAL]
+  Step 1e  runLegacyCompatStartupChecks       [FATAL]
+  Step 1f  runHrImportRuntimeStartupChecks      [NON-FATAL — warn only]
+  Step 1g  runHrImportAutoCreateStartupChecks  [NON-FATAL — warn only]
+  Step 1h  runPlatformRuntimeStartupChecks     [NON-FATAL — warn only]
+  Step 2+  engines, seeds, workers             [mostly non-fatal]
+
+runMigrations() (artifacts/api-server/src/seed/migrate.ts):
+
+  - Uses drizzle-orm migrator against dist/drizzle/ (copied at build)
+  - Tracks applied migrations in drizzle.__drizzle_migrations
+  - Journal source: lib/db/drizzle/meta/_journal.json
+  - Last journal entry: 0029_hr_import_runtime_foundation
+  - Baseline path: if DB has tables but zero migration records, marks ALL
+    journal entries as applied WITHOUT executing SQL (push-created DB path)
+
+pm2 reload datacore:
+
+  - Restarts Node process → full init sequence re-runs
+  - Does NOT run standalone scripts/*.cjs
+  - Does NOT apply 0030/0031 unless manually executed
+
+================================================================================
+2. WHY RUNTIME BOOTS WITHOUT REQUIRED TABLES
+================================================================================
+Reason A — DUAL MIGRATION CHANNEL (primary):
+
+  | Channel              | Scope                    | Auto on boot? |
+  | -------------------- | ------------------------ | ------------- |
+  | Drizzle journal      | 0000 → 0029              | YES           |
+  | Standalone scripts   | 0030, 0030-phase5, 0031  | NO            |
+
+  Files NOT in journal:
+    - lib/db/drizzle/0030_hr_import_auto_create_phase5.sql
+    - lib/db/drizzle/0031_platform_runtime_final_phase.sql
+
+  hr_import_pilot_workspaces is created ONLY by 0030.
+
+Reason B — NON-FATAL STARTUP GUARDS (by design):
+
+  HR import Phase 5 startup (auto-create-startup.ts) detects missing tables,
+  sets schemaAvailable=false, logs warn, returns 503 on gated v2 routes.
+  Process does NOT exit. Login and legacy HR continue.
+
+Reason C — DEPLOY = CODE ONLY:
+
+  git pull + pm2 reload updates application code only.
+  No hook invokes node scripts/migrate-hr-import-auto-create-phase5.cjs.
+
+Reason D — BASELINE DRIFT RISK (secondary, existing DBs):
+
+  If database was created via drizzle-kit push or baselined with zero migration
+  history, ALL journal migrations may be marked applied without SQL execution.
+  Later journal additions (e.g. 0029) would also be skipped if baselined after
+  codebase update. Startup checks may warn but app still runs.
+
+================================================================================
+3. WHY MIGRATIONS ARE DETACHED FROM STARTUP
+================================================================================
+Historical phased rollout architecture:
+
+  - Phase 0–4: core runtime → FATAL startup checks (block boot if missing)
+  - Phase 5+ HR import enterprise → NON-FATAL guards (live-safe shadow mode)
+  - 0030/0031 added as manual pilot gates, not journal entries
+  - Explicit goal: avoid automatic DDL on live tenants during phased rollout
+
+Standalone scripts use transactional BEGIN/COMMIT separate from Drizzle
+migrator tracking. runtime_schema_registry rows record expected state but
+do NOT trigger auto-apply.
+
+validate-schema-drift.cjs checks only through 0029 — does NOT verify 0030/0031.
+
+================================================================================
+4. MIGRATION REGISTRY — PARTIAL EXISTS
+================================================================================
+Existing registries:
+
+  1. drizzle.__drizzle_migrations     — journal SQL only (→ 0029)
+  2. runtime_schema_registry          — component status (0024–0031 rows)
+  3. Startup verify*Schema functions  — per-phase table/column probes
+  4. isHrImportRuntimeSchemaAvailable — in-memory flag after startup check
+  5. isHrImportAutoCreateSchemaAvailable
+  6. isPlatformRuntimeSchemaAvailable
+
+Gap: registry records "pending" but no orchestrator reads pending and applies.
+
+================================================================================
+5. SCRIPT IDEMPOTENCY ASSESSMENT
+================================================================================
+0030 / 0031 / 0029 SQL files:
+
+  - CREATE TABLE IF NOT EXISTS          → idempotent
+  - ADD COLUMN IF NOT EXISTS            → idempotent
+  - CREATE INDEX IF NOT EXISTS          → idempotent
+  - INSERT ... ON CONFLICT DO NOTHING   → idempotent
+
+Standalone scripts (scripts/migrate-*.cjs):
+
+  - Wrap in BEGIN/COMMIT
+  - Re-running after success is safe (SQL is idempotent)
+  - Re-running mid-failure rolls back (safe)
+  - NOT tracked in drizzle.__drizzle_migrations (no double-apply protection
+    at orchestrator level — relies on SQL idempotency only)
+
+Startup-safe for auto-run? YES for 0030/0031 SQL content (additive only).
+Risk: concurrent DDL during live traffic — requires lock/ maintenance window.
+
+================================================================================
+6. ROLLBACK STRATEGY
+================================================================================
+Application rollback:
+
+  - git revert + pm2 reload → code rollback, schema unchanged
+  - HR import rollback snapshots (hr_import_rollback_snapshots) — import data
+    rollback only, NOT schema DDL rollback
+
+Schema rollback:
+
+  - No automated down-migrations for 0030/0031
+  - Manual DROP TABLE / column removal required (destructive, not recommended live)
+  - Phase architecture is forward-only additive
+
+Conclusion: rollback = code revert safe; schema revert = manual/high risk.
+
+================================================================================
+7. ENTERPRISE RUNTIME STATUS (CURRENTLY)
+================================================================================
+| Component                         | Requires   | If missing                    |
+| --------------------------------- | ---------- | ----------------------------- |
+| Legacy employee import            | core tables| Works                         |
+| HR import v2 upload/validate      | 0029       | 503 if schema guard fails     |
+| Auto-create / pilot workspaces    | 0030       | 503 + relation errors         |
+| Enterprise activation / rollout   | 0031       | Degraded / errors on activate |
+| Phase 6 preview orchestration     | 0030/0031  | Partial — safe fallbacks      |
+
+Enterprise runtime: PARTIALLY DEGRADED until 0030 + 0031 applied manually.
+
+Example error explained:
+  relation "hr_import_pilot_workspaces" does not exist
+  → 0030 never applied; code deployed ahead of schema.
+
+================================================================================
+8. AUTO-MIGRATION FEASIBILITY
+================================================================================
+Technically feasible: YES
+Architecturally prepared: PARTIALLY
+Live-safe without orchestration design: NO (not yet)
+
+Existing hooks support extension:
+  - runInitSequence step 1 already runs migrations
+  - Non-fatal pattern exists for optional phases
+  - runtime_schema_registry can drive staged apply
+  - SQL is additive + idempotent
+
+Missing pieces:
+  - 0030/0031 not in Drizzle journal
+  - No unified post-journal orchestrator
+  - validate-schema-drift stops at 0029
+  - No deploy gate in CI/CD or pm2 hook
+
+================================================================================
+9. PROPOSED AUTO-MIGRATION DESIGN (REPORT ONLY — NOT IMPLEMENTED)
+================================================================================
+Recommended model: STAGED POST-INIT ORCHESTRATOR
+
+  Phase A — Keep existing (FATAL):
+    Drizzle journal migrations 0000→0029+ (add 0030/0031 to journal OR
+    invoke equivalent SQL after migrate())
+
+  Phase B — Extension orchestrator (after db init, before accepting enterprise traffic):
+    Read runtime_schema_registry WHERE status='pending'
+    Apply matching standalone SQL if component tables missing
+  - Use advisory lock (pg_advisory_lock) to prevent concurrent DDL
+  - Log applied components; update registry status='ok'
+  - On failure: FATAL for core, WARN+503 for enterprise-only (configurable)
+
+  Phase C — Deploy gate (pre-pm2 reload):
+    node scripts/validate-schema-drift.cjs (extended to 0031)
+    Exit non-zero → block reload in automation (optional)
+
+  NOT recommended:
+    - Background async DDL during live requests
+    - Global auto-enable enterprise features on migration
+    - Destructive reconciliation migrations at boot
+
+  Best timing: AFTER db init, INSIDE runInitSequence, BEFORE route handlers
+  serve enterprise endpoints (already the init window).
+
+================================================================================
+10. IS LIVE DEPLOYMENT (git pull + pm2 reload) SAFE?
+================================================================================
+Core platform (login, HR legacy, payroll, attendance): YES — stable
+Enterprise import/export phases: NO — drift expected until manual migrations
+Overall production risk: MEDIUM (silent partial feature failure)
+
+Unsafe pattern:
+  git pull → pm2 reload → assume schema current
+
+Safer pattern (manual, no auto-fix):
+  1. git pull
+  2. pnpm --filter @workspace/api-server run build
+  3. unset DATABASE_URL (use platform.json resolver)
+  4. node scripts/validate-schema-drift.cjs (extend checks manually for now)
+  5. node scripts/migrate-hr-import-auto-create-phase5.cjs  (if 0030 pending)
+  6. node scripts/migrate-platform-runtime-final-phase.cjs  (if 0031 pending)
+  7. pm2 reload datacore
+  8. Verify startup logs / GET enterprise status endpoints
+
+================================================================================
+11. RISK ASSESSMENT
+================================================================================
+| Risk                                      | Level  | Notes                          |
+| ----------------------------------------- | ------ | ------------------------------ |
+| Core outage on deploy                     | Low    | Fatal checks protect core      |
+| Silent enterprise feature failure         | High   | Non-fatal guards allow boot    |
+| Schema/code version mismatch              | High   | 0030/0031 detached from boot   |
+| Baseline marks applied without SQL        | Medium | Legacy push-created DBs        |
+| Manual migration with wrong DATABASE_URL  | Medium | Mitigated by unified resolver  |
+| DDL lock during live traffic              | Medium | If auto-migrate without window |
+
+================================================================================
+12. SAFE RECOMMENDATION (NO IMPLEMENTATION)
+================================================================================
+Immediate (operations, read-only verification first):
+
+  1. Query information_schema for hr_import_pilot_workspaces existence
+  2. Check runtime_schema_registry for 0030/0031 status rows
+  3. Check drizzle.__drizzle_migrations for 0029 hash applied
+  4. Apply 0030 + 0031 manually in maintenance window using unified resolver
+     (unset stale DATABASE_URL; use data/.platform.json)
+
+Future architecture (when approved for implementation):
+
+  1. Add 0030 + 0031 to Drizzle journal OR single orchestrator post-runMigrations
+  2. Extend validate-schema-drift.cjs to include Phase 5/6 tables
+  3. Add optional FATAL mode for enterprise production cutover workspaces
+  4. Document deploy checklist: code + schema parity before pm2 reload
+  5. Keep enterprise activation workspace-scoped (no global auto-cutover)
+
+DO NOT auto-migrate on live VPS without:
+  - Verified backup
+  - Maintenance window or low-traffic period
+  - Confirmed DATABASE_URL resolution source
+  - Post-apply startup log verification
+
+================================================================================
+END OF REPORT — READ ONLY — NO CHANGES MADE
+================================================================================
