@@ -8,9 +8,58 @@ import {
 import {
   createUserFromEmployee,
   getEmployeeProvisionPreviewById,
+  lookupEmployeeForProvisioning,
 } from "../lib/hr/employee-user-provisioning";
 
 const router = Router();
+
+/** Static routes must be registered before /hr/employees/:id/* */
+router.get(
+  "/hr/employees/provision/lookup",
+  requireAuth,
+  requireWorkspaceAdmin,
+  async (req: AuthRequest, res): Promise<void> => {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+
+    const employeeNumber = String(req.query.employeeNumber ?? "").trim();
+    if (!employeeNumber) { res.status(400).json({ error: "employeeNumber query parameter is required" }); return; }
+
+    const preview = await lookupEmployeeForProvisioning(workspaceId, employeeNumber);
+    if (!preview) { res.status(404).json({ error: "No employee found with this employee number" }); return; }
+    res.json(preview);
+  },
+);
+
+router.post(
+  "/hr/employees/provision/account",
+  requireAuth,
+  requireWorkspaceAdmin,
+  async (req: AuthRequest, res): Promise<void> => {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+
+    const { employeeNumber, password, role, customRoleId, mustResetPassword } = req.body as Record<string, unknown>;
+
+    const result = await createUserFromEmployee({
+      workspaceId,
+      actorUserId: req.userId,
+      actorRole: req.userRole,
+      employeeNumber: employeeNumber ? String(employeeNumber) : undefined,
+      password: String(password ?? ""),
+      role: role ? String(role) : "member",
+      customRoleId: customRoleId != null ? Number(customRoleId) : null,
+      mustResetPassword: mustResetPassword === true,
+    });
+
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error, field: result.field });
+      return;
+    }
+
+    res.status(201).json(result.data);
+  },
+);
 
 function parseId(raw: string | undefined): number | null {
   const n = Number(raw);

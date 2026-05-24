@@ -197,7 +197,7 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
 
         <Tabs value={accountType} onValueChange={(v) => setAccountType(v as "employee" | "general")}>
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="employee">{isAr ? "موظف HR" : "HR employee"}</TabsTrigger>
+            <TabsTrigger value="employee">{isAr ? "موظف حالي" : "Existing employee"}</TabsTrigger>
             <TabsTrigger value="general">{isAr ? "حساب عام" : "General account"}</TabsTrigger>
           </TabsList>
 

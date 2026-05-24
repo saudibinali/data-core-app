@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiClient, useGetHrEmployee, useUpdateHrEmployee } from "@workspace/api-client-react";
 import { fetchLeaveListBridge, type NormalizedLeaveRow } from "@/lib/leave-bridge";
 import { usePermissions } from "@/hooks/use-permissions";
+import { useApiFetch } from "@/hooks/use-api-fetch";
 import { useToast } from "@/hooks/use-toast";
 import EmployeeAccountProvisionDialog from "@/components/hr/employee-account-provision-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";

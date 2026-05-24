@@ -20,6 +20,23 @@ import { cn } from "@/lib/utils";
 
 type Role = "admin" | "manager" | "member";
 
+async function readApiJson(r: Response): Promise<Record<string, unknown>> {
+  const text = await r.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    if (text.trimStart().startsWith("<!DOCTYPE") || text.trimStart().startsWith("<html")) {
+      throw new Error(
+        r.status === 404
+          ? "API route not found — rebuild api-server (pnpm --filter @workspace/api-server run build) and restart"
+          : `Server returned HTML instead of JSON (${r.status})`,
+      );
+    }
+    throw new Error(`Invalid server response (${r.status})`);
+  }
+}
+
 export interface EmployeeProvisionPreview {
   employeeId: number;
   employeeNumber: string;
@@ -86,9 +103,9 @@ export default function EmployeeAccountProvisionDialog({
     setLookupError(null);
     try {
       const r = await apiFetch(`/api/hr/employees/${id}/provision-preview`);
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Lookup failed");
-      setPreview(d);
+      const d = await readApiJson(r);
+      if (!r.ok) throw new Error(String(d.error || "Lookup failed"));
+      setPreview(d as unknown as EmployeeProvisionPreview);
     } catch (e: unknown) {
       setPreview(null);
       setLookupError(e instanceof Error ? e.message : "Lookup failed");
@@ -103,10 +120,10 @@ export default function EmployeeAccountProvisionDialog({
     setLookingUp(true);
     setLookupError(null);
     try {
-      const r = await apiFetch(`/api/admin/users/employee-provision/lookup?employeeNumber=${encodeURIComponent(num)}`);
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Employee not found");
-      setPreview(d);
+      const r = await apiFetch(`/api/hr/employees/provision/lookup?employeeNumber=${encodeURIComponent(num)}`);
+      const d = await readApiJson(r);
+      if (!r.ok) throw new Error(String(d.error || "Employee not found"));
+      setPreview(d as unknown as EmployeeProvisionPreview);
     } catch (e: unknown) {
       setPreview(null);
       setLookupError(e instanceof Error ? e.message : "Employee not found");
@@ -132,7 +149,7 @@ export default function EmployeeAccountProvisionDialog({
     try {
       const url = employeeId
         ? `/api/hr/employees/${employeeId}/provision-account`
-        : "/api/admin/users/from-employee";
+        : "/api/hr/employees/provision/account";
       const body = employeeId
         ? { password, role, customRoleId: customRoleId !== "__none__" ? Number(customRoleId) : null, mustResetPassword }
         : {
@@ -147,8 +164,8 @@ export default function EmployeeAccountProvisionDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Failed to create account");
+      const d = await readApiJson(r);
+      if (!r.ok) throw new Error(String(d.error || "Failed to create account"));
 
       toast({
         title: isAr ? "تم إنشاء الحساب وربطه بالموظف" : "Account created and linked to employee",
