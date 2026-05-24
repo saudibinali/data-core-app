@@ -5,6 +5,10 @@ import {
   linkEmployeeToUser,
   unlinkEmployeeFromUser,
 } from "../lib/hr/employee-account-service";
+import {
+  createUserFromEmployee,
+  getEmployeeProvisionPreviewById,
+} from "../lib/hr/employee-user-provisioning";
 
 const router = Router();
 
@@ -27,6 +31,57 @@ router.get(
     const status = await getEmployeeAccountStatus(workspaceId, id);
     if (!status) { res.status(404).json({ error: "Employee not found" }); return; }
     res.json(status);
+  },
+);
+
+router.get(
+  "/hr/employees/:id/provision-preview",
+  requireAuth,
+  requirePermission("hr.view"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+
+    const id = parseId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+
+    const preview = await getEmployeeProvisionPreviewById(workspaceId, id);
+    if (!preview) { res.status(404).json({ error: "Employee not found" }); return; }
+    res.json(preview);
+  },
+);
+
+router.post(
+  "/hr/employees/:id/provision-account",
+  requireAuth,
+  requireWorkspaceAdmin,
+  async (req: AuthRequest, res): Promise<void> => {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+
+    const id = parseId(req.params.id);
+    if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+
+    const { password, role, customRoleId, mustResetPassword } = req.body as Record<string, unknown>;
+
+    const result = await createUserFromEmployee({
+      workspaceId,
+      actorUserId: req.userId,
+      actorRole: req.userRole,
+      employeeId: id,
+      password: String(password ?? ""),
+      role: role ? String(role) : "member",
+      customRoleId: customRoleId != null ? Number(customRoleId) : null,
+      mustResetPassword: mustResetPassword === true,
+    });
+
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error, field: result.field });
+      return;
+    }
+
+    const status = await getEmployeeAccountStatus(workspaceId, id);
+    res.status(201).json({ user: result.data, account: status });
   },
 );
 

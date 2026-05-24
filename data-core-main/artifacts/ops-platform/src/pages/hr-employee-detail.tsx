@@ -6,7 +6,7 @@ import { apiClient, useGetHrEmployee, useUpdateHrEmployee } from "@workspace/api
 import { fetchLeaveListBridge, type NormalizedLeaveRow } from "@/lib/leave-bridge";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useToast } from "@/hooks/use-toast";
-import { useApiFetch } from "@/hooks/use-api-fetch";
+import EmployeeAccountProvisionDialog from "@/components/hr/employee-account-provision-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,7 +24,7 @@ import {
   FileText, Phone, Mail, MapPin, Calendar, Briefcase, Shield,
   Hash, History, StickyNote, Activity, GitBranch, Plane,
   FileBadge, Loader2, Plus, Trash2, CheckCircle2, XCircle,
-  Clock, AlertCircle, Link2, Unlink,
+  Clock, AlertCircle, Link2, Unlink, UserCheck,
 } from "lucide-react";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -135,6 +135,8 @@ function EmployeeAccountCard({
   const [users, setUsers] = useState<{ id: number; fullName: string; email?: string }[]>([]);
   const [pickUserId, setPickUserId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [provisionOpen, setProvisionOpen] = useState(false);
+  const [showLinkExisting, setShowLinkExisting] = useState(false);
 
   const reload = useCallback(() => {
     setLoading(true);
@@ -197,6 +199,7 @@ function EmployeeAccountCard({
   }
 
   return (
+    <>
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
@@ -227,28 +230,41 @@ function EmployeeAccountCard({
           <>
             <p className="text-sm text-muted-foreground">
               {isAr
-                ? "اربط ملف الموظف بمستخدم النظام لتفعيل الخدمة الذاتية والإجازات."
-                : "Link this employee record to a workspace user for self-service and canonical leave."}
+                ? "أنشئ حساباً جديداً يستورد بيانات الموظف من HR، أو اربط مستخدماً موجوداً."
+                : "Create a new account that imports HR data, or link an existing user."}
             </p>
             {canManage ? (
-              <div className="flex flex-wrap gap-2 items-end">
-                <div className="flex-1 min-w-[200px] space-y-1">
-                  <Label className="text-xs">{isAr ? "مستخدم" : "User"}</Label>
-                  <Select value={pickUserId} onValueChange={setPickUserId}>
-                    <SelectTrigger><SelectValue placeholder={isAr ? "اختر مستخدم" : "Select user"} /></SelectTrigger>
-                    <SelectContent>
-                      {users.map(u => (
-                        <SelectItem key={u.id} value={String(u.id)}>
-                          {u.fullName}{u.email ? ` (${u.email})` : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button size="sm" onClick={linkUser} disabled={busy || !pickUserId}>
-                  <Link2 className="w-4 h-4 mr-2" />
-                  {isAr ? "ربط" : "Link"}
+              <div className="space-y-3">
+                <Button size="sm" className="w-full sm:w-auto" onClick={() => setProvisionOpen(true)}>
+                  <UserCheck className="w-4 h-4 mr-2" />
+                  {isAr ? "إنشاء حساب للموظف" : "Create employee account"}
                 </Button>
+                <Button variant="ghost" size="sm" className="text-xs h-8 px-0" onClick={() => setShowLinkExisting(v => !v)}>
+                  {showLinkExisting
+                    ? (isAr ? "إخفاء ربط مستخدم موجود" : "Hide link existing user")
+                    : (isAr ? "ربط مستخدم موجود" : "Link existing user")}
+                </Button>
+                {showLinkExisting && (
+                  <div className="flex flex-wrap gap-2 items-end pt-1 border-t">
+                    <div className="flex-1 min-w-[200px] space-y-1">
+                      <Label className="text-xs">{isAr ? "مستخدم موجود" : "Existing user"}</Label>
+                      <Select value={pickUserId} onValueChange={setPickUserId}>
+                        <SelectTrigger><SelectValue placeholder={isAr ? "اختر مستخدم" : "Select user"} /></SelectTrigger>
+                        <SelectContent>
+                          {users.map(u => (
+                            <SelectItem key={u.id} value={String(u.id)}>
+                              {u.fullName}{u.email ? ` (${u.email})` : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={linkUser} disabled={busy || !pickUserId}>
+                      <Link2 className="w-4 h-4 mr-2" />
+                      {isAr ? "ربط" : "Link"}
+                    </Button>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">{isAr ? "غير مرتبط" : "Not linked"}</p>
@@ -257,6 +273,16 @@ function EmployeeAccountCard({
         )}
       </CardContent>
     </Card>
+    {canManage && (
+      <EmployeeAccountProvisionDialog
+        open={provisionOpen}
+        onClose={() => setProvisionOpen(false)}
+        isAr={isAr}
+        employeeId={employeeId}
+        onSuccess={reload}
+      />
+    )}
+    </>
   );
 }
 
