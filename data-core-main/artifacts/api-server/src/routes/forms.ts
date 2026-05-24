@@ -21,6 +21,15 @@ import {
 import { appEventBus } from "../lib/events/app-bus";
 import { EVENT_TYPES } from "@workspace/core-events";
 import { sendSubmissionConfirmation } from "../lib/email.js";
+import {
+  buildFormWorkflowEvent,
+  buildPermissionsPayload,
+  evaluateFormAudience,
+  loadAudienceContext,
+  upsertFormWorkflow,
+  type FormAudienceConfig,
+  type FormWorkflowPlan,
+} from "../lib/forms/form-smart-config.js";
 
 const router: IRouter = Router();
 
@@ -82,17 +91,20 @@ router.get("/self-service/forms", requireAuth, async (req: AuthRequest, res): Pr
     ))
     .orderBy(asc(formDefinitionsTable.module), asc(formDefinitionsTable.name));
 
-  // Filter by visibleTo - same logic as /self-service/services
   const userRole = req.userRole ?? "member";
-  const filtered = rows.filter((form) => {
-    const perms = form.permissions as Record<string, unknown> | null;
-    const visibleTo = (perms?.visibleTo as string | undefined) ?? "all";
-    if (visibleTo === "all")           return true;
-    if (visibleTo === "member")        return true;
-    if (visibleTo === "manager_above") return ["manager", "admin", "super_admin"].includes(userRole);
-    if (visibleTo === "admin_only")    return ["admin", "super_admin"].includes(userRole);
-    return true;
-  });
+  const [userRow] = req.userId
+    ? await db.select({ departmentId: usersTable.departmentId })
+        .from(usersTable)
+        .where(eq(usersTable.id, req.userId))
+        .limit(1)
+    : [];
+  const audienceCtx = req.userId
+    ? await loadAudienceContext(req.workspaceId, req.userId, userRole, userRow?.departmentId)
+    : null;
+
+  const filtered = audienceCtx
+    ? rows.filter((form) => evaluateFormAudience(audienceCtx, form.permissions as Record<string, unknown> | null))
+  : rows;
 
   res.json(filtered);
 });
@@ -162,30 +174,76 @@ router.get("/forms", requireAuth, async (req: AuthRequest, res): Promise<void> =
 router.post("/forms", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId || !req.userId) { res.status(403).json({ error: "No workspace" }); return; }
 
-  const { name, nameAr, description, descriptionAr, module: mod, category, status, workflowEvent, showInSelfService, permissions, settings } = req.body as Record<string, unknown>;
+  const body = req.body as Record<string, unknown>;
+  const {
+    name, nameAr, description, descriptionAr, module: mod, category, status,
+    workflowEvent, showInSelfService, permissions, settings, audience, workflowPlan,
+  } = body;
 
   if (!name || !mod) { res.status(400).json({ error: "name and module are required" }); return; }
+
+  const modStr = String(mod);
+  const nameStr = String(name);
+  const autoEvent = buildFormWorkflowEvent(modStr, nameStr);
+  const resolvedEvent = workflowEvent ? String(workflowEvent) : autoEvent;
+
+  const audienceCfg = (audience ?? permissions) as FormAudienceConfig | Record<string, unknown> | undefined;
+  const permsPayload = audienceCfg && typeof audienceCfg === "object" && "mode" in audienceCfg
+    ? buildPermissionsPayload(audienceCfg as FormAudienceConfig)
+    : (permissions as Record<string, unknown> | null) ?? null;
+
+  const wfPlan = workflowPlan as FormWorkflowPlan | undefined;
+  const baseSettings = (settings as Record<string, unknown> | null) ?? {};
 
   const [form] = await db
     .insert(formDefinitionsTable)
     .values({
       workspaceId:      req.workspaceId,
-      name:             String(name),
+      name:             nameStr,
       nameAr:           nameAr ? String(nameAr) : null,
       description:      description ? String(description) : null,
       descriptionAr:    descriptionAr ? String(descriptionAr) : null,
-      module:           String(mod),
+      module:           modStr,
       category:         category ? String(category) : null,
       status:           status ? String(status) : "active",
-      workflowEvent:    workflowEvent ? String(workflowEvent) : null,
+      workflowEvent:    resolvedEvent,
       showInSelfService: showInSelfService === true,
-      permissions:      permissions ?? null,
-      settings:         settings ?? null,
+      permissions:      permsPayload,
+      settings:         null,
       createdByUserId:  req.userId,
     })
     .returning();
 
-  res.status(201).json({ ...form, submissionCount: 0, fieldCount: 0 });
+  if (!form) { res.status(500).json({ error: "Failed to create form" }); return; }
+
+  let workflowId: number | null = null;
+  if (wfPlan?.enabled) {
+    workflowId = await upsertFormWorkflow(
+      req.workspaceId, form.id, nameStr,
+      nameAr ? String(nameAr) : null,
+      modStr, resolvedEvent, wfPlan, req.userId,
+    );
+  }
+
+  const finalSettings = {
+    ...baseSettings,
+    ...(wfPlan ? { workflowPlan: wfPlan } : {}),
+    ...(workflowId ? { workflowId } : {}),
+  };
+
+  if (Object.keys(finalSettings).length > 0) {
+    await db.update(formDefinitionsTable)
+      .set({ settings: finalSettings })
+      .where(eq(formDefinitionsTable.id, form.id));
+  }
+
+  res.status(201).json({
+    ...form,
+    settings: Object.keys(finalSettings).length ? finalSettings : form.settings,
+    workflowEvent: resolvedEvent,
+    submissionCount: 0,
+    fieldCount: 0,
+  });
 });
 
 // ── GET /forms/:id ────────────────────────────────────────────────────────────
@@ -225,7 +283,17 @@ router.patch("/forms/:id", requireAuth, requireWorkspaceAdmin, async (req: AuthR
   const id = parseId(req.params["id"]);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
 
-  const { name, nameAr, description, descriptionAr, module: mod, category, status, workflowEvent, showInSelfService, permissions, settings } = req.body as Record<string, unknown>;
+  const body = req.body as Record<string, unknown>;
+  const {
+    name, nameAr, description, descriptionAr, module: mod, category, status,
+    workflowEvent, showInSelfService, permissions, settings, audience, workflowPlan,
+  } = body;
+
+  const [existing] = await db.select()
+    .from(formDefinitionsTable)
+    .where(and(eq(formDefinitionsTable.id, id), eq(formDefinitionsTable.workspaceId, req.workspaceId)));
+
+  if (!existing) { res.status(404).json({ error: "Form not found" }); return; }
 
   const updates: Partial<typeof formDefinitionsTable.$inferInsert> = {};
   if (name              !== undefined) updates.name              = String(name);
@@ -235,10 +303,46 @@ router.patch("/forms/:id", requireAuth, requireWorkspaceAdmin, async (req: AuthR
   if (mod               !== undefined) updates.module            = String(mod);
   if (category          !== undefined) updates.category          = category ? String(category) : null;
   if (status            !== undefined) updates.status            = String(status);
-  if (workflowEvent     !== undefined) updates.workflowEvent     = workflowEvent ? String(workflowEvent) : null;
   if (showInSelfService !== undefined) updates.showInSelfService = showInSelfService === true;
-  if (permissions       !== undefined) updates.permissions       = permissions as Record<string, unknown>;
-  if (settings          !== undefined) updates.settings          = settings as Record<string, unknown>;
+
+  if (audience !== undefined) {
+    updates.permissions = buildPermissionsPayload(audience as FormAudienceConfig);
+  } else if (permissions !== undefined) {
+    updates.permissions = permissions as Record<string, unknown>;
+  }
+
+  const resolvedName = updates.name ?? existing.name;
+  const resolvedModule = updates.module ?? existing.module;
+  if (workflowEvent !== undefined) {
+    updates.workflowEvent = workflowEvent ? String(workflowEvent) : null;
+  } else if (name !== undefined || mod !== undefined) {
+    updates.workflowEvent = buildFormWorkflowEvent(resolvedModule, resolvedName);
+  }
+
+  const existingSettings = (existing.settings as Record<string, unknown> | null) ?? {};
+  const wfPlan = workflowPlan as FormWorkflowPlan | undefined;
+  let nextSettings: Record<string, unknown> = settings !== undefined
+    ? (settings as Record<string, unknown>)
+    : { ...existingSettings };
+
+  if (wfPlan !== undefined) {
+    const trigger = (updates.workflowEvent ?? existing.workflowEvent)
+      ?? buildFormWorkflowEvent(resolvedModule, resolvedName);
+    const existingWfId = (existingSettings.workflowId as number | undefined) ?? null;
+    const workflowId = wfPlan.enabled
+      ? await upsertFormWorkflow(
+          req.workspaceId, id, resolvedName,
+          (updates.nameAr ?? existing.nameAr) as string | null,
+          resolvedModule, trigger, wfPlan, req.userId ?? null, existingWfId,
+        )
+      : existingWfId;
+    nextSettings = { ...nextSettings, workflowPlan: wfPlan, ...(workflowId ? { workflowId } : {}) };
+    updates.settings = nextSettings;
+  } else if (settings !== undefined) {
+    updates.settings = nextSettings;
+  }
+
+  if (!Object.keys(updates).length) { res.status(400).json({ error: "No fields" }); return; }
 
   const [updated] = await db
     .update(formDefinitionsTable)
@@ -404,6 +508,19 @@ router.post("/forms/:id/submissions", requireAuth, async (req: AuthRequest, res)
     .from(formDefinitionsTable)
     .where(and(eq(formDefinitionsTable.id, formId), eq(formDefinitionsTable.workspaceId, req.workspaceId)));
   if (!form || form.status === "archived") { res.status(404).json({ error: "Form not found or archived" }); return; }
+
+  // Audience gate for self-service submissions
+  if (form.showInSelfService) {
+    const [userRow] = await db.select({ departmentId: usersTable.departmentId })
+      .from(usersTable).where(eq(usersTable.id, req.userId)).limit(1);
+    const audienceCtx = await loadAudienceContext(
+      req.workspaceId, req.userId, req.userRole ?? "member", userRow?.departmentId,
+    );
+    if (!evaluateFormAudience(audienceCtx, form.permissions as Record<string, unknown> | null)) {
+      res.status(403).json({ error: "You are not allowed to submit this form" });
+      return;
+    }
+  }
 
   const { data, status: submitStatus } = req.body as { data?: Record<string, unknown>; status?: string };
   if (!data || typeof data !== "object") { res.status(400).json({ error: "data object is required" }); return; }

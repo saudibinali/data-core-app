@@ -35,6 +35,13 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
+import FormAudienceBuilder from "@/components/forms/form-audience-builder";
+import FormWorkflowBuilder from "@/components/forms/form-workflow-builder";
+import {
+  FORM_CATEGORIES, DEFAULT_AUDIENCE, DEFAULT_WORKFLOW_PLAN,
+  buildFormWorkflowEventPreview,
+  type FormAudienceConfig, type FormWorkflowPlan,
+} from "@/lib/form-smart-types";
 import { formatDistanceToNow } from "date-fns";
 
 // ── Icon map for data source categories ───────────────────────────────────────
@@ -286,10 +293,11 @@ export default function AdminFormsDetailPage() {
   const [editDescriptionAr, setEditDescriptionAr] = useState("");
   const [editModule,        setEditModule]        = useState("");
   const [editCategory,      setEditCategory]      = useState("");
+  const [editCustomCategory, setEditCustomCategory] = useState("");
   const [editStatus,        setEditStatus]        = useState("");
-  const [editWfEvent,       setEditWfEvent]       = useState("");
   const [editSelfService,   setEditSelfService]   = useState(false);
-  const [editVisibleTo,     setEditVisibleTo]     = useState("all");
+  const [editAudience,      setEditAudience]      = useState<FormAudienceConfig>(DEFAULT_AUDIENCE);
+  const [editWorkflowPlan,  setEditWorkflowPlan]  = useState<FormWorkflowPlan>(DEFAULT_WORKFLOW_PLAN);
 
   // Group data sources by category
   const dsCategories = dataSources.reduce<Record<string, typeof dataSources>>((acc, ds) => {
@@ -303,15 +311,29 @@ export default function AdminFormsDetailPage() {
     setEditDescription(form?.description ?? "");
     setEditDescriptionAr(form?.descriptionAr ?? "");
     setEditModule(form?.module ?? "");
-    setEditCategory(form?.category ?? "");
+    const cat = form?.category ?? "general";
+    const known = FORM_CATEGORIES.some((c) => c.value === cat);
+    setEditCategory(known ? cat : "other");
+    setEditCustomCategory(known ? "" : cat);
     setEditStatus(form?.status ?? "draft");
-    setEditWfEvent(form?.workflowEvent ?? "");
     setEditSelfService(form?.showInSelfService ?? false);
-    setEditVisibleTo((form?.permissions as Record<string, unknown> | null)?.visibleTo as string ?? "all");
+    const perms = form?.permissions as Record<string, unknown> | null;
+    const aud = perms?.audience as FormAudienceConfig | undefined;
+    if (aud) {
+      setEditAudience({ ...aud, visibleTo: (perms?.visibleTo as FormAudienceConfig["visibleTo"]) ?? aud.visibleTo });
+    } else {
+      setEditAudience({
+        mode: (perms?.visibleTo as string) === "all" ? "all" : "preset",
+        visibleTo: (perms?.visibleTo as FormAudienceConfig["visibleTo"]) ?? "all",
+      });
+    }
+    const settings = form?.settings as Record<string, unknown> | null;
+    setEditWorkflowPlan((settings?.workflowPlan as FormWorkflowPlan) ?? DEFAULT_WORKFLOW_PLAN);
     setEditingSettings(true);
   }
 
   function saveSettings() {
+    const resolvedCategory = editCategory === "other" ? (editCustomCategory.trim() || "other") : editCategory;
     updateForm.mutate(
       {
         id: formId,
@@ -321,12 +343,12 @@ export default function AdminFormsDetailPage() {
           description:   editDescription   || undefined,
           descriptionAr: editDescriptionAr || undefined,
           module:        editModule   || undefined,
-          category:      editCategory || undefined,
+          category:      resolvedCategory || undefined,
           status:           editStatus as "draft" | "active" | "archived",
-          workflowEvent:    editWfEvent  || undefined,
           showInSelfService: editSelfService,
-          permissions: { visibleTo: editVisibleTo } as Record<string, unknown>,
-        },
+          audience: editAudience,
+          workflowPlan: editWorkflowPlan,
+        } as Record<string, unknown>,
       },
       {
         onSuccess: () => {
@@ -1013,7 +1035,7 @@ export default function AdminFormsDetailPage() {
 
       {/* ── Edit Settings Dialog ────────────────────────────────────────── */}
       <Dialog open={editingSettings} onOpenChange={setEditingSettings}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="w-4 h-4" />
@@ -1088,11 +1110,22 @@ export default function AdminFormsDetailPage() {
               </div>
               <div className="space-y-1.5">
                 <Label>{isAr ? "الفئة" : "Category"}</Label>
-                <Input
-                  value={editCategory}
-                  onChange={(e) => setEditCategory(e.target.value)}
-                  placeholder={isAr ? "مثال: إجازات" : "e.g. leave"}
-                />
+                <Select value={editCategory} onValueChange={setEditCategory}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {FORM_CATEGORIES.map((c) => (
+                      <SelectItem key={c.value} value={c.value}>{isAr ? c.labelAr : c.labelEn}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {editCategory === "other" && (
+                  <Input
+                    value={editCustomCategory}
+                    onChange={(e) => setEditCustomCategory(e.target.value)}
+                    placeholder={isAr ? "فئة مخصصة" : "Custom category"}
+                    className="mt-2"
+                  />
+                )}
               </div>
             </div>
 
@@ -1124,23 +1157,6 @@ export default function AdminFormsDetailPage() {
               </div>
             </div>
 
-            {/* Workflow event */}
-            <div className="space-y-1.5">
-              <Label className="flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-primary/70" />
-                {isAr ? "حدث سير العمل" : "Workflow Event"}
-              </Label>
-              <Input
-                value={editWfEvent}
-                onChange={(e) => setEditWfEvent(e.target.value)}
-                placeholder="e.g. leave.requested"
-                className="font-mono text-sm"
-              />
-              <p className="text-xs text-muted-foreground">
-                {isAr ? "يُستخدم لربط النموذج بسير عمل آلي" : "Used to trigger an automated workflow on submission"}
-              </p>
-            </div>
-
             {/* Self-Service Portal toggle */}
             <div className="flex items-center justify-between rounded-lg border p-4 bg-muted/30">
               <div className="flex items-center gap-3">
@@ -1157,26 +1173,21 @@ export default function AdminFormsDetailPage() {
               <Switch checked={editSelfService} onCheckedChange={setEditSelfService} />
             </div>
 
-            {/* Visibility control */}
-            {editSelfService && (
-              <div className="space-y-1.5">
-                <Label>{isAr ? "مرئي في الخدمات الذاتية لـ" : "Visible in Self-Service to"}</Label>
-                <Select value={editVisibleTo} onValueChange={setEditVisibleTo}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">{isAr ? "الجميع" : "Everyone"}</SelectItem>
-                    <SelectItem value="member">{isAr ? "الموظفون فقط" : "Employees only"}</SelectItem>
-                    <SelectItem value="manager_above">{isAr ? "المدراء فما فوق" : "Managers & above"}</SelectItem>
-                    <SelectItem value="admin_only">{isAr ? "المشرفون فقط" : "Admins only"}</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {isAr ? "يُحدّد من يمكنه رؤية هذا النموذج في بوابة الخدمات الذاتية" : "Controls who can see this form in the self-service portal"}
-                </p>
-              </div>
-            )}
+            <div className="space-y-2">
+              <Label>{isAr ? "من يمكنه الوصول؟" : "Who can access?"}</Label>
+              <FormAudienceBuilder value={editAudience} onChange={setEditAudience} isAr={isAr} showInSelfService={editSelfService} />
+            </div>
+
+            <div className="space-y-2">
+              <Label>{isAr ? "مسار الموافقة" : "Approval workflow"}</Label>
+              <FormWorkflowBuilder
+                value={editWorkflowPlan}
+                onChange={setEditWorkflowPlan}
+                isAr={isAr}
+                formName={editName || form.name}
+                autoEvent={buildFormWorkflowEventPreview(editModule || form.module, editName || form.name)}
+              />
+            </div>
           </div>
 
           <DialogFooter className="gap-2">
