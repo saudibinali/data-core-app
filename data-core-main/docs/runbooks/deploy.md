@@ -41,7 +41,7 @@ cp .env.example .env
 # نسخة احتياطية (إن DB موجودة)
 DATABASE_URL=postgresql://... pnpm run db:backup
 
-# migrations additive
+# migrations additive (includes 0037 hot-path indexes)
 DATABASE_URL=postgresql://... pnpm run db:migrate
 
 # بناء وتشغيل

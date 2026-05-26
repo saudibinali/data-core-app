@@ -17,3 +17,11 @@
 - `GET /api/health/sse-connections` — SSE connection counts (super_admin).
 
 See [../runbooks/deploy.md](../runbooks/deploy.md) for pre/post deploy checks.
+
+## Alerting
+
+Operational thresholds: [alerting-rules.md](./alerting-rules.md).
+
+## Error tracking (optional)
+
+Set `SENTRY_DSN` in production and initialize your APM SDK in the API process entrypoint when you adopt Sentry or OpenTelemetry (F8.3). Until then, unhandled errors are logged with `reqId` via the global Express error handler.

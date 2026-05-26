@@ -11,6 +11,7 @@ import {
   CheckCircle2, BriefcaseBusiness, Layers, DollarSign, Clock, CalendarDays,
   Activity, Scale, ShieldCheck, ConciergeBell, Plug,
 } from "lucide-react";
+import { PlatformHealthCard } from "@/components/hr/platform-health-card";
 
 const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
   full_time: "Full-time",
@@ -126,6 +127,8 @@ export default function HrDashboardPage() {
           </Link>
         </div>
       </div>
+
+      {isAdmin && <PlatformHealthCard isAr={isAr} />}
 
       {/* Quick nav links */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

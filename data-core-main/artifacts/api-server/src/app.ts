@@ -40,4 +40,14 @@ app.use(express.urlencoded({ extended: true, limit: UPLOAD_LIMITS.jsonBodyBytes 
 
 app.use("/api", router);
 
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error(
+    { err, reqId: req.id, method: req.method, url: req.url?.split("?")[0] },
+    "Unhandled route error",
+  );
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Internal server error", code: "INTERNAL_ERROR" });
+  }
+});
+
 export default app;
