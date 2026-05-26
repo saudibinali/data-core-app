@@ -7,7 +7,7 @@ export type PayrollExportDownloadPayload = {
   workspaceId: number;
   userId: number;
   runId: number;
-  exportType: "gl_journal" | "cost_center" | "bank_metadata";
+  exportType: "gl_journal" | "cost_center" | "bank_metadata" | "bank_wps";
 };
 
 export function issuePayrollExportDownloadToken(
@@ -41,7 +41,7 @@ export function verifyPayrollExportDownloadToken(
       return null;
     }
     const exportType = decoded.exportType as PayrollExportDownloadPayload["exportType"];
-    if (!["gl_journal", "cost_center", "bank_metadata"].includes(exportType)) return null;
+    if (!["gl_journal", "cost_center", "bank_metadata", "bank_wps"].includes(exportType)) return null;
     return {
       workspaceId: decoded.workspaceId,
       userId: decoded.userId,

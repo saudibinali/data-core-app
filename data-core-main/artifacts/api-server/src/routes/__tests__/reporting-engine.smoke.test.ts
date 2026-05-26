@@ -24,8 +24,9 @@ import { processExportJobBatch, resetStuckExportJobs } from "../../lib/reports/e
 import { reportService } from "../../lib/reports/report-service";
 import { verifyReportDownloadToken } from "../../lib/reports/report-download-token";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_P19D_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_P19D_SMOKE !== "0";
 
 vi.mock("../../lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

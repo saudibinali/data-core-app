@@ -11,6 +11,10 @@ import {
   validateDateField,
   validateEmailField,
 } from "../validation/import-validation-foundation";
+import {
+  validateEmployeeRowCanonical,
+  type CanonicalImportModes,
+} from "./canonical-import-gates";
 
 export type HrImportValidatorContext = {
   workspaceId: number;
@@ -18,6 +22,7 @@ export type HrImportValidatorContext = {
   numberingMode: string;
   employmentTypes?: Awaited<ReturnType<typeof loadDynamicEmploymentTypes>>;
   employeeStatuses?: Awaited<ReturnType<typeof loadDynamicEmployeeStatuses>>;
+  canonicalModes?: CanonicalImportModes;
 };
 
 export type HrImportRowValidation = {
@@ -92,6 +97,12 @@ export class HrImportValidator {
       if (val && !isValidCustomFieldDropdownValue(cf, val)) {
         warnings.push(`custom field "${cf.fieldName}" value "${val}" not in dropdown options`);
       }
+    }
+
+    if (ctx.canonicalModes) {
+      const canon = validateEmployeeRowCanonical(row, ctx.canonicalModes);
+      errors.push(...canon.errors);
+      warnings.push(...canon.warnings);
     }
 
     return {

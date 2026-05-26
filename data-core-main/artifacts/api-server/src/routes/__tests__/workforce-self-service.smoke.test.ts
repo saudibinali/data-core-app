@@ -10,8 +10,9 @@ import { db, pool, initializeDatabase, workspacesTable, employeesTable } from "@
 import { haversineMeters } from "../../lib/workforce-attendance/geofence-validation-service";
 import { DEFAULT_ATTENDANCE_POLICY } from "../../lib/workforce-attendance/policy-types";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_WORKFORCE_SELF_SERVICE_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_WORKFORCE_SELF_SERVICE_SMOKE !== "0";
 
 describe("P20-D geofence unit", () => {
   it("haversine distance is zero for same point", () => {

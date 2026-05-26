@@ -1,5 +1,11 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
-import { setAuthTokenGetter } from "@workspace/api-client-react";
+import {
+  authLogin,
+  authLogout,
+  getAuthMe,
+  setAuthTokenGetter,
+  type AuthSessionUser,
+} from "@workspace/api-client-react";
 import { queryClient } from "./queryClient";
 
 const TOKEN_KEY = "ops_access_token";
@@ -14,25 +20,7 @@ function clearToken(): void {
   try { localStorage.removeItem(TOKEN_KEY); } catch {}
 }
 
-export interface AuthUser {
-  id: number;
-  fullName: string;
-  email: string | null;
-  firstName: string | null;
-  lastName: string | null;
-  employeeNumber: string | null;
-  position: string | null;
-  avatarUrl: string | null;
-  phoneNumber: string | null;
-  languagePreference: string | null;
-  workspaceId: number | null;
-  departmentId: number | null;
-  role: string;
-  status: string;
-  mustResetPassword: boolean;
-  platformRoleCode?: string | null;
-  isRootOwner?: boolean;
-}
+export type AuthUser = AuthSessionUser;
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -54,11 +42,8 @@ const AuthContext = createContext<AuthContextValue>({
 
 async function fetchMe(token: string): Promise<AuthUser | null> {
   try {
-    const r = await fetch("/api/auth/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!r.ok) return null;
-    return r.json() as Promise<AuthUser>;
+    setAuthTokenGetter(() => token);
+    return await getAuthMe();
   } catch {
     return null;
   }
@@ -96,20 +81,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   async function signIn(employeeNumber: string, password: string): Promise<AuthUser> {
-    const r = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ employeeNumber, password }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error((err as any).error ?? "Invalid credentials");
+    try {
+      const { accessToken, user: userData } = await authLogin({ employeeNumber, password });
+      storeToken(accessToken);
+      applyToken(accessToken);
+      setUser(userData);
+      return userData;
+    } catch (err: unknown) {
+      const message =
+        err && typeof err === "object" && "data" in err
+          ? String((err as { data?: { error?: string } }).data?.error ?? "Invalid credentials")
+          : err instanceof Error
+            ? err.message
+            : "Invalid credentials";
+      throw new Error(message);
     }
-    const { accessToken, user: userData } = (await r.json()) as { accessToken: string; user: AuthUser };
-    storeToken(accessToken);
-    applyToken(accessToken);
-    setUser(userData);
-    return userData;
   }
 
   function signOut() {
@@ -117,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     applyToken(null);
     setUser(null);
     queryClient.clear();
-    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    void authLogout().catch(() => undefined);
   }
 
   async function refreshUser() {

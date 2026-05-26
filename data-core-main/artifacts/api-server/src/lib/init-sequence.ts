@@ -29,6 +29,7 @@ import { runHrImportRuntimeStartupChecks } from "./hr-import/hr-import-startup";
 import { runHrImportAutoCreateStartupChecks } from "./hr-import/health/auto-create-startup";
 import { runPlatformRuntimeStartupChecks } from "./hr-import/health/platform-runtime-startup";
 import { pool } from "@workspace/db";
+import { startCorsOriginRefresh } from "./cors-settings";
 
 export async function runInitSequence(): Promise<void> {
   // 1. Apply pending migrations
@@ -38,6 +39,8 @@ export async function runInitSequence(): Promise<void> {
     logger.error({ err }, "Database migration failed");
     throw err; // surface to caller so wizard can report the failure
   }
+
+  startCorsOriginRefresh();
 
   // 1b. Org runtime schema verification + idempotent backfill (Phase 2)
   try {
@@ -155,6 +158,14 @@ export async function runInitSequence(): Promise<void> {
     logger.warn({ err }, "Scheduled report scheduler failed to start");
   }
 
+  // F2.7: Weekly platform access review (stale permissions report)
+  try {
+    const { startPlatformAccessReviewScheduler } = await import("./platform-access-review-scheduler");
+    startPlatformAccessReviewScheduler();
+  } catch (err) {
+    logger.warn({ err }, "Platform access review scheduler failed to start");
+  }
+
   // 8. P20-B: Default attendance sources per workspace
   try {
     await seedAllWorkspaceAttendanceSources();
@@ -178,6 +189,14 @@ export async function runInitSequence(): Promise<void> {
     startAttendanceSyncWorker();
   } catch (err) {
     logger.warn({ err }, "Attendance sync worker failed to start");
+  }
+
+  // 10b. F7.2: transactional event outbox drain (optional)
+  try {
+    const { startEventOutboxWorker } = await import("./events/outbox-worker");
+    startEventOutboxWorker();
+  } catch (err) {
+    logger.warn({ err }, "Event outbox worker failed to start");
   }
 
   // 11. P21-B: Default payroll policies per workspace

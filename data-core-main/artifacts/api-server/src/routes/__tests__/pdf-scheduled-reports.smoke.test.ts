@@ -28,8 +28,9 @@ import { verifyReportDownloadToken, issueReportDownloadToken } from "../../lib/r
 import { reportService } from "../../lib/reports/report-service";
 import { readReportArtifact } from "../../lib/reports/report-artifact-storage";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_P19E_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_P19E_SMOKE !== "0";
 
 vi.mock("../../lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

@@ -8,11 +8,18 @@ import bcrypt from "bcryptjs";
 import { db, usersTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { type AuthRequest, requireAuth, requireWorkspaceAdmin } from "../middlewares/requireAuth";
+import { requireAdminProvisionRateLimit } from "../lib/admin-provision-rate-limit";
+import {
+  AdminCreateGeneralUserBody,
+  AdminCreateUserFromEmployeeBody,
+  formatZodError,
+} from "../lib/security-validation";
 import {
   createGeneralUser,
   createUserFromEmployee,
   lookupEmployeeForProvisioning,
 } from "../lib/hr/employee-user-provisioning";
+import { readProvisionIdempotencyKey } from "../lib/hr/provision-http";
 
 const router: IRouter = Router();
 
@@ -28,21 +35,28 @@ router.get("/admin/users/employee-provision/lookup", requireAuth, requireWorkspa
   res.json(preview);
 });
 
-router.post("/admin/users/from-employee", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
+router.post("/admin/users/from-employee", requireAuth, requireWorkspaceAdmin, requireAdminProvisionRateLimit, async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.status(400).json({ error: "No workspace assigned" }); return; }
 
-  const { employeeNumber, employeeId, password, role, customRoleId, mustResetPassword } = req.body as Record<string, unknown>;
+  const parsed = AdminCreateUserFromEmployeeBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: formatZodError(parsed.error) });
+    return;
+  }
+
+  const { employeeNumber, employeeId, password, role, customRoleId, mustResetPassword } = parsed.data;
 
   const result = await createUserFromEmployee({
     workspaceId: req.workspaceId,
     actorUserId: req.userId,
     actorRole: req.userRole,
-    employeeId: employeeId ? Number(employeeId) : undefined,
-    employeeNumber: employeeNumber ? String(employeeNumber) : undefined,
-    password: String(password ?? ""),
-    role: role ? String(role) : "member",
-    customRoleId: customRoleId != null ? Number(customRoleId) : null,
-    mustResetPassword: mustResetPassword === true,
+    employeeId: employeeId,
+    employeeNumber: employeeNumber,
+    password,
+    role,
+    customRoleId: customRoleId ?? null,
+    mustResetPassword,
+    idempotencyKey: readProvisionIdempotencyKey(req),
   });
 
   if (!result.ok) {
@@ -53,14 +67,20 @@ router.post("/admin/users/from-employee", requireAuth, requireWorkspaceAdmin, as
   res.status(201).json(result.data);
 });
 
-router.post("/admin/users", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
+router.post("/admin/users", requireAuth, requireWorkspaceAdmin, requireAdminProvisionRateLimit, async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.status(400).json({ error: "No workspace assigned" }); return; }
 
+  const parsed = AdminCreateGeneralUserBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: formatZodError(parsed.error) });
+    return;
+  }
+
   const {
-    firstName, lastName, email, password, role = "member",
-    departmentIds, position, mustResetPassword = false, customRoleId = null,
+    firstName, lastName, email, password, role,
+    departmentIds, position, mustResetPassword, customRoleId,
     accountType,
-  } = req.body as Record<string, unknown>;
+  } = parsed.data;
 
   if (accountType === "employee") {
     res.status(400).json({
@@ -74,15 +94,16 @@ router.post("/admin/users", requireAuth, requireWorkspaceAdmin, async (req: Auth
     workspaceId: req.workspaceId,
     actorUserId: req.userId,
     actorRole: req.userRole,
-    firstName: String(firstName ?? ""),
-    lastName: String(lastName ?? ""),
-    email: email ? String(email) : null,
-    password: String(password ?? ""),
-    role: String(role),
-    customRoleId: customRoleId != null ? Number(customRoleId) : null,
-    position: position ? String(position) : null,
-    departmentIds: Array.isArray(departmentIds) ? departmentIds.map(Number) : [],
-    mustResetPassword: mustResetPassword === true,
+    firstName,
+    lastName,
+    email: email && email !== "" ? email : null,
+    password,
+    role,
+    customRoleId: customRoleId ?? null,
+    position: position ?? null,
+    departmentIds,
+    mustResetPassword,
+    idempotencyKey: readProvisionIdempotencyKey(req),
   });
 
   if (!result.ok) {

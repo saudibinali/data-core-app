@@ -16,8 +16,9 @@ import {
   resolveSourceConflict,
 } from "../../lib/workforce-attendance/import/normalization-rules";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_WORKFORCE_IMPORT_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_WORKFORCE_IMPORT_SMOKE !== "0";
 
 describe.skipIf(!RUN)("P20-C attendance import smoke", () => {
   let workspaceId: number;

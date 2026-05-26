@@ -9,9 +9,9 @@ import {
 } from "../../platform-permissions";
 
 describe("P23-A module governance dependencies", () => {
-  it("declares payroll and finance dependent on hr", () => {
+  it("declares payroll dependent on hr (HCM nucleus)", () => {
     expect(MODULE_DEPENDENCIES.payroll).toContain("hr");
-    expect(MODULE_DEPENDENCIES.finance).toContain("hr");
+    expect(MODULE_DEPENDENCIES.finance).toBeUndefined();
   });
 
   it("exposes moduleGovernanceService singleton", () => {

@@ -1,0 +1,985 @@
+================================================================================
+           الترقية والاصلاحات 1 — خطة ترقية منصة Data Core إلى Enterprise
+     خطة تنفيذية مرحلية بدون تعطيل — مبنية على «تقرير الهندسة البرمجية 1»
+                    (تقرير تخطيط فقط — بدون تنفيذ تعديلات)
+================================================================================
+تاريخ الإعداد: 2026-05-20
+المرجع الأساسي: تقرير الهندسة البرمجية 1.txt
+الجمهور: Product، Engineering، DevOps، Security، HR Operations
+الهدف: منصة أعمال احترافية قابلة للتوسع — معايير عالمية (ISO 27001 مبادئ،
+        SOC 2 Type II readiness، ITIL service ops، HCM best practices)
+
+================================================================================
+0. مبادئ الترقية بدون انهيار (Non-Disruptive Upgrade Principles)
+================================================================================
+
+يجب أن يلتزم كل فيز بهذه القواعد لضمان سير العمل الحالي:
+
+  1. **Expand → Migrate → Contract**
+     • أضف المسار/الجدول/الحقل الجديد أولاً
+     • انقل البيانات/الحركة تدريجياً
+     • أزل القديم فقط بعد cutover flag + فترة مراقبة
+
+  2. **Backward-compatible API**
+     • لا تغيّر response shape لمسارات production دون versioning
+     • مسارات جديدة تحت /api/v2 أو feature flag — القديم يبقى حتى deprecation
+
+  3. **Feature flags / cutover flags**
+     • استخدم workspace settings أو platform-runtime registry الموجود:
+       artifacts/api-server/src/routes/platform-runtime.ts
+       lib/db/src/schema/hr-import-runtime.ts (rollout patterns)
+       workforce-health cutover-readiness endpoints
+
+  4. **Database migrations آمنة**
+     • additive migrations فقط في production (ADD COLUMN nullable)
+     • destructive changes في فيز لاحق بعد backfill
+     • backup PG إلزامي قبل كل deploy
+     • مرجع: artifacts/api-server/src/seed/migrate.ts
+
+  5. **Blue/Green أو Rolling deploy**
+     • Docker: api service جديد + healthz قبل switch
+     • PM2: cluster reload graceful
+     • مرجع: deploy/docker-compose.yml، deploy/ecosystem.config.cjs
+
+  6. **Rollback plan لكل فيز**
+     • image/tag سابق محفوظ
+     • migrations reversible أو restore من snapshot
+
+  7. **Smoke checklist بعد كل deploy**
+     • login → ticket → HR employee → leave request → approval inbox
+     • provisioning user (إن مُفعّل)
+
+  8. **لا Big Bang refactor**
+     • hr.ts (~161 handler) يُقسّم module-by-module وليس دفعة واحدة
+
+================================================================================
+1. خريطة الفيزات — نظرة عامة (12–18 شهر)
+================================================================================
+
+  ┌──────┬──────────────────────────────┬──────────┬─────────────────────────┐
+  │ فيز  │ الاسم                        │ المدة    │ الهدف الرئيسي           │
+  ├──────┼──────────────────────────────┼──────────┼─────────────────────────┤
+  │ F0   │ Safety Net                   │ 2–4 أسابيع│ CI + migrations + smoke │
+  │ F1   │ Security Hardening           │ 4–6 أسابيع│ أمان production-grade   │
+  │ F2   │ Tenant Isolation & RBAC      │ 6–8 أسابيع│ عزل + صلاحيات enterprise│
+  │ F3   │ API Contract & UI Parity     │ 8–10 أسابيع│ OpenAPI + codegen      │
+  │ F4   │ Identity & HR Provisioning   │ 6–8 أسابيع│ Employee↔User معياري  │
+  │ F5   │ Data Canonical Cutover (1)   │ 8–12 أسابيع│ Org + Leave           │
+  │ F6   │ Data Canonical Cutover (2)   │ 8–12 أسابيع│ Payroll + Attendance  │
+  │ F7   │ Events & Workflow Unity      │ 6–8 أسابيع│ bus واحد + approvals  │
+  │ F8   │ Observability & Ops          │ 4–6 أسابيع│ logs/metrics/alerts   │
+  │ F9   │ Performance & Scale (1)      │ 6–8 أسابيع│ 500+ concurrent       │
+  │ F10  │ Performance & Scale (2)      │ 8–12 أسابيع│ workers + Redis       │
+  │ F11  │ Enterprise Compliance        │ مستمر    │ audit, DR, access review│
+  │ F12  │ Product Expansion            │ مستمر    │ modules جديدة على أساس  │
+  └──────┴──────────────────────────────┴──────────┴─────────────────────────┘
+
+  **معيار النجاح الكلي:** المنصة تعمل طوال الفترة؛ كل فيز يُفعّل behind flag؛
+  لا حذف مسار production قبل deprecation window (90 يوم minimum).
+
+================================================================================
+2. ربط الفيزات بمراحل التطوير الحالية في الكود (Platform Phases)
+================================================================================
+
+  المرحلة في الكود          │ ما بُني              │ ما يُكمّل في هذه الخطة
+  ──────────────────────────┼──────────────────────┼────────────────────────────
+  P-HCM2 (employee-account) │ link/unlink user     │ F4 provisioning كامل
+  P-HCM3 (leave migration)  │ leave.ts canonical   │ F5 cutover + UI موحّد
+  P16-E (workspace access)  │ read-only guard      │ F2 RBAC + audit
+  P17 (platform users)      │ platform RBAC        │ F2 + F11 access review
+  P15 commercial            │ tenants/billing      │ F0 migrations commercial
+  workflow phases           │ engine + governance  │ F7 unified approvals
+  hr-import v2              │ enterprise import    │ F5/F6 data quality gates
+  platform-runtime          │ activate/rollback    │ F0/F8 deploy automation
+  smart forms               │ audience + workflow  │ F3 OpenAPI + F7 inbox link
+
+  مراجع smoke tests موجودة:
+    artifacts/api-server/src/lib/platform/__tests__/p-hcm2-foundation.smoke.test.ts
+    artifacts/api-server/src/lib/platform/__tests__/p-hcm3-leave-migration.smoke.test.ts
+    artifacts/api-server/src/routes/__tests__/leave-canonical.smoke.test.ts
+
+================================================================================
+3. معايير عالمية — مصفوفة المطابقة المستهدفة
+================================================================================
+
+  ┌────────────────────────┬─────────────────────────────────────────────────┐
+  │ المعيار / المرجع       │ ما تطبّقه الخطة                                 │
+  ├────────────────────────┼─────────────────────────────────────────────────┤
+  │ ISO 27001 (controls)   │ access control، logging، backup، change mgmt    │
+  │ SOC 2 (Trust)          │ audit trails، least privilege، monitoring       │
+  │ GDPR-ready             │ data minimization، export/delete roadmap        │
+  │ ITIL / ITSM            │ tickets، SLA fields، incident workflow          │
+  │ HCM (Workday-like)     │ Employee central، User provisioning، org units  │
+  │ OWASP API Top 10       │ authZ، rate limit، input validation، IDOR tests │
+  │ 12-Factor App          │ config via env، stateless API، logs stdout      │
+  │ OpenAPI 3.1 contract   │ spec-first للمسارات public                     │
+  │ Zero-downtime deploy   │ rolling + migrate additive + feature flags       │
+  └────────────────────────┴─────────────────────────────────────────────────┘
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+                         الفيز 0 — Safety Net (أسبوع 1–4)
+                    «شبكة أمان» قبل أي ترقية وظيفية
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  منع regressions وانهيار silent — بدون تغيير سلوك المستخدم.
+
+── التحديثات المقترحة ──
+
+  F0.1 — CI/CD pipeline (جديد)
+    • إنشاء .github/workflows/ci.yml:
+        - pnpm install --frozen-lockfile
+        - pnpm typecheck
+        - pnpm --filter @workspace/api-server test
+        - pnpm --filter @workspace/ops-platform test
+        - pnpm --filter @workspace/api-server run build
+    • Root package.json: إضافة script "test" يجمع packages
+    • **بدون تعطيل:** CI فقط؛ deploy يدوي كما هو
+
+  F0.2 — Migration journal reconciliation (حرج)
+    • مطابقة lib/db/drizzle/*.sql مع lib/db/drizzle/meta/_journal.json
+    • تسجيل: 0023, 0026, 0027, 0030, 0031
+    • commercial_* tables: generate + apply migration
+    • orphan schema → lib/db/src/schema/index.ts:
+        tenant-subscriptions.ts, workspace-entitlements.ts, workspace-quota-limits.ts
+    • scripts/validate-workforce-integrity.cjs → يُشغّل في CI
+    • **بدون تعطيل:** migrations additive؛ backup قبل apply
+
+  F0.3 — Production smoke suite (automated)
+    • توسيع smoke tests:
+        artifacts/api-server/src/routes/__tests__/leave-canonical.smoke.test.ts
+        + auth login smoke
+        + hr employee CRUD smoke
+        + tenant isolation smoke (2 workspaces)
+    • Post-deploy script: scripts/post-deploy-smoke.sh
+
+  F0.4 — Runbook baseline
+    • docs/runbooks/deploy.md (جديد — ops)
+    • docs/runbooks/rollback.md
+    • docs/runbooks/incident-db-migration-failed.md
+    • مرجع موجود: platform-overview.txt §15، runtime-integrity-validation.md
+
+  F0.5 — Fix known runtime bugs (low risk)
+    • App.tsx Globe import (LanguageToggle)
+    • hr-employee-detail useApiFetch import
+    • **بدون تعطيل:** bugfixes فقط
+
+── الملفات المركزية ──
+  package.json, lib/db/drizzle/, artifacts/api-server/src/seed/migrate.ts
+  scripts/validate-workforce-integrity.cjs
+  deploy/docker-compose.yml
+
+── معايير القبول (Acceptance) ──
+  [ ] CI green على main
+  [ ] journal = all SQL files
+  [ ] smoke suite < 5 min
+  [ ] deploy runbook reviewed by Ops
+  [ ] zero user-visible behavior change
+
+── Rollback ──
+  revert CI commits؛ migration restore from backup if apply failed
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+                    الفيز 1 — Security Hardening (أسبوع 5–10)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  حماية production وفق OWASP — بدون كسر clients الحاليين.
+
+── التحديثات ──
+
+  F1.1 — Secrets enforcement
+    • artifacts/api-server/src/middlewares/requireAuth.ts
+      → fail startup if NODE_ENV=production && JWT_SECRET is default
+    • deploy/docker-compose.yml: JWT_SECRET required (no default in prod)
+    • rotate JWT: dual-key validation window (optional phase 1b)
+    • data/.platform.json mode 600 (موجود — verify in deploy checklist)
+
+  F1.2 — HTTP security headers
+    • artifacts/api-server/src/app.ts: helmet middleware
+    • nginx TLS config template: deploy/nginx.conf (+ ssl snippet doc)
+
+  F1.3 — Rate limiting
+    • lib/contact-rate-limit.ts → pattern عام
+    • /auth/login: 5 attempts / 15 min / IP + workspace lockout audit
+    • /admin/users, provisioning POST: per-admin rate limit
+    • **بدون تعطيل:** limits generous initially؛ tune from metrics
+
+  F1.4 — CORS from settings
+    • platform-settings cors_origins → wire into app.ts
+    • fallback: same-origin only in production if unset
+    • artifacts/ops-platform super-admin-settings.tsx (already edits field)
+
+  F1.5 — Webhook security
+    • artifacts/api-server/src/routes/attendance-integrations.ts
+      → HMAC signature verification on webhook
+    • secret per connector in DB
+    • reject unsigned in production; log-only mode in dev (flag)
+
+  F1.6 — Input validation layer
+    • expand lib/api-zod usage on top 20 write endpoints
+    • start: auth, admin users, hr employee create, leave submit
+
+── الملفات ──
+  artifacts/api-server/src/app.ts
+  artifacts/api-server/src/routes/auth.ts
+  artifacts/api-server/src/routes/attendance-integrations.ts
+  lib/api-spec/openapi.yaml (document rate limit headers)
+
+── معايير القبول ──
+  [ ] pentest checklist OWASP API Top 10 (self-assessment)
+  [ ] no default JWT in prod deploy
+  [ ] login brute force mitigated
+  [ ] existing SPA still works with tightened CORS (APP_URL whitelisted)
+
+── Rollback ──
+  feature flag SECURITY_STRICT=false env var disables new limits (temporary)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+              الفيز 2 — Tenant Isolation & RBAC Enterprise (أسبوع 11–18)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  RBAC حقيقي + zero cross-tenant leakage — معيار SOC 2 access control.
+
+── التحديثات ──
+
+  F2.1 — Tenant isolation test suite (automated)
+    • tests/security/tenant-isolation.test.ts (جديد)
+    • create workspace A,B; users; assert no cross-read on:
+        tickets, users, hr employees, leave, payroll payslips
+    • CI gate: must pass
+
+  F2.2 — PostgreSQL RLS (optional layer — recommended)
+    • migration: ENABLE ROW LEVEL SECURITY on hot tables
+    • SET app.current_workspace_id per request in middleware
+    • start with: tickets, users, employees (pilot workspace)
+    • **بدون تعطيل:** RLS permissive mode first (LOG violations only)
+
+  F2.3 — RBAC audit على routes
+    • audit matrix: every route in artifacts/api-server/src/routes/*.ts
+    • fix inconsistencies:
+        hr.ts GET /hr/categories → requirePermission("hr.view")
+        leave.ts → requirePermission("leave.view" / "leave.manage")
+        provision routes → consistent admin vs hr.manage
+    • document exceptions in docs/rbac-exceptions.md
+
+  F2.4 — Permission policy layer (incremental)
+    • lib/core-permissions → extend with evaluatePolicy(context)
+    • artifacts/api-server/src/middlewares/requireAuth.ts
+      → optional path: check policy before handler
+    • **بدون تعطيل:** admin bypass remains until F2.5 flag
+
+  F2.5 — Admin/Manager bypass reduction (flagged)
+    • WORKSPACE_RBAC_STRICT=true
+    • admin gets permissions from role bundle not implicit bypass
+    • migration period: 90 days both modes
+
+  F2.6 — Platform impersonation audit
+    • super_admin accessing tenant data → mandatory audit row
+    • platform-governance support sessions (exists) → enforce logging
+    • artifacts/api-server/src/routes/platform-governance.ts
+
+  F2.7 — Access review enforcement
+    • platform-access-review.ts + UI super-admin-access-review.tsx
+    • scheduled job: stale permissions report
+    • tie to P17 platform user overrides
+
+── الملفات ──
+  artifacts/api-server/src/middlewares/requireAuth.ts
+  artifacts/api-server/src/middlewares/workspaceAccessWriteGuard.ts
+  artifacts/api-server/src/routes/workspace-roles.ts
+  artifacts/api-server/src/lib/platform-permissions.ts
+  artifacts/ops-platform/src/pages/roles.tsx (complete AR i18n)
+
+── معايير القبول ──
+  [ ] tenant isolation tests 100% pass
+  [ ] RBAC matrix documented
+  [ ] no route with requireAuth-only on sensitive HR/write ops
+  [ ] access review job runs weekly
+
+── Rollback ──
+  WORKSPACE_RBAC_STRICT=false; disable RLS policies
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+            الفيز 3 — API Contract & UI Parity (أسبوع 19–28)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  contract-first — إزالة drift بين UI و backend (~79% gap).
+
+── التحديثات ──
+
+  F3.1 — OpenAPI expansion (batched — لا دفعة واحدة)
+
+    Batch 3A — Auth & Users (أسبوع 1–2)
+      lib/api-spec/openapi.yaml:
+        POST /auth/login, GET /auth/me, PATCH profile
+        remove or implement stale: /auth/lookup, /auth/verify
+      regenerate: pnpm --filter @workspace/api-spec run codegen
+
+    Batch 3B — HR Core (أسبوع 3–4)
+      /hr/org-units, /hr/job-grades, /hr/job-titles
+      /hr/employees/{id}/account, link-user, provision-*
+      employee nested: contracts, documents, leaves (read first)
+
+    Batch 3C — Leave & Approvals (أسبوع 5–6)
+      leave.ts: /hr/leave-requests, approve/reject
+      approval-inbox.ts: /self-service/approvals/*
+
+    Batch 3D — Platform & Commercial (أسبوع 7–8)
+      platform-users, tenants, subscriptions, commercial-*
+
+    Batch 3E — Payroll & Workforce (أسبوع 9–10)
+      payroll-canonical.ts, payroll-operations.ts
+      workforce-attendance.ts, hr-import-v2 (read-only ops first)
+
+  F3.2 — OpenAPI drift CI gate
+    • script: scripts/openapi-route-diff.cjs
+    • fail CI if new route without spec (allowlist internal routes)
+
+  F3.3 — UI migration to codegen hooks (incremental)
+    Priority files using raw fetch → generated client:
+      artifacts/ops-platform/src/pages/hr-foundation.tsx
+      artifacts/ops-platform/src/pages/hr-employee-detail.tsx
+      artifacts/ops-platform/src/pages/approval-inbox.tsx
+      artifacts/ops-platform/src/components/forms/form-audience-builder.tsx
+      artifacts/ops-platform/src/components/hr/employee-account-provision-dialog.tsx
+    • **بدون تعطيل:** useApiFetch remains as fallback during migration
+
+  F3.4 — Orphan UI cleanup
+    • wire forms-submit.tsx route OR remove dead import in App.tsx
+    • deprecate approvals.tsx legacy (redirect documented)
+    • process-templates: link from workflow detail
+
+  F3.5 — i18n consolidation
+    • migrate HR isAr inline → lib/i18n.ts keys
+    • complete roles AR block
+    • super-admin nav keys (phase 3b UI)
+
+── الملفات ──
+  lib/api-spec/openapi.yaml, lib/api-spec/orval.config.ts
+  lib/api-client-react/src/generated/*
+  artifacts/ops-platform/src/hooks/use-api-fetch.ts (deprecation path)
+
+── معايير القبول ──
+  [ ] OpenAPI covers 100% tenant-facing write APIs
+  [ ] top 5 raw-fetch pages migrated to hooks
+  [ ] drift CI gate active
+  [ ] no breaking changes to existing clients (additive only)
+
+── Rollback ──
+  UI keeps useApiFetch if codegen regression; spec version pinned
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+         الفيز 4 — Identity & HR Provisioning Enterprise (أسبوع 29–36)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  Employee (HR) ≠ User (login) — onboarding معياري عالمي.
+
+── الوضع الحالي (NEWUSER commit) ──
+  artifacts/api-server/src/lib/hr/employee-user-provisioning.ts
+  artifacts/api-server/src/routes/hr-employee-account.ts
+  artifacts/api-server/src/routes/admin.ts (duplicate routes)
+  artifacts/ops-platform/src/components/hr/employee-account-provision-dialog.tsx
+
+── التحديثات ──
+
+  F4.1 — Unified provisioning API (single surface)
+    • Canonical paths ONLY under /hr/employees/...:
+        GET  /hr/employees/provision/lookup
+        POST /hr/employees/provision/account
+        GET  /hr/employees/{id}/provision-preview
+        POST /hr/employees/{id}/provision-account
+    • admin.ts duplicate routes → deprecated headers Sunset
+    • **بدون تعطيل:** admin routes remain 6 months parallel
+
+  F4.2 — OpenAPI + hooks for provisioning (ties F3 Batch 3B)
+    • AdminCreateUserBody update: general vs employee paths documented
+
+  F4.3 — Provisioning hardening
+    • HTTP Idempotency-Key on POST provision
+    • audit table: hr_provision_audit_log (new migration additive)
+    • block: terminated employee, duplicate email/emp num (exists)
+    • auto-sync: org unit → departments legacy map (exists in service)
+
+  F4.4 — UI polish (no workflow break)
+    • users.tsx: tabs «موظف حالي» + «حساب عام»
+    • hr-employee-detail: create account + link existing (collapsible)
+    • force password change default ON for new accounts
+
+  F4.5 — Offboarding hook (foundation)
+    • on employee status → terminated: optional deactivate linked user (flag)
+    • does NOT delete HR record (soft lifecycle)
+
+  F4.6 — Bulk provisioning (future-ready design)
+    • GET /hr/employees/provision/candidates?canProvision=true
+    • POST /hr/employees/provision/bulk (async job — F10 workers)
+
+── الملفات ──
+  lib/db/src/schema/hr.ts (employees.userId)
+  lib/db/src/schema/users.ts
+  artifacts/api-server/src/lib/hr/employee-account-service.ts
+  artifacts/api-server/src/lib/hr/employee-user-provisioning.ts
+  artifacts/ops-platform/src/pages/users.tsx
+
+── معايير القبول ──
+  [ ] create employee account from users page + employee detail
+  [ ] general account EXT- prefix (non-HR linked)
+  [ ] provisioning audited
+  [ ] VPS: build + restart documented in runbook
+
+── Rollback ──
+  USE_LEGACY_ADMIN_PROVISION=true env routes to admin.ts paths
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+      الفيز 5 — Data Canonical Cutover (1): Org & Leave (أسبوع 37–48)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  مصدر حقيقة واحد — إزالة ازدواجية departments/leaves.
+
+── استراتيجية بدون تعطيل ──
+  Dual-read → backfill → dual-write (flag) → single-write → deprecate legacy
+
+── التحديثات ──
+
+  F5.1 — Org units as canonical
+    • hr_org_units authoritative
+    • legacyDepartmentOrgMapTable sync (exists)
+    • UI: departments.tsx → read-only banner «migrate to org units»
+    • new writes to departments blocked under flag ORG_CUTOVER=true
+    • backfill script: scripts/backfill-departments-to-org-units.cjs
+
+  F5.2 — Leave canonical (P-HCM3 completion)
+    • leave_requests + leave_approval_steps = write path
+    • hr_employee_leaves = read-only mirror (sync job)
+    • hr-me-leave.tsx + approval-inbox.tsx → single backend
+    • leave-bridge.ts: simplify after cutover
+    • artifacts/api-server/src/routes/leave.ts
+    • artifacts/api-server/src/routes/hr-leave-migration.ts (migration tools)
+
+  F5.3 — Admin leave management UI (new page)
+    • /admin/hr/leave — queue, filters, reject reason required
+    • manager team calendar (read-only phase 1)
+
+  F5.4 — Data validation gates
+    • hr-import v2: reject rows that violate canonical model
+    • workforce-health cutover-readiness endpoint gating
+
+── الملفات ──
+  lib/db/src/schema/hr.ts (leave_requests, hr_org_units)
+  lib/db/src/schema/departments.ts (legacy)
+  artifacts/ops-platform/src/lib/leave-bridge.ts
+  artifacts/ops-platform/src/pages/hr-me-leave.tsx
+  artifacts/ops-platform/src/pages/approval-inbox.tsx
+
+── معايير القبول ──
+  [ ] new leave requests only in leave_requests
+  [ ] approval inbox handles 100% leave types
+  [ ] org chart data from hr_org_units only (new features)
+  [ ] migration report: 0 orphan department references
+
+── Rollback ──
+  LEAVE_CANONICAL_WRITE=false → write to legacy again
+  restore sync job direction
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+   الفيز 6 — Data Canonical Cutover (2): Payroll & Attendance (أسبوع 49–60)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  payroll-canonical + workforce attendance = production path.
+
+── التحديثات ──
+
+  F6.1 — Payroll canonical cutover
+    • payroll-canonical.ts runs = authoritative
+    • hr_payroll_* legacy → read-only
+    • hr-payroll.tsx + hr-payroll-run.tsx use canonical APIs (codegen F3E)
+    • payroll-operations.ts audit trail mandatory
+    • hr-payroll-migration.ts for one-time tenant migration
+
+  F6.2 — Attendance cutover
+    • attendance_events + daily_summaries authoritative
+    • hr_attendance legacy import only via migration tool
+    • workforce-attendance.ts self-service path unified
+    • attendance-integrations webhooks → canonical pipeline (F1.5 security)
+
+  F6.3 — Payslip delivery
+    • PDF generation job (async worker F10)
+    • hr-me-payslips.tsx download button
+    • WPS/bank file export (payroll-operations — extend)
+
+  F6.4 — Integrity scripts in CI
+    • scripts/validate-workforce-integrity.cjs
+    • scripts/validate-payroll-integrity.cjs (if exists or create)
+
+── الملفات ──
+  lib/db/src/schema/payroll-canonical.ts
+  lib/db/src/schema/workforce-attendance.ts
+  artifacts/api-server/src/routes/payroll-canonical.ts
+  artifacts/api-server/src/routes/payroll-operations.ts
+  artifacts/api-server/src/routes/workforce-attendance.ts
+  artifacts/ops-platform/src/pages/hr-payroll.tsx
+
+── معايير القبول ──
+  [ ] payroll run completes on canonical for pilot tenant
+  [ ] attendance import → canonical events
+  [ ] legacy tables no new rows (post-cutover)
+  [ ] payslip view/download works
+
+── Rollback ──
+  PAYROLL_CANONICAL=false per workspace in workspace_module_settings
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+           الفيز 7 — Events & Workflow Unity (أسبوع 61–68)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  event bus واحد؛ approvals موحّدة؛ process templates قابلة للتحرير.
+
+── التحديثات ──
+
+  F7.1 — Complete appEventBus migration
+    • artifacts/api-server/src/lib/events/index.ts — inventory emitters
+    • remove direct eventDispatcher.dispatch from routes (bridge only)
+    • listeners: activity, notifications-bus, integration-bus
+
+  F7.2 — Transactional outbox
+    • new table: event_outbox (workspace_id, payload, status)
+    • write outbox in same PG transaction as business write
+    • worker drains outbox → appEventBus
+    • **بدون تعطيل:** parallel to direct emit during migration
+
+  F7.3 — Unified approval inbox
+    • approval-inbox.ts handles: leave, forms, tickets (where applicable)
+    • approval-runtime.ts instances linked from workflow detail UI
+    • reject reason required + audit
+
+  F7.4 — Process template authoring
+    • process-templates.tsx → admin editor (not read-only)
+    • link hr/approval-templates CRUD (currently read-only GET)
+    • smart forms workflow-builder integration
+
+  F7.5 — Workflow ↔ HR integration
+    • workflows.tsx toast i18n
+    • navigate from inbox → workflow-detail → employee/form context
+
+── الملفات ──
+  artifacts/api-server/src/lib/events/app-bus.ts
+  artifacts/api-server/src/lib/workflows/engine.ts
+  artifacts/api-server/src/routes/approval-inbox.ts
+  lib/db/src/schema/approval-runtime.ts
+  artifacts/ops-platform/src/pages/process-templates.tsx
+  artifacts/ops-platform/src/components/forms/form-workflow-builder.tsx
+
+── معايير القبول ──
+  [ ] no duplicate notifications from dual emit
+  [ ] outbox worker lag < 30s p99
+  [ ] admin can edit approval template
+  [ ] form submission triggers visible approval chain
+
+── Rollback ──
+  OUTBOX_ENABLED=false → direct emit only
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+        الفيز 8 — Observability & Operations (أسبوع 69–74)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  رؤية production — detect failures before users.
+
+── التحديثات ──
+
+  F8.1 — Structured logging enrichment
+    • correlation ID on every request (extend pino-http)
+    • workspaceId, userId in log context
+    • artifacts/api-server/src/lib/logger.ts
+
+  F8.2 — Metrics endpoint
+    • GET /health/metrics (Prometheus format)
+    • counters: requests, errors, queue depth, migration version
+    • optional: Grafana dashboard JSON in docs/observability/
+
+  F8.3 — Error tracking integration
+    • Sentry or OpenTelemetry exporter (env SENTRY_DSN / OTEL_EXPORTER)
+    • source maps for ops-platform in production build
+
+  F8.4 — Alerting rules (ops)
+    • API 5xx rate > threshold
+    • migration failed on startup
+    • disk PG > 80%
+    • notification queue backlog
+
+  F8.5 — platform-runtime integration
+    • artifacts/api-server/src/routes/platform-runtime.ts
+    • activate/rollback tied to deploy pipeline
+    • health: /health/workforce, /health/sse-connections (exists)
+
+── معايير القبول ──
+  [ ] logs searchable by requestId
+  [ ] alert fires on staged failure test
+  [ ] super-admin sees platform health dashboard data
+
+── Rollback ──
+  metrics endpoint disable via env METRICS_ENABLED=false
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+      الفيز 9 — Performance & Scale Phase 1 (أسبوع 75–82)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  500+ concurrent users per deployment — بدون architecture rewrite.
+
+── التحديثات ──
+
+  F9.1 — PM2 cluster production default
+    • deploy/ecosystem.config.cjs: instances = CPU cores
+    • sticky sessions NOT needed (JWT stateless)
+    • SSE: document single-instance or redis pub/sub bridge (design doc)
+
+  F9.2 — Database indexes audit
+    • EXPLAIN on hot queries: hr employees list, tickets list, leave inbox
+    • add indexes: (workspace_id, status), (workspace_id, employee_number)
+    • lib/db migration additive
+
+  F9.3 — Pagination enforcement
+    • audit list endpoints — default limit 50, max 200
+    • hr.ts bulk export → async job if > 1000 rows
+
+  F9.4 — Frontend performance
+    • hr-employee-detail nested tabs: lazy load sub-resources
+    • react-query staleTime tuning
+    • vite bundle analyze — code split admin routes
+
+  F9.5 — CDN static assets
+    • nginx cache headers deploy/nginx.conf
+    • super-admin CDN setting (when implemented) or manual CloudFront
+
+── معايير القبول ──
+  [ ] k6 load test: 500 virtual users, p95 API < 500ms on core paths
+  [ ] employee detail LCP improved measurable
+  [ ] no OOM on api under load test
+
+── Rollback ──
+  PM2 instances=1; remove new indexes if regression (rare)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+      الفيز 10 — Performance & Scale Phase 2 (أسبوع 83–94)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  5000+ users path — workers منفصلون + Redis.
+
+── التحديثات ──
+
+  F10.1 — Redis introduction (optional component)
+    • docker-compose: redis service
+    • rate limit store, session denylist (JWT revoke), cache org tree
+    • feature flag REDIS_URL — fallback to in-memory for on-prem small
+
+  F10.2 — Background worker process split
+    • new entry: artifacts/api-server/src/worker.ts
+    • move from init-sequence: notifications, exports, reports, import commit
+    • API process: HTTP only + enqueue jobs to PG queue or Redis queue
+    • **بدون تعطيل:** single-process mode remains default for On-Prem SME
+
+  F10.3 — Read replica routing
+    • lib/db: readPool for report-center, dashboards GET
+    • DATABASE_READ_URL env optional
+
+  F10.4 — Object storage externalization
+    • MinIO/S3 for attachments + branding
+    • lib/object-storage-web + storage.ts routes
+
+  F10.5 — Horizontal scaling guide
+    • docs/scaling/horizontal-api.md
+    • load balancer + N api containers + shared PG + redis
+
+── معايير القبول ──
+  [ ] worker process drains import job without blocking HTTP
+  [ ] redis optional — platform works without it
+  [ ] read replica lag monitored
+
+── Rollback ──
+  WORKER_MODE=embedded → old init-sequence behavior
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+         الفيز 11 — Enterprise Compliance & DR (مستمر — parallel)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  SOC 2 / ISO 27001 readiness — audit-ready operations.
+
+── التحديثات ──
+
+  F11.1 — Immutable HR audit log
+    • hr_master_audit_log table (append-only)
+    • trigger or app-level on employees, org_units, roles changes
+    • compliance_audit_chains integration for employee entityType
+
+  F11.2 — Backup & DR runbook
+    • PG PITR or daily snapshot automated
+    • RTO/RPO documented: target RPO 1h, RTO 4h (tunable)
+    • quarterly restore drill
+
+  F11.3 — Data retention & export
+    • employee data export API (GDPR subject access)
+    • retention policy on activity_logs, event_logs (partition by month)
+
+  F11.4 — Access review automation
+    • super-admin-access-review.tsx → scheduled campaigns
+    • auto-revoke unused platform permissions after 90 days (flag)
+
+  F11.5 — Change management
+    • every production deploy: change ticket + rollback owner
+    • platform-governance evidence pack export
+
+  F11.6 — Security assessments
+    • annual pentest
+    • dependency audit: pnpm audit in CI (minimumReleaseAge already in pnpm-workspace.yaml)
+
+── الملفات ──
+  lib/db/src/schema/compliance-audit-chains.ts
+  lib/db/src/schema/platform-governance.ts
+  artifacts/ops-platform/src/pages/super-admin-governance-*
+
+── معايير القبول ──
+  [ ] restore drill succeeded
+  [ ] HR change traceable to actor
+  [ ] access review quarterly report generated
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+        الفيز 12 — Product Expansion on Solid Foundation (مستمر)
+════════════════════════════════════════════════════════════════════════════════
+
+── بعد F0–F11 — يمكن التوسع بأمان ──
+
+  Modules catalog (placeholder → product):
+    • Recruitment (ATS lite)
+    • Performance management
+    • Learning (LMS lite)
+    • Advanced analytics / BI connector
+    • Mobile app (API-first from OpenAPI)
+
+  كل module جديد MUST:
+    • workspace_id scoped
+    • OpenAPI before UI
+    • RBAC permissions registered in workspace-roles STATIC_PERMISSION_GROUPS
+    • tenant isolation tests extended
+    • feature flag in workspace_module_settings
+
+  مرجع module toggles:
+    artifacts/api-server/src/routes/modules.ts
+    lib/db/src/schema/modules.ts
+
+================================================================================
+4. جدول الأولويات — ما يُنفّذ أولاً (Quick wins vs Strategic)
+================================================================================
+
+  **فوري (أسبوع 1–2) — أقصى ROI / أقل مخاطر:**
+    F0.1 CI
+    F0.2 migration journal fix
+    F0.5 runtime bugfixes (Globe, useApiFetch)
+    F1.1 JWT_SECRET enforcement
+    F4 deploy runbook for api-server build (provisioning routes)
+
+  **قصير المدى (شهر 1–3):**
+    F1 security full
+    F2 tenant tests + RBAC audit
+    F3 Batch 3A–3B OpenAPI
+    F4 provisioning unified
+
+  **متوسط (شهر 4–9):**
+    F5–F6 canonical cutover
+    F7 workflow unity
+    F8 observability
+
+  **طويل (شهر 10–18):**
+    F9–F10 scale
+    F11 compliance
+    F12 expansion
+
+================================================================================
+5. ضمان سير العمل أثناء الترقية — Playbook تشغيلي
+================================================================================
+
+  قبل كل فيز:
+    1. Review change in staging (Docker compose on-prem mirror)
+    2. PG backup verified
+    3. Feature flags default OFF
+    4. Communicate maintenance window if needed (prefer zero-downtime)
+
+  أثناء deploy:
+    1. build api-server + ops-platform
+    2. run migrations (auto on startup)
+    3. healthz + smoke suite
+    4. enable feature flag for pilot workspace only
+
+  بعد deploy (48h monitoring):
+    1. error rate, latency, user reports
+    2. expand flag to all workspaces
+    3. document in CHANGELOG.md
+
+  مسارات حرجة MUST NEVER break:
+    /auth/login
+    /tickets, /messages (core ops)
+    /hr/employees GET (directory)
+    /self-service/leave submit
+    /self-service/approvals
+    /admin/users create (general + employee if F4 live)
+
+================================================================================
+6. مؤشرات الأداء الرئيسية (KPIs) للترقية
+================================================================================
+
+  ┌────────────────────────────┬──────────────┬─────────────────────────────┐
+  │ KPI                        │ Baseline     │ Target (post F11)           │
+  ├────────────────────────────┼──────────────┼─────────────────────────────┤
+  │ OpenAPI coverage           │ ~21%         │ 100% public tenant APIs     │
+  │ CI pass rate               │ N/A          │ >98% on main                │
+  │ Cross-tenant leak tests    │ 0            │ 100% pass mandatory         │
+  │ Production incidents/month │ measure      │ -50% after F8               │
+  │ API p95 latency (core)     │ measure      │ <500ms @ 500 users          │
+  │ Migration drift items      │ >5 known     │ 0                           │
+  │ RBAC unprotected routes    │ >10 est.     │ 0 (except documented)       │
+  │ Mean time to restore (MTTR)│ measure      │ <4h                         │
+  │ User provisioning time     │ manual       │ <2 min self-serve admin     │
+  └────────────────────────────┴──────────────┴─────────────────────────────┘
+
+================================================================================
+7. فهرس الملفات البرمجية — مرجع سريع حسب الفيز
+================================================================================
+
+  Infrastructure & Deploy:
+    deploy/docker-compose.yml, deploy/Dockerfile.api, deploy/Dockerfile.web
+    deploy/nginx.conf, deploy/ecosystem.config.cjs
+    package.json, pnpm-workspace.yaml
+
+  API Core:
+    artifacts/api-server/src/index.ts, app.ts
+    artifacts/api-server/src/routes/index.ts
+    artifacts/api-server/src/lib/init-sequence.ts
+    artifacts/api-server/src/seed/migrate.ts
+
+  Security:
+    artifacts/api-server/src/middlewares/requireAuth.ts
+    artifacts/api-server/src/middlewares/workspaceAccessWriteGuard.ts
+    artifacts/api-server/src/middlewares/requireDatabase.ts
+    artifacts/api-server/src/lib/platform-permissions.ts
+    artifacts/api-server/src/lib/root-platform-owner-policy.ts
+
+  Database:
+    lib/db/src/schema/index.ts, lib/db/src/schema/*.ts
+    lib/db/drizzle/*.sql, lib/db/drizzle/meta/_journal.json
+    lib/db/src/resolve-database-url.ts
+
+  HR & Identity:
+    artifacts/api-server/src/routes/hr.ts
+    artifacts/api-server/src/routes/hr-employee-account.ts
+    artifacts/api-server/src/lib/hr/employee-user-provisioning.ts
+    artifacts/api-server/src/lib/hr/employee-account-service.ts
+    lib/db/src/schema/hr.ts, lib/db/src/schema/users.ts
+
+  Leave & Approvals:
+    artifacts/api-server/src/routes/leave.ts
+    artifacts/api-server/src/routes/approval-inbox.ts
+    lib/db/src/schema/approval-runtime.ts
+    artifacts/ops-platform/src/lib/leave-bridge.ts
+
+  Payroll & Workforce:
+    artifacts/api-server/src/routes/payroll-canonical.ts
+    artifacts/api-server/src/routes/payroll-operations.ts
+    artifacts/api-server/src/routes/workforce-attendance.ts
+    artifacts/api-server/src/routes/hr-import-v2.ts
+
+  Platform & Commercial:
+    artifacts/api-server/src/routes/tenants.ts
+    artifacts/api-server/src/routes/platform-users.ts
+    artifacts/api-server/src/routes/commercial*.ts
+    lib/db/src/schema/commercial-*.ts
+
+  Events & Workflows:
+    artifacts/api-server/src/lib/events/app-bus.ts
+    artifacts/api-server/src/lib/workflows/engine.ts
+    artifacts/api-server/src/routes/workflows.ts
+    lib/db/src/schema/workflows.ts
+
+  Frontend:
+    artifacts/ops-platform/src/App.tsx
+    artifacts/ops-platform/src/pages/*.tsx (76 pages)
+    artifacts/ops-platform/src/components/hr/employee-account-provision-dialog.tsx
+    artifacts/ops-platform/src/components/forms/form-workflow-builder.tsx
+    lib/api-client-react/, lib/i18n.ts
+
+  Tests:
+    artifacts/api-server/src/**/__tests__/**
+    artifacts/ops-platform/src/**/__tests__/**
+
+  Scripts & Ops:
+    scripts/validate-workforce-integrity.cjs
+    scripts/migrate-*.cjs, scripts/apply-p17*.cjs
+    scripts/post-merge.sh
+
+  Documentation:
+    lib/api-spec/openapi.yaml
+    platform-overview.txt
+    runtime-integrity-validation.md
+    docs/platform-users-custom-access-control.md
+    تقرير الهندسة البرمجية 1.txt
+    البحث والتطوير 1.txt
+
+================================================================================
+8. المخاطر الكبرى وخطط التخفيف
+================================================================================
+
+  | Risk                          | Impact   | Mitigation                          |
+  |-------------------------------|----------|-------------------------------------|
+  | Migration failure on prod       | Critical | backup + F0 journal fix + staging   |
+  | hr.ts refactor breaks HR        | High     | module split behind flags           |
+  | Canonical cutover data loss     | Critical | dual-write period + validation jobs |
+  | OpenAPI breaking clients        | Medium   | additive only + versioning          |
+  | RBAC lockout admins             | Medium   | break-glass super_admin + audit     |
+  | Redis dependency on-prem        | Low      | optional component                  |
+  | Performance regression          | Medium   | k6 gates in F9                      |
+  | Team bandwidth                  | High     | phased delivery; F0 first           |
+
+================================================================================
+9. الخلاصة
+================================================================================
+
+  منصة Data Core تمتلك **أساساً enterprise حقيقياً** (multi-tenant، HCM breadth،
+  workflow engine، on-prem wizard، platform RBAC). الفجوات الرئيسية **تشغيلية
+  وهندسية** وليست في الرؤية: CI، migrations، OpenAPI drift، dual domains،
+  security defaults.
+
+  هذه الخطة تُرقّي المنصة **بدون انهيار** عبر:
+    • فيزات صغيرة قابلة للrollback
+    • feature flags و cutover تدريجي
+    • contract-first قبل توسعة product
+    • اختبارات عزل tenant إلزامية
+    • observability قبل scale
+
+  **الخطوة التالية الموصى بها:** تنفيذ F0 بالكامل قبل أي feature جديد —
+  ثم F1 + F4 (أمان + provisioning) لأنهما الأكثر تأثيراً على المستخدمين الحاليين.
+
+================================================================================
+                              نهاية التقرير
+================================================================================
+مرجع: تقرير الهندسة البرمجية 1.txt — للتفاصيل التشخيصية الكاملة.
+هذا المستند خطة تنفيذ — يتطلب موافقة stakeholders قبل بدء كل فيز.

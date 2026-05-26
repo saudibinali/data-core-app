@@ -16,6 +16,9 @@ import { topologicalSortManagers } from "./dependency-ordering";
 import { prepareRollbackSnapshots } from "../rollback/rollback-preparation";
 import { recordSessionExecutionTelemetry } from "../telemetry/session-execution-telemetry";
 import { incrementRuntimeMetric } from "../../workforce/stabilization/observability-metrics";
+import { getOrgRuntimeMode } from "../../workforce/org/org-runtime-settings";
+import { getLeaveRuntimeMode } from "../../hr/hcm-workspace-settings";
+import { evaluateImportCutoverGates } from "../../workforce/stabilization/import-cutover-gates";
 
 export type UploadExecutionResult = {
   sessionId: number;
@@ -119,11 +122,26 @@ export class ImportSessionEngine {
     const numberingMode = settingsRow?.numberingMode ?? "auto";
     const isMaster = session.importType.startsWith("master");
 
-    let summary: Record<string, unknown> = {};
+    const [orgRuntimeMode, leaveRuntimeMode, importGates] = await Promise.all([
+      getOrgRuntimeMode(workspaceId),
+      getLeaveRuntimeMode(workspaceId),
+      evaluateImportCutoverGates(workspaceId),
+    ]);
+    const canonicalModes = { orgRuntimeMode, leaveRuntimeMode };
+
+    let summary: Record<string, unknown> = {
+      importGates: {
+        strictRowValidation: importGates.strictRowValidation,
+        commitAllowed: importGates.commitAllowed,
+        commitBlockers: importGates.commitBlockers,
+        readyForCanonicalEmployeeImport: importGates.readyForCanonicalEmployeeImport,
+        readyForCanonicalMasterDataImport: importGates.readyForCanonicalMasterDataImport,
+      },
+    };
 
     if (isMaster) {
       const catalog = await masterDataCatalogService.loadSnapshot(workspaceId);
-      const mdResult = validateMasterDataImportDryRun(catalog, rawRows);
+      const mdResult = validateMasterDataImportDryRun(catalog, rawRows, canonicalModes);
       summary = { masterDataDryRun: mdResult, dependencyDiagnostics: mdResult.orgOrdering };
 
       for (let i = 0; i < mdResult.rows.length; i++) {
@@ -143,6 +161,7 @@ export class ImportSessionEngine {
     } else {
       const catalog = await masterDataCatalogService.loadSnapshot(workspaceId);
       const ctx = await HrImportValidator.createContext(workspaceId, catalog, numberingMode);
+      ctx.canonicalModes = canonicalModes;
       const validations = HrImportValidator.validateRows(ctx, rawRows);
 
       const managerOrder = topologicalSortManagers(
@@ -155,10 +174,14 @@ export class ImportSessionEngine {
       );
 
       summary = {
+        ...summary,
         dependencyDiagnostics: { managerOrdering: managerOrder },
         validationSummary: {
           errors: validations.filter((v) => v.errors.length).length,
           warnings: validations.filter((v) => v.warnings.length).length,
+          canonicalViolations: validations.filter((v) =>
+            v.errors.some((e) => e.includes("canonical") || e.includes("legacy")),
+          ).length,
         },
       };
 
@@ -183,7 +206,8 @@ export class ImportSessionEngine {
       ...(session.summary as object),
       ...summary,
       timing: { ...((session.summary as Record<string, unknown>)?.timing as object), ...timingMs },
-      commitEnabled: false,
+      commitEnabled: importGates.commitAllowed && importGates.strictRowValidation,
+      importBlocked: importGates.strictRowValidation && !importGates.commitAllowed,
     });
 
     void recordSessionExecutionTelemetry({
@@ -194,7 +218,15 @@ export class ImportSessionEngine {
       metadata: summary,
     });
 
-    return { sessionId, status: "validated", summary, timingMs, commitEnabled: false };
+    return {
+      sessionId,
+      status: "validated",
+      summary,
+      timingMs,
+      commitEnabled: importGates.commitAllowed && importGates.strictRowValidation,
+      importGates,
+      importBlocked: importGates.strictRowValidation && !importGates.commitAllowed,
+    };
   }
 
   async executeShadowRun(workspaceId: number, sessionId: number): Promise<Record<string, unknown>> {

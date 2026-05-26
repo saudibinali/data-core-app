@@ -26,8 +26,9 @@ import {
   resetStuckProcessingJobs,
 } from "../../lib/notifications/queue-processor";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_P19B_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_P19B_SMOKE !== "0";
 
 const MIGRATION_0002 = path.resolve(
   fileURLToPath(new URL("../../../../../lib/db/drizzle/0002_notification_infrastructure.sql", import.meta.url)),

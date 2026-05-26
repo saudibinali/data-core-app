@@ -6,6 +6,10 @@ import { usersTable, departmentsTable, workspaceCustomRolesTable } from "@worksp
 import { eq, and, ne } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { type AuthRequest, requireAuth } from "../middlewares/requireAuth";
+import { JWT_SECRET, JWT_EXPIRES_IN } from "../lib/security-config";
+import { clientIp } from "../lib/client-ip";
+import { checkLoginRateLimit } from "../lib/login-rate-limit";
+import { AuthLoginBody, formatZodError } from "../lib/security-validation";
 import { isProtectedPlatformAccount } from "../lib/root-platform-owner-policy";
 import {
   loadPlatformPasswordPolicy,
@@ -20,8 +24,7 @@ import {
 
 const router: IRouter = Router();
 
-export const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret-change-in-production";
-export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? "24h";
+export { JWT_SECRET, JWT_EXPIRES_IN };
 
 const lineManagerAlias = alias(usersTable, "lm_auth");
 const customRoleAlias = alias(workspaceCustomRolesTable, "cr_auth");
@@ -98,14 +101,25 @@ function meQuery(userId: number) {
  * Public - employee number + password → JWT access token
  */
 router.post("/auth/login", async (req: Request, res: Response): Promise<void> => {
-  const { employeeNumber, password } = req.body as { employeeNumber?: string; password?: string };
-
-  if (!employeeNumber || !password) {
-    res.status(400).json({ error: "employeeNumber and password are required" });
+  const ip = clientIp(req);
+  const rate = checkLoginRateLimit(ip);
+  if (!rate.allowed) {
+    res.status(429).json({
+      error: "Too many login attempts. Please try again later.",
+      code: "RATE_LIMITED",
+      retryAfterSec: rate.retryAfterSec,
+    });
     return;
   }
 
-  const normalized = String(employeeNumber).trim();
+  const parsed = AuthLoginBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: formatZodError(parsed.error) });
+    return;
+  }
+
+  const { employeeNumber, password } = parsed.data;
+  const normalized = employeeNumber;
 
   const [user] = await db
     .select({ id: usersTable.id, passwordHash: usersTable.passwordHash, status: usersTable.status, role: usersTable.role, workspaceId: usersTable.workspaceId })

@@ -50,6 +50,6 @@ describe("P-HCM3 leave migration & provision", () => {
       "utf8",
     );
     expect(svc).toContain("leaveMigration");
-    expect(svc).toContain("0021_hr_leave_migration_map");
+    expect(svc).toContain("0022_hcm_drop_erp_domains");
   });
 });

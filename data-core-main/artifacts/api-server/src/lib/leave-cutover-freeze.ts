@@ -3,6 +3,7 @@ import type { AuthRequest } from "../middlewares/requireAuth";
 import { isLeaveCutoverEnabledForWorkspace } from "./leave-cutover-flags";
 import { incrementLeaveMetric } from "./leave-cutover-metrics";
 import { getLeaveRuntimeMode } from "./hr/hcm-workspace-settings";
+import { isLeaveCanonicalWriteEnvEnabled } from "./leave/canonical-write-policy";
 
 export const LEGACY_LEAVE_FROZEN_CODE = "LEGACY_LEAVE_FROZEN";
 
@@ -10,6 +11,7 @@ export async function isLegacyLeaveFrozenForWorkspace(
   workspaceId: number | null | undefined,
 ): Promise<boolean> {
   if (!workspaceId) return false;
+  if (!isLeaveCanonicalWriteEnvEnabled()) return false;
   if (isLeaveCutoverEnabledForWorkspace("legacyLeaveFreeze", workspaceId)) return true;
   const mode = await getLeaveRuntimeMode(workspaceId);
   return mode === "canonical";

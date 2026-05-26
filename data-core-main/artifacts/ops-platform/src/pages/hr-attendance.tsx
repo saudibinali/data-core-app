@@ -19,10 +19,12 @@ import {
   Clock, Plus, CalendarDays, Users, CheckCircle2, XCircle,
   AlertCircle, Pencil, Trash2, Calendar, CalendarCheck, Timer,
   ClipboardList, Upload, Download, FileSpreadsheet, AlertTriangle,
-  ChevronRight, Activity, Zap, TrendingUp,
+  ChevronRight, Activity, Zap, TrendingUp, Info, ArrowRight,
 } from "lucide-react";
 import { fetchLeaveListBridge, LEAVE_STATUS_UI } from "@/lib/leave-bridge";
 import { useLeaveCutover, isCanonicalLeaveApprovalUiEnabled } from "@/lib/leave-cutover-flags";
+import { useAttendanceCutover } from "@/lib/attendance-cutover-flags";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -75,7 +77,10 @@ export default function HrAttendancePage() {
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const leaveCutover = useLeaveCutover();
+  const attendanceCutover = useAttendanceCutover();
   const canonicalApprovalUi = isCanonicalLeaveApprovalUiEnabled(leaveCutover.status);
+  const useCanonicalAttendance = attendanceCutover.useCanonicalAttendance;
+  const legacyAttendanceReadOnly = attendanceCutover.legacyAttendanceReadOnly;
 
   // ── Main tabs
   const [activeTab, setActiveTab] = useState("attendance");
@@ -140,7 +145,17 @@ export default function HrAttendancePage() {
   if (attFilter.dateTo) attParams.set("dateTo", attFilter.dateTo);
   if (attFilter.status && attFilter.status !== "__all__") attParams.set("status", attFilter.status);
 
-  const attQ      = useQuery({ queryKey: ["/hr/attendance", attFilter], queryFn: () => apiClient.get(`/api/hr/attendance?${attParams}`).then((r) => r.data) });
+  const attQ = useQuery({
+    queryKey: [useCanonicalAttendance ? "/hr/workforce/attendance/summaries" : "/hr/attendance", attFilter],
+    queryFn: () =>
+      apiClient
+        .get(
+          useCanonicalAttendance
+            ? `/api/hr/workforce/attendance/summaries?${attParams}`
+            : `/api/hr/attendance?${attParams}`,
+        )
+        .then((r) => r.data),
+  });
   const shiftsQ   = useQuery({ queryKey: ["/hr/attendance/shifts"],     queryFn: () => apiClient.get("/api/hr/attendance/shifts").then((r) => r.data) });
   const calsQ     = useQuery({ queryKey: ["/hr/attendance/calendars"],  queryFn: () => apiClient.get("/api/hr/attendance/calendars").then((r) => r.data) });
   const leavesQ   = useQuery({
@@ -148,6 +163,10 @@ export default function HrAttendancePage() {
     queryFn: () => fetchLeaveListBridge(apiClient, {
       status: leaveFilter.status,
       includeLegacyAdmin: !leaveCutover.legacyFrozen,
+      cutover: {
+        legacyFreeze: leaveCutover.status?.legacyFreeze,
+        canonicalRead: leaveCutover.status?.canonicalRead,
+      },
     }),
   });
   const balancesQ  = useQuery({ queryKey: ["/hr/leave-balances", balanceFilter], queryFn: () => apiClient.get(`/api/hr/leave-balances?year=${balanceFilter.year}`).then((r) => r.data) });
@@ -343,7 +362,8 @@ export default function HrAttendancePage() {
           reconciliationReportId: number;
         }>(`/api/hr/workforce/imports/${importBatchId}/confirm`)
         .then((r) => r.data);
-      qc.invalidateQueries({ queryKey: ["/hr/attendance"] });
+      void qc.invalidateQueries({ queryKey: ["/hr/attendance"] });
+      void qc.invalidateQueries({ queryKey: ["/hr/workforce/attendance/summaries"] });
       const rec = result.reconciliation;
       toast({
         title: isAr
@@ -435,6 +455,36 @@ export default function HrAttendancePage() {
         <Link href={`${BASE}/hr`}><Button variant="outline" size="sm">{isAr ? "لوحة HR" : "HR Hub"}</Button></Link>
       </div>
 
+      {useCanonicalAttendance && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>{isAr ? "الحضور — النموذج المعياري" : "Attendance — canonical mode"}</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>
+              {isAr
+                ? "القراءة من attendance_daily_summaries. التسجيل اليدوي عبر استيراد workforce أو تسجيل ذاتي (clock-in/out)."
+                : "Reads from attendance_daily_summaries. Manual entry via workforce import or employee clock-in/out."}
+            </p>
+            <Link href={`${BASE}/self-service/attendance`} className="inline-flex items-center gap-1 text-sm font-medium hover:underline">
+              {isAr ? "تسجيل الحضور الذاتي" : "Employee self-service clock"}
+              <ArrowRight className="w-3 h-3" />
+            </Link>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {legacyAttendanceReadOnly && !useCanonicalAttendance && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>{isAr ? "كتابة legacy مجمدة" : "Legacy attendance writes frozen"}</AlertTitle>
+          <AlertDescription>
+            {isAr
+              ? "فعّل ATTENDANCE_CANONICAL_WRITE واستخدم استيراد workforce."
+              : "Enable ATTENDANCE_CANONICAL_WRITE and use workforce import."}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
@@ -485,7 +535,7 @@ export default function HrAttendancePage() {
             </div>
             {/* Action buttons */}
             <div className="flex flex-wrap gap-2">
-              {selectedIds.size > 0 && (
+              {selectedIds.size > 0 && !legacyAttendanceReadOnly && (
                 <Button size="sm" variant="outline" onClick={() => setBulkOpen(true)}>
                   <Users className="w-4 h-4 me-1" />{isAr ? `تعديل ${selectedIds.size} سجل` : `Bulk edit (${selectedIds.size})`}
                 </Button>
@@ -499,9 +549,11 @@ export default function HrAttendancePage() {
               <Button size="sm" variant="outline" onClick={() => { setImportOpen(true); setImportStep("upload"); setImportPreview(null); }}>
                 <Upload className="w-4 h-4 me-1" />{isAr ? "استيراد" : "Import"}
               </Button>
-              <Button size="sm" onClick={() => setNewAttOpen(true)}>
-                <Plus className="w-4 h-4 me-1" />{isAr ? "تسجيل حضور" : "Record"}
-              </Button>
+              {!legacyAttendanceReadOnly && (
+                <Button size="sm" onClick={() => setNewAttOpen(true)}>
+                  <Plus className="w-4 h-4 me-1" />{isAr ? "تسجيل حضور" : "Record"}
+                </Button>
+              )}
             </div>
           </div>
 
@@ -512,7 +564,10 @@ export default function HrAttendancePage() {
           ) : (
             <div className="rounded-lg border overflow-hidden">
               <div className="grid grid-cols-[32px_1fr_auto_auto_auto_auto] gap-2 p-2 bg-muted/40 text-xs font-semibold text-muted-foreground items-center">
-                <Checkbox checked={selectedIds.size === attendance.length && attendance.length > 0} onCheckedChange={toggleSelectAll} />
+                {!legacyAttendanceReadOnly && (
+                  <Checkbox checked={selectedIds.size === attendance.length && attendance.length > 0} onCheckedChange={toggleSelectAll} />
+                )}
+                {legacyAttendanceReadOnly && <span />}
                 <span>{isAr ? "الموظف" : "Employee"}</span>
                 <span>{isAr ? "التاريخ" : "Date"}</span>
                 <span>{isAr ? "الدخول / الخروج" : "In / Out"}</span>
@@ -524,7 +579,11 @@ export default function HrAttendancePage() {
                 const id = Number(a.id);
                 return (
                   <div key={id} className={`grid grid-cols-[32px_1fr_auto_auto_auto_auto] gap-2 p-2.5 items-center text-sm border-t hover:bg-muted/20 ${selectedIds.has(id) ? "bg-primary/5" : ""}`}>
-                    <Checkbox checked={selectedIds.has(id)} onCheckedChange={() => toggleSelect(id)} />
+                    {!legacyAttendanceReadOnly ? (
+                      <Checkbox checked={selectedIds.has(id)} onCheckedChange={() => toggleSelect(id)} />
+                    ) : (
+                      <span />
+                    )}
                     <div>
                       <p className="font-medium truncate">{String(a.employeeName ?? "-")}</p>
                       <p className="text-xs text-muted-foreground">{String(a.employeeNumber ?? "")}</p>

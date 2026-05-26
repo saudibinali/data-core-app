@@ -1553,9 +1553,40 @@ export const workforceDelegationsTable = pgTable(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PROVISION AUDIT (F4.3 — idempotency + compliance trail)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const hrProvisionAuditLogTable = pgTable(
+  "hr_provision_audit_log",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key"),
+    operation: text("operation").notNull(),
+    employeeId: integer("employee_id").references(() => employeesTable.id, { onDelete: "set null" }),
+    userId: integer("user_id").references(() => usersTable.id, { onDelete: "set null" }),
+    actorUserId: integer("actor_user_id").references(() => usersTable.id, { onDelete: "set null" }),
+    outcome: text("outcome").notNull(),
+    httpStatus: integer("http_status").notNull(),
+    errorMessage: text("error_message"),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    responseSnapshot: jsonb("response_snapshot"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_hr_provision_audit_ws_idem").on(t.workspaceId, t.idempotencyKey),
+    index("idx_hr_provision_audit_workspace").on(t.workspaceId, t.createdAt),
+    index("idx_hr_provision_audit_employee").on(t.employeeId, t.createdAt),
+  ],
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
 
+export type HrProvisionAuditLog         = typeof hrProvisionAuditLogTable.$inferSelect;
 export type HrWorkspaceSettings         = typeof hrWorkspaceSettingsTable.$inferSelect;
 export type LegacyDepartmentOrgMap      = typeof legacyDepartmentOrgMapTable.$inferSelect;
 export type WorkforceMigrationException   = typeof workforceMigrationExceptionsTable.$inferSelect;

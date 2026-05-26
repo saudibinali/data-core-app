@@ -7,7 +7,7 @@ import {
 } from "../middlewares/requirePayrollPermission";
 import { payrollOperationsService } from "../lib/payroll/payroll-operations-service";
 import { payrollExceptionService } from "../lib/payroll/payroll-exception-service";
-import { payrollAuditQueryService } from "../lib/payroll/payroll-audit";
+import { logPayrollAccess, payrollAuditQueryService } from "../lib/payroll/payroll-audit";
 import { financialExportService } from "../lib/payroll/financial-export-service";
 import { payrollPolicyOpsService } from "../lib/payroll/payroll-policy-ops-service";
 import { payrollComponentCatalog } from "../lib/payroll/payroll-component-catalog";
@@ -147,14 +147,20 @@ router.post(
       res.status(400).json({ error: "runIds required" });
       return;
     }
-    res.json(
-      await payrollOperationsService.bulkApproveReview(
-        ws,
-        runIds,
-        req.userId,
-        action ?? "approve",
-      ),
+    const result = await payrollOperationsService.bulkApproveReview(
+      ws,
+      runIds,
+      req.userId,
+      action ?? "approve",
     );
+    logPayrollAccess({
+      workspaceId: ws,
+      userId: req.userId,
+      action: `ops_review_bulk_${action ?? "approve"}`,
+      resourceType: "payroll_run",
+      metadata: { runIds, count: runIds.length },
+    });
+    res.json(result);
   },
 );
 
@@ -185,9 +191,16 @@ router.post(
   async (req: AuthRequest, res) => {
     const ws = requireWs(req, res);
     if (ws == null) return;
-    res.json(
-      await payrollExceptionService.scanRun(ws, Number(req.params.runId), req.userId),
-    );
+    const runId = Number(req.params.runId);
+    const scan = await payrollExceptionService.scanRun(ws, runId, req.userId);
+    logPayrollAccess({
+      workspaceId: ws,
+      userId: req.userId,
+      action: "ops_exception_scan",
+      resourceType: "payroll_run",
+      resourceId: runId,
+    });
+    res.json(scan);
   },
 );
 
@@ -199,9 +212,15 @@ router.post(
     const ws = requireWs(req, res);
     if (ws == null) return;
     try {
-      res.json(
-        await payrollExceptionService.acknowledge(ws, Number(req.params.id), req.userId),
-      );
+      const row = await payrollExceptionService.acknowledge(ws, Number(req.params.id), req.userId);
+      logPayrollAccess({
+        workspaceId: ws,
+        userId: req.userId,
+        action: "ops_exception_acknowledge",
+        resourceType: "payroll_exception",
+        resourceId: Number(req.params.id),
+      });
+      res.json(row);
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -216,7 +235,15 @@ router.post(
     const ws = requireWs(req, res);
     if (ws == null) return;
     try {
-      res.json(await payrollExceptionService.resolve(ws, Number(req.params.id), req.userId));
+      const row = await payrollExceptionService.resolve(ws, Number(req.params.id), req.userId);
+      logPayrollAccess({
+        workspaceId: ws,
+        userId: req.userId,
+        action: "ops_exception_resolve",
+        resourceType: "payroll_exception",
+        resourceId: Number(req.params.id),
+      });
+      res.json(row);
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -349,9 +376,11 @@ router.get(
     const ws = requireWs(req, res);
     if (ws == null) return;
     try {
+      const payments = await financialExportService.buildBankPaymentMetadata(ws, Number(req.params.runId));
       res.json({
-        payments: await financialExportService.buildBankPaymentMetadata(ws, Number(req.params.runId)),
-        bankReady: false,
+        payments,
+        bankReady: payments.length > 0,
+        wpsCsvAvailable: payments.length > 0,
       });
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -367,7 +396,7 @@ router.post(
     const ws = requireWs(req, res);
     if (ws == null || !req.userId) return;
     const { exportType } = req.body as {
-      exportType?: "gl_journal" | "cost_center" | "bank_metadata";
+      exportType?: "gl_journal" | "cost_center" | "bank_metadata" | "bank_wps";
     };
     if (!exportType) {
       res.status(400).json({ error: "exportType required" });

@@ -113,6 +113,7 @@ export function resolveLeaveCutoverStatus(
       canonicalApprove: true,
       canonicalRead: true,
       legacyFreeze: true,
+      canonicalWriteEnabled: true,
     };
   }
 
@@ -125,6 +126,7 @@ export function resolveLeaveCutoverStatus(
       canonicalApprove: true,
       canonicalRead: true,
       legacyFreeze: base.legacyFreeze,
+      canonicalWriteEnabled: true,
     };
   }
 
@@ -132,6 +134,7 @@ export function resolveLeaveCutoverStatus(
     ...base,
     leaveRuntimeMode: "legacy" as const,
     workspaceDriven: false,
+    canonicalWriteEnabled: true,
   };
 }
 

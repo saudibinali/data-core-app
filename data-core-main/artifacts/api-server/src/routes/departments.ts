@@ -121,6 +121,23 @@ router.patch("/departments/:id", requireAuth, requirePermission(req => [
     return;
   }
 
+  if (!req.workspaceId) {
+    res.status(400).json({ error: "No workspace assigned" });
+    return;
+  }
+
+  const writeCheck = await assertLegacyWriteAllowed(req.workspaceId, "departments", "PATCH /departments/:id");
+  if (!writeCheck.ok) {
+    void recordLegacyUsage({
+      workspaceId: req.workspaceId,
+      eventType: "write_blocked",
+      legacySurface: "departments",
+      sourcePath: "PATCH /departments/:id",
+    }).catch(() => undefined);
+    res.status(writeCheck.status).json({ error: writeCheck.error, code: writeCheck.code });
+    return;
+  }
+
   const [dept] = await db
     .update(departmentsTable)
     .set(parsed.data)
@@ -153,6 +170,23 @@ router.delete("/departments/:id", requireAuth, requirePermission(req => [
   const params = DeleteDepartmentParams.safeParse({ id: req.params.id });
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  if (!req.workspaceId) {
+    res.status(400).json({ error: "No workspace assigned" });
+    return;
+  }
+
+  const writeCheck = await assertLegacyWriteAllowed(req.workspaceId, "departments", "DELETE /departments/:id");
+  if (!writeCheck.ok) {
+    void recordLegacyUsage({
+      workspaceId: req.workspaceId,
+      eventType: "write_blocked",
+      legacySurface: "departments",
+      sourcePath: "DELETE /departments/:id",
+    }).catch(() => undefined);
+    res.status(writeCheck.status).json({ error: writeCheck.error, code: writeCheck.code });
     return;
   }
 

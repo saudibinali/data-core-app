@@ -65,13 +65,27 @@ export class FinancialExportService {
         and(eq(payrollRunsTable.workspaceId, workspaceId), eq(payrollRunsTable.status, "locked")),
       );
 
+    const lockedWithIssued = await db
+      .select({ id: payrollRunsTable.id })
+      .from(payrollRunsTable)
+      .innerJoin(payrollPayslipsTable, eq(payrollPayslipsTable.runId, payrollRunsTable.id))
+      .where(
+        and(
+          eq(payrollRunsTable.workspaceId, workspaceId),
+          eq(payrollRunsTable.status, "locked"),
+          eq(payrollPayslipsTable.status, "issued"),
+        ),
+      )
+      .limit(1);
+
     return {
       glMappingComplete: missingGl.length === 0,
       componentsMissingGl: missingGl.length,
       lockedRunsReady: lockedRuns.length,
-      bankExportReady: false,
+      bankExportReady: lockedWithIssued.length > 0,
+      wpsCsvExportReady: lockedWithIssued.length > 0,
       accountingPostReady: false,
-      message: "Foundation exports only — no live bank or ERP posting",
+      message: "Foundation exports only — WPS/bank CSV metadata, no live bank posting",
     };
   }
 
@@ -246,14 +260,15 @@ export class FinancialExportService {
       resourceId: runId,
     });
 
-    const json = JSON.stringify(body, null, 2);
     return {
-      buffer: Buffer.from(json, "utf8"),
-      contentType: "application/json",
+      buffer,
+      contentType,
       fileName,
       rowCount: Array.isArray((body as { lines?: unknown[] }).lines)
         ? (body as { lines: unknown[] }).lines.length
-        : 1,
+        : typeof (body as { rowCount?: number }).rowCount === "number"
+          ? (body as { rowCount: number }).rowCount
+          : 1,
     };
   }
 }

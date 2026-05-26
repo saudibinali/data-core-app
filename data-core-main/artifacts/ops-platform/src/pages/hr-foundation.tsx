@@ -1,5 +1,64 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  createHrContractType,
+  createHrDocumentType,
+  createHrEmployeeStatus,
+  createHrEmploymentType,
+  createHrJobGrade,
+  createHrJobTitle,
+  createHrLeavePolicy,
+  createHrOrgUnit,
+  createHrPosition,
+  createHrProbationPolicy,
+  createHrWorkLocation,
+  deleteHrContractType,
+  deleteHrDocumentType,
+  deleteHrEmployeeStatus,
+  deleteHrEmploymentType,
+  deleteHrJobGrade,
+  deleteHrJobTitle,
+  deleteHrLeavePolicy,
+  deleteHrOrgUnit,
+  deleteHrPosition,
+  deleteHrProbationPolicy,
+  deleteHrWorkLocation,
+  getListHrContractTypesQueryKey,
+  getListHrDocumentTypesQueryKey,
+  getListHrEmployeeStatusesQueryKey,
+  getListHrEmploymentTypesQueryKey,
+  getListHrJobGradesQueryKey,
+  getListHrJobTitlesQueryKey,
+  getListHrLeavePoliciesQueryKey,
+  getListHrOrgUnitsQueryKey,
+  getListHrPositionsQueryKey,
+  getListHrProbationPoliciesQueryKey,
+  getListHrWorkLocationsQueryKey,
+  seedHrFoundation,
+  updateHrContractType,
+  updateHrDocumentType,
+  updateHrEmployeeStatus,
+  updateHrEmploymentType,
+  updateHrJobGrade,
+  updateHrJobTitle,
+  updateHrLeavePolicy,
+  updateHrOrgUnit,
+  updateHrPosition,
+  updateHrProbationPolicy,
+  updateHrWorkLocation,
+  useListHrContractTypes,
+  useListHrDocumentTypes,
+  useListHrEmployeeStatuses,
+  useListHrEmploymentTypes,
+  useListHrJobGrades,
+  useListHrJobTitles,
+  useListHrLeavePolicies,
+  useListHrOrgUnits,
+  useListHrPositions,
+  useListHrProbationPolicies,
+  useListHrWorkLocations,
+} from "@workspace/api-client-react";
 import { useApiFetch } from "@/hooks/use-api-fetch";
 import { usePermissions } from "@/hooks/use-permissions";
 import { Button } from "@/components/ui/button";
@@ -318,22 +377,24 @@ function SimpleEntityCard({
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function HrFoundationPage() {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const isAr = i18n.language.startsWith("ar");
   const apiFetch = useApiFetch();
+  const queryClient = useQueryClient();
   const { isAdmin } = usePermissions();
 
-  const [statuses,          setStatuses]          = useState<HrEmployeeStatus[]>([]);
-  const [empTypes,          setEmpTypes]           = useState<HrEmploymentType[]>([]);
-  const [contractTypes,     setContractTypes]      = useState<HrContractType[]>([]);
-  const [workLocations,     setWorkLocations]      = useState<HrWorkLocation[]>([]);
-  const [positions,         setPositions]          = useState<HrPosition[]>([]);
-  const [docTypes,          setDocTypes]           = useState<HrDocumentType[]>([]);
-  const [leavePolicies,     setLeavePolicies]      = useState<HrLeavePolicy[]>([]);
-  const [probationPolicies, setProbationPolicies]  = useState<HrProbationPolicy[]>([]);
-  const [orgUnits,          setOrgUnits]           = useState<HrOrgUnit[]>([]);
-  const [jobGrades,         setJobGrades]          = useState<HrJobGrade[]>([]);
-  const [jobTitles,         setJobTitles]          = useState<HrJobTitle[]>([]);
+  const { data: statuses = [], isLoading: statusesLoading, refetch: refetchStatuses } = useListHrEmployeeStatuses();
+  const { data: empTypes = [], isLoading: empTypesLoading, refetch: refetchEmpTypes } = useListHrEmploymentTypes();
+  const { data: contractTypes = [], isLoading: contractTypesLoading, refetch: refetchContractTypes } = useListHrContractTypes();
+  const { data: workLocations = [], isLoading: workLocationsLoading, refetch: refetchWorkLocations } = useListHrWorkLocations();
+  const { data: positions = [], isLoading: positionsLoading, refetch: refetchPositions } = useListHrPositions();
+  const { data: docTypes = [], isLoading: docTypesLoading, refetch: refetchDocTypes } = useListHrDocumentTypes();
+  const { data: leavePolicies = [], isLoading: leavePoliciesLoading, refetch: refetchLeavePolicies } = useListHrLeavePolicies();
+  const { data: probationPolicies = [], isLoading: probationPoliciesLoading, refetch: refetchProbationPolicies } = useListHrProbationPolicies();
+
+  const { data: orgUnits = [], refetch: refetchOrgUnits } = useListHrOrgUnits();
+  const { data: jobGrades = [], refetch: refetchJobGrades } = useListHrJobGrades();
+  const { data: jobTitles = [], refetch: refetchJobTitles } = useListHrJobTitles();
 
   const [loading,  setLoading]  = useState<Record<string, boolean>>({});
   const [seeding,  setSeeding]  = useState(false);
@@ -341,96 +402,135 @@ export default function HrFoundationPage() {
 
   const setLoad = (key: string, val: boolean) => setLoading(prev => ({ ...prev, [key]: val }));
 
-  const fetchAll = useCallback(async () => {
-    const tasks: Array<[string, (d: BaseEntity[]) => void]> = [
-      ["/api/hr/foundation/statuses",          d => setStatuses(d as HrEmployeeStatus[])],
-      ["/api/hr/foundation/employment-types",  d => setEmpTypes(d as HrEmploymentType[])],
-      ["/api/hr/foundation/contract-types",    d => setContractTypes(d as HrContractType[])],
-      ["/api/hr/foundation/work-locations",    d => setWorkLocations(d as HrWorkLocation[])],
-      ["/api/hr/foundation/positions",         d => setPositions(d as HrPosition[])],
-      ["/api/hr/foundation/document-types",    d => setDocTypes(d as HrDocumentType[])],
-      ["/api/hr/foundation/leave-policies",    d => setLeavePolicies(d as HrLeavePolicy[])],
-      ["/api/hr/foundation/probation-policies",d => setProbationPolicies(d as HrProbationPolicy[])],
-      ["/api/hr/org-units",                    d => setOrgUnits(d as HrOrgUnit[])],
-      ["/api/hr/job-grades",                   d => setJobGrades(d as HrJobGrade[])],
-      ["/api/hr/job-titles",                   d => setJobTitles(d as HrJobTitle[])],
-    ];
-    await Promise.all(tasks.map(async ([url, setter]) => {
-      try {
-        const r = await apiFetch(url);
-        if (r.ok) { const d = await r.json(); setter(Array.isArray(d) ? d as BaseEntity[] : []); }
-      } catch { /* ignore */ }
-    }));
-  }, [apiFetch]);
+  const refetchAll = () => {
+    void refetchStatuses();
+    void refetchEmpTypes();
+    void refetchContractTypes();
+    void refetchWorkLocations();
+    void refetchPositions();
+    void refetchDocTypes();
+    void refetchLeavePolicies();
+    void refetchProbationPolicies();
+    void refetchOrgUnits();
+    void refetchJobGrades();
+    void refetchJobTitles();
+  };
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
-
-  // ── Seed defaults ──────────────────────────────────────────────────────────
   const handleSeed = async () => {
     setSeeding(true);
     try {
-      const r = await apiFetch("/api/hr/foundation/seed", { method: "POST" });
-      if (r.ok) {
-        toast.success(isAr ? "تم ملء البيانات الافتراضية بنجاح" : "Default foundation data seeded successfully");
-        await fetchAll();
-      } else {
-        toast.error(isAr ? "فشل في ملء البيانات" : "Failed to seed defaults");
-      }
+      await seedHrFoundation();
+      toast.success(t("hr_foundation_seed_ok"));
+      refetchAll();
+    } catch {
+      toast.error(t("hr_foundation_seed_fail"));
     } finally { setSeeding(false); }
   };
 
-  // ── Generic CRUD factory ───────────────────────────────────────────────────
-  function makeCrud<T extends BaseEntity>(
-    baseUrl: string,
-    setter: React.Dispatch<React.SetStateAction<T[]>>,
+  function makeCodegenCrud(
+    invalidate: () => Promise<unknown>,
     loadKey: string,
+    handlers: {
+      create: (values: Record<string, unknown>) => Promise<{ id: number }>;
+      update: (id: number, values: Record<string, unknown>) => Promise<{ id: number }>;
+      remove: (id: number) => Promise<void>;
+    },
   ) {
     const save = async (values: Record<string, unknown>, id?: number) => {
       setLoad(loadKey, true);
       try {
-        const url    = id ? `${baseUrl}/${id}` : baseUrl;
-        const method = id ? "PATCH" : "POST";
-        const r = await apiFetch(url, { method, body: JSON.stringify(values) });
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          toast.error(body.error ?? (isAr ? "فشل الحفظ" : "Failed to save"));
-          return;
-        }
-        const updated: T = await r.json();
-        setter(prev => id
-          ? prev.map(x => x.id === id ? updated : x)
-          : [...prev, updated],
-        );
-        toast.success(id
-          ? (isAr ? "تم التحديث" : "Updated")
-          : (isAr ? "تم الإنشاء" : "Created"));
+        if (id) await handlers.update(id, values);
+        else await handlers.create(values);
+        await invalidate();
+        toast.success(id ? t("hr_entity_updated") : t("hr_entity_created"));
+      } catch (e: unknown) {
+        toast.error(e instanceof Error ? e.message : t("hr_entity_save_fail"));
       } finally { setLoad(loadKey, false); }
     };
 
     const del = async (id: number) => {
       setLoad(loadKey, true);
       try {
-        const r = await apiFetch(`${baseUrl}/${id}`, { method: "DELETE" });
-        if (!r.ok) { toast.error(isAr ? "فشل الحذف" : "Failed to delete"); return; }
-        setter(prev => prev.filter(x => x.id !== id));
-        toast.success(isAr ? "تم الحذف" : "Deleted");
+        await handlers.remove(id);
+        await invalidate();
+        toast.success(t("hr_entity_deleted"));
+      } catch (e: unknown) {
+        toast.error(e instanceof Error ? e.message : t("hr_entity_delete_fail"));
       } finally { setLoad(loadKey, false); }
     };
 
     return { save, del };
   }
 
-  const statusCrud   = makeCrud("/api/hr/foundation/statuses",          setStatuses,         "statuses");
-  const etCrud       = makeCrud("/api/hr/foundation/employment-types",   setEmpTypes,         "empTypes");
-  const ctCrud       = makeCrud("/api/hr/foundation/contract-types",     setContractTypes,    "contractTypes");
-  const wlCrud       = makeCrud("/api/hr/foundation/work-locations",     setWorkLocations,    "workLocations");
-  const posCrud      = makeCrud("/api/hr/foundation/positions",          setPositions,        "positions");
-  const dtCrud       = makeCrud("/api/hr/foundation/document-types",     setDocTypes,         "docTypes");
-  const lpCrud       = makeCrud("/api/hr/foundation/leave-policies",     setLeavePolicies,    "leavePolicies");
-  const probCrud     = makeCrud("/api/hr/foundation/probation-policies", setProbationPolicies,"probation");
-  const ouCrud       = makeCrud("/api/hr/org-units",                     setOrgUnits,         "orgUnits");
-  const jgCrud       = makeCrud("/api/hr/job-grades",                    setJobGrades,        "jobGrades");
-  const jtCrud       = makeCrud("/api/hr/job-titles",                    setJobTitles,        "jobTitles");
+  const invalidateOrg = () => queryClient.invalidateQueries({ queryKey: getListHrOrgUnitsQueryKey() });
+  const invalidateJg = () => queryClient.invalidateQueries({ queryKey: getListHrJobGradesQueryKey() });
+  const invalidateJt = () => queryClient.invalidateQueries({ queryKey: getListHrJobTitlesQueryKey() });
+
+  const ouCrud = makeCodegenCrud(invalidateOrg, "orgUnits", {
+    create: (v) => createHrOrgUnit(v as Parameters<typeof createHrOrgUnit>[0]),
+    update: (id, v) => updateHrOrgUnit(id, v as Parameters<typeof updateHrOrgUnit>[1]),
+    remove: deleteHrOrgUnit,
+  });
+  const jgCrud = makeCodegenCrud(invalidateJg, "jobGrades", {
+    create: (v) => createHrJobGrade(v as Parameters<typeof createHrJobGrade>[0]),
+    update: (id, v) => updateHrJobGrade(id, v as Parameters<typeof updateHrJobGrade>[1]),
+    remove: deleteHrJobGrade,
+  });
+  const jtCrud = makeCodegenCrud(invalidateJt, "jobTitles", {
+    create: (v) => createHrJobTitle(v as Parameters<typeof createHrJobTitle>[0]),
+    update: (id, v) => updateHrJobTitle(id, v as Parameters<typeof updateHrJobTitle>[1]),
+    remove: deleteHrJobTitle,
+  });
+
+  const invalidateStatuses = () => queryClient.invalidateQueries({ queryKey: getListHrEmployeeStatusesQueryKey() });
+  const invalidateEmpTypes = () => queryClient.invalidateQueries({ queryKey: getListHrEmploymentTypesQueryKey() });
+  const invalidateContractTypes = () => queryClient.invalidateQueries({ queryKey: getListHrContractTypesQueryKey() });
+  const invalidateWorkLocations = () => queryClient.invalidateQueries({ queryKey: getListHrWorkLocationsQueryKey() });
+  const invalidatePositions = () => queryClient.invalidateQueries({ queryKey: getListHrPositionsQueryKey() });
+  const invalidateDocTypes = () => queryClient.invalidateQueries({ queryKey: getListHrDocumentTypesQueryKey() });
+  const invalidateLeavePolicies = () => queryClient.invalidateQueries({ queryKey: getListHrLeavePoliciesQueryKey() });
+  const invalidateProbation = () => queryClient.invalidateQueries({ queryKey: getListHrProbationPoliciesQueryKey() });
+
+  const statusCrud = makeCodegenCrud(invalidateStatuses, "statuses", {
+    create: (v) => createHrEmployeeStatus(v as Parameters<typeof createHrEmployeeStatus>[0]),
+    update: (id, v) => updateHrEmployeeStatus(id, v as Parameters<typeof updateHrEmployeeStatus>[1]),
+    remove: deleteHrEmployeeStatus,
+  });
+  const etCrud = makeCodegenCrud(invalidateEmpTypes, "empTypes", {
+    create: (v) => createHrEmploymentType(v as Parameters<typeof createHrEmploymentType>[0]),
+    update: (id, v) => updateHrEmploymentType(id, v as Parameters<typeof updateHrEmploymentType>[1]),
+    remove: deleteHrEmploymentType,
+  });
+  const ctCrud = makeCodegenCrud(invalidateContractTypes, "contractTypes", {
+    create: (v) => createHrContractType(v as Parameters<typeof createHrContractType>[0]),
+    update: (id, v) => updateHrContractType(id, v as Parameters<typeof updateHrContractType>[1]),
+    remove: deleteHrContractType,
+  });
+  const wlCrud = makeCodegenCrud(invalidateWorkLocations, "workLocations", {
+    create: (v) => createHrWorkLocation(v as Parameters<typeof createHrWorkLocation>[0]),
+    update: (id, v) => updateHrWorkLocation(id, v as Parameters<typeof updateHrWorkLocation>[1]),
+    remove: deleteHrWorkLocation,
+  });
+  const posCrud = makeCodegenCrud(invalidatePositions, "positions", {
+    create: (v) => createHrPosition(v as Parameters<typeof createHrPosition>[0]),
+    update: (id, v) => updateHrPosition(id, v as Parameters<typeof updateHrPosition>[1]),
+    remove: deleteHrPosition,
+  });
+  const dtCrud = makeCodegenCrud(invalidateDocTypes, "docTypes", {
+    create: (v) => createHrDocumentType(v as Parameters<typeof createHrDocumentType>[0]),
+    update: (id, v) => updateHrDocumentType(id, v as Parameters<typeof updateHrDocumentType>[1]),
+    remove: deleteHrDocumentType,
+  });
+  const lpCrud = makeCodegenCrud(invalidateLeavePolicies, "leavePolicies", {
+    create: (v) => createHrLeavePolicy(v as Parameters<typeof createHrLeavePolicy>[0]),
+    update: (id, v) => updateHrLeavePolicy(id, v as Parameters<typeof updateHrLeavePolicy>[1]),
+    remove: deleteHrLeavePolicy,
+  });
+  const probCrud = makeCodegenCrud(invalidateProbation, "probation", {
+    create: (v) => createHrProbationPolicy(v as Parameters<typeof createHrProbationPolicy>[0]),
+    update: (id, v) => updateHrProbationPolicy(id, v as Parameters<typeof updateHrProbationPolicy>[1]),
+    remove: deleteHrProbationPolicy,
+  });
 
   // ── Shared option lists ────────────────────────────────────────────────────
   // Use "__none__" sentinel (never empty string - Radix SelectItem rejects it)
@@ -462,9 +562,9 @@ export default function HrFoundationPage() {
   async function downloadEmployeeTemplate() {
     try {
       await downloadWithAuth(`${BASE}/api/hr/employees/import-template`, "employee_import_template.xlsx");
-      toast.success(isAr ? "تم تحميل قالب استيراد الموظفين" : "Employee import template downloaded");
+      toast.success(t("hr_foundation_template_ok"));
     } catch {
-      toast.error(isAr ? "فشل تحميل القالب" : "Failed to download template");
+      toast.error(t("hr_foundation_template_fail"));
     }
   }
 
@@ -480,9 +580,9 @@ export default function HrFoundationPage() {
       a.download = `hr_master_data_${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      toast.success(isAr ? "تم تصدير البيانات الأساسية" : "Foundation data exported");
+      toast.success(t("hr_foundation_export_ok"));
     } catch {
-      toast.error(isAr ? "فشل التصدير — تأكد من تفعيل نظام الاستيراد" : "Export failed — ensure import runtime is available");
+      toast.error(t("hr_foundation_export_fail"));
     }
   }
 
@@ -508,12 +608,10 @@ export default function HrFoundationPage() {
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">
             <Layers className="w-6 h-6 text-primary" />
-            {isAr ? "البيانات الأساسية للموارد البشرية" : "HR Foundation Data"}
+            {t("hr_foundation_title")}
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
-            {isAr
-              ? "إعداد المكوّنات الديناميكية لنظام الموارد البشرية - لا قيم ثابتة، كل شيء قابل للتهيئة."
-              : "Configure the dynamic building blocks of your HR system - fully metadata-driven."}
+            {t("hr_foundation_subtitle")}
           </p>
         </div>
         {isAdmin && (
@@ -521,7 +619,7 @@ export default function HrFoundationPage() {
             {seeding
               ? <RefreshCw className="w-4 h-4 animate-spin me-2" />
               : <Sparkles className="w-4 h-4 me-2" />}
-            {isAr ? "ملء البيانات الافتراضية" : "Seed Defaults"}
+            {t("hr_foundation_seed")}
           </Button>
         )}
       </div>
@@ -530,26 +628,24 @@ export default function HrFoundationPage() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base flex items-center gap-2">
             <Upload className="w-4 h-4" />
-            {isAr ? "استيراد وتصدير البيانات" : "Import & Export"}
+            {t("hr_foundation_import_export")}
           </CardTitle>
           <CardDescription>
-            {isAr
-              ? "حمّل قالب Excel لاستيراد الموظفين — البيانات المرجعية المفقودة (قسم، درجة، منصب...) تُنشأ تلقائياً عند الموافقة وتظهر هنا."
-              : "Download the employee Excel template — missing reference data (departments, grades, positions...) is auto-created on import approval and reflected here."}
+            {t("hr_foundation_import_desc")}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={downloadEmployeeTemplate}>
             <FileSpreadsheet className="w-4 h-4 me-2 text-green-600" />
-            {isAr ? "قالب استيراد الموظفين" : "Employee Import Template"}
+            {t("hr_foundation_template")}
           </Button>
           <Button variant="outline" size="sm" onClick={exportMasterData}>
             <Download className="w-4 h-4 me-2" />
-            {isAr ? "تصدير البيانات الأساسية (JSON)" : "Export Foundation Data (JSON)"}
+            {t("hr_foundation_export")}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => void fetchAll()}>
+          <Button variant="ghost" size="sm" onClick={refetchAll}>
             <RefreshCw className="w-4 h-4 me-2" />
-            {isAr ? "تحديث القائمة" : "Refresh lists"}
+            {t("hr_foundation_refresh")}
           </Button>
         </CardContent>
       </Card>
@@ -572,7 +668,7 @@ export default function HrFoundationPage() {
             description="Dynamic status definitions. Mark terminal statuses (Resigned, Terminated) as Final."
             descriptionAr="تعريف الحالات الديناميكية. علّم الحالات النهائية (استقالة، إنهاء خدمة) بـ 'نهائية'."
             items={statuses as BaseEntity[]}
-            loading={Boolean(loading.statuses)}
+            loading={Boolean(loading.statuses) || statusesLoading}
             onSave={statusCrud.save}
             onDelete={statusCrud.del}
             isAr={isAr}
@@ -609,7 +705,7 @@ export default function HrFoundationPage() {
             description="Full-time, Part-time, Contractor, Intern, Temporary - fully configurable."
             descriptionAr="دوام كامل، جزئي، متعاقد، متدرب، مؤقت - قابل للتهيئة الكاملة."
             items={empTypes as BaseEntity[]}
-            loading={Boolean(loading.empTypes)}
+            loading={Boolean(loading.empTypes) || empTypesLoading}
             onSave={etCrud.save}
             onDelete={etCrud.del}
             isAr={isAr}
@@ -641,7 +737,7 @@ export default function HrFoundationPage() {
             description="Annual, Open-Ended, Project-Based, Training - fully configurable."
             descriptionAr="سنوي، مفتوح المدة، مشروع، تدريب - قابل للتهيئة الكاملة."
             items={contractTypes as BaseEntity[]}
-            loading={Boolean(loading.contractTypes)}
+            loading={Boolean(loading.contractTypes) || contractTypesLoading}
             onSave={ctCrud.save}
             onDelete={ctCrud.del}
             isAr={isAr}
@@ -673,7 +769,7 @@ export default function HrFoundationPage() {
             description="Office branches, remote, hybrid, and field sites."
             descriptionAr="الفروع، العمل عن بُعد، الهجين، والمواقع الميدانية."
             items={workLocations as BaseEntity[]}
-            loading={Boolean(loading.workLocations)}
+            loading={Boolean(loading.workLocations) || workLocationsLoading}
             onSave={wlCrud.save}
             onDelete={wlCrud.del}
             isAr={isAr}
@@ -722,7 +818,7 @@ export default function HrFoundationPage() {
             description='Actual seats in the org chart - distinct from Job Titles.'
             descriptionAr='المقاعد الفعلية في الهيكل التنظيمي - مختلفة عن المسمّيات الوظيفية.'
             items={positions as BaseEntity[]}
-            loading={Boolean(loading.positions)}
+            loading={Boolean(loading.positions) || positionsLoading}
             onSave={posCrud.save}
             onDelete={posCrud.del}
             isAr={isAr}
@@ -769,7 +865,7 @@ export default function HrFoundationPage() {
             description="National ID, Passport, Certificates, Work Permits - define all categories."
             descriptionAr="هوية وطنية، جواز سفر، شهادات، تصاريح عمل - عرّف جميع الفئات هنا."
             items={docTypes as BaseEntity[]}
-            loading={Boolean(loading.docTypes)}
+            loading={Boolean(loading.docTypes) || docTypesLoading}
             onSave={dtCrud.save}
             onDelete={dtCrud.del}
             isAr={isAr}
@@ -803,7 +899,7 @@ export default function HrFoundationPage() {
             description="Annual days, accrual type, carry-over, paid/unpaid - one policy per leave type."
             descriptionAr="الأيام السنوية، نوع الاستحقاق، الترحيل، مدفوعة/غير مدفوعة - سياسة لكل نوع."
             items={leavePolicies as BaseEntity[]}
-            loading={Boolean(loading.leavePolicies)}
+            loading={Boolean(loading.leavePolicies) || leavePoliciesLoading}
             onSave={lpCrud.save}
             onDelete={lpCrud.del}
             isAr={isAr}
@@ -862,7 +958,7 @@ export default function HrFoundationPage() {
             description="Duration and extension rules for different employee categories."
             descriptionAr="مدة الاختبار وقواعد التمديد لفئات الموظفين المختلفة."
             items={probationPolicies as BaseEntity[]}
-            loading={Boolean(loading.probation)}
+            loading={Boolean(loading.probation) || probationPoliciesLoading}
             onSave={probCrud.save}
             onDelete={probCrud.del}
             isAr={isAr}

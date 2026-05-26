@@ -8,12 +8,36 @@ import {
 import {
   createUserFromEmployee,
   getEmployeeProvisionPreviewById,
+  listProvisionCandidates,
   lookupEmployeeForProvisioning,
 } from "../lib/hr/employee-user-provisioning";
+import { readProvisionIdempotencyKey } from "../lib/hr/provision-http";
 
 const router = Router();
 
 /** Static routes must be registered before /hr/employees/:id/* */
+router.get(
+  "/hr/employees/provision/candidates",
+  requireAuth,
+  requireWorkspaceAdmin,
+  async (req: AuthRequest, res): Promise<void> => {
+    const workspaceId = req.workspaceId;
+    if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
+
+    const canProvisionOnly = req.query.canProvision === "true" || req.query.canProvision === "1";
+    const search = String(req.query.search ?? "").trim() || undefined;
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+
+    const candidates = await listProvisionCandidates(workspaceId, {
+      canProvisionOnly,
+      search,
+      limit,
+    });
+    res.json(candidates);
+  },
+);
+
 router.get(
   "/hr/employees/provision/lookup",
   requireAuth,
@@ -50,6 +74,7 @@ router.post(
       role: role ? String(role) : "member",
       customRoleId: customRoleId != null ? Number(customRoleId) : null,
       mustResetPassword: mustResetPassword === true,
+      idempotencyKey: readProvisionIdempotencyKey(req),
     });
 
     if (!result.ok) {
@@ -122,6 +147,7 @@ router.post(
       role: role ? String(role) : "member",
       customRoleId: customRoleId != null ? Number(customRoleId) : null,
       mustResetPassword: mustResetPassword === true,
+      idempotencyKey: readProvisionIdempotencyKey(req),
     });
 
     if (!result.ok) {

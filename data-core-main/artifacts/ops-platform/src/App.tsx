@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { KeyRound, X, Hash, Lock, Eye, EyeOff, ShieldOff } from "lucide-react";
+import { KeyRound, X, Hash, Lock, Eye, EyeOff, ShieldOff, Globe } from "lucide-react";
 import { usePermissions } from "@/hooks/use-permissions";
 import { Switch, Route, useLocation, Router as WouterRouter, Redirect, Link } from 'wouter';
 import { queryClient } from "./lib/queryClient";
@@ -80,6 +80,7 @@ import HrFoundationPage from "@/pages/hr-foundation";
 import HrPayrollPage from "@/pages/hr-payroll";
 import HrPayrollRunPage from "@/pages/hr-payroll-run";
 import HrAttendancePage from "@/pages/hr-attendance";
+import HrLeaveAdminPage from "@/pages/hr-leave-admin";
 import HrWorkforceOpsPage from "@/pages/hr-workforce-ops";
 import WorkspaceIntegrationsPage from "@/pages/workspace-integrations";
 import HrPayrollOpsPage from "@/pages/hr-payroll-ops";
@@ -648,6 +649,7 @@ function AppRoutes() {
         <Route path="/admin/hr/forms">{() => <ProtectedRoute component={AdminFormsPage} requiredRoles={["admin"]} moduleKey="hr" />}</Route>
         <Route path="/admin/hr/forms/new">{() => <ProtectedRoute component={AdminFormsNewPage} requiredRoles={["admin"]} moduleKey="hr" />}</Route>
         <Route path="/admin/hr/forms/:id">{() => <ProtectedRoute component={AdminFormsDetailPage} requiredRoles={["admin"]} moduleKey="hr" />}</Route>
+        <Route path="/self-service/forms/:id/submit">{() => <ProtectedRoute component={FormsSubmitPage} requiredPermission="self_service.view" moduleKey="self-service" />}</Route>
         <Route path="/self-service">{() => <ProtectedRoute component={SelfServicePage} requiredPermission="self_service.view" moduleKey="self-service" />}</Route>
         <Route path="/subscription/status">{() => <ProtectedRoute component={SubscriptionStatusPage} requiredPermission="tenant.subscription.read" moduleKey="subscription" />}</Route>
         <Route path="/billing/invoices">{() => <Redirect to="/subscription/status" />}</Route>
@@ -664,6 +666,7 @@ function AppRoutes() {
         <Route path="/admin/hr/payroll">{() => <ProtectedRoute component={HrPayrollPage} requiredPermission="hr.payroll.admin" moduleKey="payroll" />}</Route>
         <Route path="/admin/hr/payroll/runs/:id">{() => <ProtectedRoute component={HrPayrollRunPage} requiredPermission="hr.payroll.admin" moduleKey="payroll" />}</Route>
         <Route path="/admin/hr/attendance">{() => <ProtectedRoute component={HrAttendancePage} requiredPermission="hr.manage" moduleKey="attendance" />}</Route>
+        <Route path="/admin/hr/leave">{() => <ProtectedRoute component={HrLeaveAdminPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/admin/hr/workforce-ops">{() => <ProtectedRoute component={HrWorkforceOpsPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/admin/integrations">{() => <ProtectedRoute component={WorkspaceIntegrationsPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/admin/hr/payroll-ops">{() => <ProtectedRoute component={HrPayrollOpsPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>

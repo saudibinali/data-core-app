@@ -2,6 +2,9 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { isDatabaseConfigured } from "@workspace/db";
 import { runInitSequence } from "./lib/init-sequence";
+import { assertProductionSecrets } from "./lib/security-config";
+
+assertProductionSecrets();
 
 // PORT - defaults to 8080 so the server starts without manual env setup.
 const port = Number(process.env["PORT"] ?? "8080");

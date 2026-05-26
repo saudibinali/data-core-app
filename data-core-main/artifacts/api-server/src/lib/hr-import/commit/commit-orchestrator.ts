@@ -36,6 +36,7 @@ import { runShadowCommitSimulation } from "./shadow-commit-simulation";
 import { syncImportWorkforceSideEffects } from "../workforce/import-workforce-sync";
 import { recordCommitTelemetry } from "../telemetry/commit-telemetry";
 import { incrementRuntimeMetric } from "../../workforce/stabilization/observability-metrics";
+import { evaluateImportCutoverGates } from "../../workforce/stabilization/import-cutover-gates";
 
 export type CommitExecutionResult = {
   sessionId: number;
@@ -128,6 +129,19 @@ export class CommitOrchestrator {
         liveWrites: false,
         shadowResult,
         timingMs: { totalMs: Date.now() - t0 },
+      };
+    }
+
+    const importGates = await evaluateImportCutoverGates(input.workspaceId);
+    if (importGates.strictRowValidation && !importGates.commitAllowed) {
+      return {
+        sessionId: input.sessionId,
+        status: session.status,
+        mode: "controlled_commit",
+        committed: false,
+        liveWrites: false,
+        reason: "IMPORT_CUTOVER_NOT_READY",
+        errors: importGates.commitBlockers.map((b) => `${b.id}: ${b.detail}`),
       };
     }
 

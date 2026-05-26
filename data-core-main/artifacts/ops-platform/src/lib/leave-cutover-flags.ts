@@ -23,6 +23,7 @@ export type LeaveCutoverStatus = {
   canonicalApprove: boolean;
   legacyFreeze: boolean;
   canonicalRead: boolean;
+  canonicalWriteEnabled?: boolean;
   leaveRuntimeMode?: LeaveRuntimeMode;
   workspaceDriven?: boolean;
 };

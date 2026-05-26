@@ -1,0 +1,789 @@
+================================================================================
+              تقرير الهندسة البرمجية 1 — منصة Data Core (Ops Platform)
+        تقييم شامل للبنية، المسؤوليات، المخاطر، والإصلاحات المقترحة
+                    (تقرير فقط — بدون تنفيذ تعديلات)
+================================================================================
+تاريخ التقرير: 2026-05-20
+نطاق المراجعة: data-core-main (monorepo كامل)
+الجمهور: فريق الهندسة، DevOps، أمن المعلومات، Product/Architecture
+
+================================================================================
+0. الملخص التنفيذي
+================================================================================
+
+Data Core منصة enterprise متعددة المستأجرين (multi-tenant) تجمع:
+  • Core Ops (تذاكر، بريد، تقويم، مستخدمون، أقسام)
+  • HCM/HR (موظفون، foundation، حضور، رواتب، استيراد)
+  • Self-service + نماذج ذكية + سير عمل
+  • Platform Super-Admin (مستأجرون، تجاري، اشتراكات، حوكمة)
+  • On-Prem readiness (setup wizard، Docker، PM2)
+
+نموذج النشر: monolith modular — API واحد (Express) + SPA (React/Vite) +
+              PostgreSQL واحد + عزل منطقي بـ workspace_id.
+
+التقييم العام للهندسة:
+  ┌─────────────────────┬──────────┬────────────────────────────────────────┐
+  │ المحور              │ النضج    │ ملخص                                   │
+  ├─────────────────────┼──────────┼────────────────────────────────────────┤
+  │ البنية المعمارية    │ جيد      │ طبقات واضحة، monorepo منظم              │
+  │ عزل المستأجرين      │ جيد−     │ FK + JWT scope؛ يعتمد على انضباط الكود │
+  │ RBAC                │ جيد      │ workspace + platform؛ bypass للadmin   │
+  │ قاعدة البيانات      │ متوسط    │ schema غني؛ drift migrations           │
+  │ الأمن               │ متوسط−   │ JWT؛ CORS مفتوح؛ لا rate limit عام     │
+  │ الأداء/Scalability  │ متوسط−   │ monolith + PG؛ workers DB-backed       │
+  │ الاختبارات          │ متوسط    │ ~175 ملف vitest؛ فجوات routes كبيرة    │
+  │ التوثيق (OpenAPI)   │ ضعيف     │ ~79% مسارات API غير موثّقة              │
+  │ CI/CD               │ ضعيف     │ لا GitHub Actions في الم repo            │
+  │ المراقبة            │ متوسط−   │ pino فقط؛ لا APM/tracing مدمج          │
+  │ On-Prem             │ جيد      │ wizard + docker-compose + PM2          │
+  └─────────────────────┴──────────┴────────────────────────────────────────┘
+
+================================================================================
+1. تصميم البنية المعمارية (Architecture)
+================================================================================
+
+── 1.1 نمط عام ──
+
+  [ops-platform SPA]  ──HTTP/JSON──►  [api-server Express]  ──Drizzle──►  [PostgreSQL]
+         │                                    │
+         │ @workspace/api-client-react        │ src/lib/* (domain logic)
+         │ (Orval من OpenAPI جزئي)             │ src/routes/* (HTTP adapters)
+         └────────────────────────────────────┘
+
+  Monorepo pnpm:
+    artifacts/api-server     → @workspace/api-server (Node 24, esbuild bundle)
+    artifacts/ops-platform   → Vite/React 19 SPA
+    lib/db                   → schema + migrations + pool
+    lib/api-spec             → openapi.yaml
+    lib/api-client-react     → hooks مولّدة
+    lib/core-*               → events, workflows, permissions, audit (shared kernels)
+
+── 1.2 طبقات المسؤولية (Layered responsibilities) ──
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Presentation   │ ops-platform/pages, components, hooks                │
+  │ API boundary   │ routes/*.ts — validation, auth, HTTP mapping         │
+  │ Application    │ api-server/src/lib/* — use cases, orchestration      │
+  │ Domain cores   │ lib/core-events, core-workflows, core-permissions    │
+  │ Persistence    │ lib/db schema + Drizzle queries                      │
+  │ Infrastructure │ pino, SMTP, object storage, SSE stream               │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  مبدأ: Schema في lib/db؛ HTTP في routes؛ UI في ops-platform.
+  انحراف: كثير من business logic داخل route handlers (خصوصاً hr.ts ~161 handler).
+
+── 1.3 حدود الخدمات (Service boundaries) ──
+
+  حالياً: **خدمة واحدة deployable** (api-server) — ليست microservices.
+
+  Domains منطقية داخل monolith:
+    • Core Ops (tickets, messages, calendar, users)
+    • HCM (hr, workforce, leave, payroll)
+    • Platform (tenants, commercial, subscriptions, governance)
+    • Automation (workflows, forms, approval-runtime, events)
+
+  نقاط قوة:
+    • نشر واحد = تعقيد تشغيل أقل لـ On-Prem
+    • transaction boundaries أسهل داخل PG واحد
+
+  نقاط ضعف:
+    • hr.ts + platform.ts + payroll = blast radius كبير
+    • scaling أفقي يتطلب scale كامل API وليس module واحد
+    • لا فصل read/write أو queue workers مستقل physically
+
+── 1.4 مسارات Platform vs Workspace ──
+
+  Platform (super_admin):
+    /platform/tenants, /platform/users, commercial-*, governance-*
+
+  Workspace (tenant):
+    /tickets, /users, /hr/*, /self-service/*, /workflows
+
+  Setup (public tier):
+    /setup/*, /auth/*, /health
+
+  Middleware chain:
+    public → requireDatabase → workspaceAccessWriteGuard → routers
+
+  مرجع: artifacts/api-server/src/routes/index.ts
+         artifacts/api-server/src/middlewares/requireAuth.ts
+
+================================================================================
+2. تقسيم الخدمات والأنظمة
+================================================================================
+
+── 2.1 ما يُ deploy فعلياً ──
+
+  | المكوّن        | المنفذ | التقنية              | ملف النشر              |
+  |----------------|--------|----------------------|-------------------------|
+  | API            | 8080   | Node + Express 5     | deploy/Dockerfile.api   |
+  | Web (static)   | 80     | Nginx + Vite build   | deploy/Dockerfile.web   |
+  | Database       | 5432   | PostgreSQL 16        | docker-compose postgres |
+
+  PM2 alternative: deploy/ecosystem.config.cjs (cluster mode لـ api-server)
+
+── 2.2 Workers / background (داخل نفس process) ──
+
+  عند startup (runInitSequence):
+    • Notification queue worker
+    • Export jobs worker
+    • Scheduled reports
+    • Attendance sync worker
+    • Workflow engine + governance scheduler
+
+  لا Redis/RabbitMQ — queues في PostgreSQL.
+  مرجع: artifacts/api-server/src/lib/init-sequence.ts
+
+── 2.3 Frontend modules (product surfaces) ──
+
+  ~76 صفحة في ops-platform/src/pages
+  Module gating عبر ProtectedRoute + permissions + workspace modules API
+
+── 2.4 Integrations subsystem ──
+
+  • attendance-integrations (webhooks, connectors)
+  • workspace-smtp (HR email)
+  • platform SMTP/branding
+  • hr-import v1/v2 (Excel enterprise)
+  • object storage (attachments, branding upload)
+
+  مرجع: artifacts/ops-platform/src/hooks/use-workforce-integrations.ts
+
+================================================================================
+3. إدارة قواعد البيانات
+================================================================================
+
+── 3.1 Stack ──
+
+  • PostgreSQL + Drizzle ORM
+  • ~150+ جدول، 58 module schema
+  • Migrations: lib/db/drizzle/*.sql + meta/_journal.json
+  • Auto-migrate عند startup: artifacts/api-server/src/seed/migrate.ts
+
+── 3.2 DATABASE_URL ──
+
+  الأولوية:
+    1. process.env.DATABASE_URL
+    2. data/.platform.json (setup wizard)
+  مرجع: lib/db/src/resolve-database-url.ts
+
+── 3.3 نموذج البيانات HR/Enterprise ──
+
+  Employee vs User (P-HCM):
+    employees.user_id → users.id (optional, unique)
+    HR = source of truth للهوية؛ User = login + permissions
+
+  ازدواجية legacy/canonical (خطر تشغيلي):
+    departments          vs hr_org_units
+    hr_employee_leaves   vs leave_requests
+    hr_payroll_*         vs payroll-canonical
+    hr_attendance        vs attendance_events
+
+── 3.4 Migration hygiene (نقطة ضعف حرجة) ──
+
+  • journal يسجل ~27 entry؛ ملفات SQL إضافية (0023, 0026, 0027, 0030, 0031)
+    قد لا تُشغّل تلقائياً إذا لم تُسجّل في journal
+  • جداول commercial_* معرّفة في schema بدون migrations SQL مؤكدة
+  • 4 schema modules orphan (غير في index.ts): tenant-subscriptions,
+    workspace-entitlements, workspace-quota-limits, ...
+
+  scripts/ تحتوي migrate-*.cjs يدوية — drift بين Drizzle و ops scripts.
+
+── 3.5 Integrity ──
+
+  FKs ناقصة على: direct_manager_id, approval employee IDs, managers
+  unique ناقص: (workspace_id, email) على employees/users
+  soft delete: documents/workflows فقط — ليس employees/users
+
+── 3.6 مسؤوليات فريق DB ──
+
+  | المسؤولية                    | المالك المقترح      | الحالة      |
+  |------------------------------|---------------------|-------------|
+  | schema changes via Drizzle   | Backend lead        | جزئي        |
+  | journal ↔ SQL reconciliation | DevOps + Backend    | ⚠ drift     |
+  | backup/restore runbooks      | Ops                 | خارج الكود  |
+  | index/performance tuning     | DBA/Senior backend  | غير موثّق   |
+  | cutover legacy→canonical     | HCM squad           | جاري        |
+
+================================================================================
+4. الأمن والصلاحيات (Security & RBAC)
+================================================================================
+
+── 4.1 المصادقة (Authentication) ──
+
+  • JWT Bearer في Authorization header
+  • bcrypt لكلمات المرور
+  • Payload: userId, workspaceId, role, customRoleId
+  • Token في localStorage (ops-platform)
+  • JWT_SECRET default "dev-secret-change-in-production" — خطر production
+
+  مرجع: artifacts/api-server/src/routes/auth.ts
+         artifacts/api-server/src/middlewares/requireAuth.ts
+
+── 4.2 RBAC على مستوى Workspace ──
+
+  أدوار built-in: admin | manager | member | super_admin
+
+  Custom roles:
+    workspace_custom_roles + workspace_role_permissions
+    تُحمّل لـ member + customRoleId فقط
+
+  requirePermission("hr.view") — admin/manager/super_admin يتجاوزون!
+
+  API: /workspace-roles, /permissions
+  UI: /roles — مصفوفة صلاحيات
+
+── 4.3 RBAC على مستوى Platform (Super Admin) ──
+
+  platform_user_permission_overrides
+  requirePlatformPermission("tenants.read") إلخ
+  Root owner policy: root-platform-owner-policy.ts
+
+── 4.4 Guards إضافية ──
+
+  workspaceAccessWriteGuard (P16-E):
+    • يمنع POST/PUT/PATCH/DELETE عند read-only workspace
+    • super_admin bypass
+    • exempt: /platform/, /auth/, /setup, /health
+
+  requireDatabase: 503 حتى يُكوَّن DB
+
+── 4.5 فجوات أمنية ──
+
+  | الفجوة                         | الخطورة | ملاحظة                          |
+  |--------------------------------|---------|----------------------------------|
+  | CORS origin: true (any origin) | متوسط   | cors_origins في settings غير م wired |
+  | لا helmet                        | متوسط   | headers أمن HTTP                  |
+  | لا rate limit على /auth/login  | عالي    | brute force                       |
+  | webhook attendance بدون auth     | متوسط   | يحتاج HMAC/secret                 |
+  | GET /platform/branding public  | منخفض   | مقصود؟                            |
+  | RBAC inconsistent على routes   | متوسط   | hr/categories, leave = auth فقط   |
+  | ~79% API بدون OpenAPI contract | متوسط   | drift UI/backend                  |
+
+── 4.6 كيف تبني RBAC «حقيقي» (enterprise-grade) — توصيات ──
+
+  1. Policy layer موحّد (CASL/OPA/custom) بدل requirePermission scattered
+  2. Scope attributes: org_unit_id, department_id, employee_id في JWT claims
+  3. admin/manager لا bypass تلقائي — roles = permission bundles
+  4. Separation of Duties: approve ≠ create لنفس الكيان
+  5. Audit immutable لكل grant/revoke permission
+  6. Platform permissions منفصلة تماماً في middleware chain
+  7. Periodic access review (موجود UI — يحتاج enforcement أقوى)
+
+================================================================================
+5. الأداء و Scalability
+================================================================================
+
+── 5.1 الوضع الحالي ──
+
+  • Monolith Node single process (+ PM2 cluster optional)
+  • Connection pool PG عبر @workspace/db
+  • SSE stream للإشعارات (/stream)
+  • لا CDN مدمج (settings: Coming soon)
+  • لا Redis cache layer
+  • hr.ts queries — بعضها heavy (import, bulk, export)
+
+── 5.2 Bottlenecks متوقعة ──
+
+  | Bottleneck              | عند                        | تأثير        |
+  |-------------------------|----------------------------|--------------|
+  | PostgreSQL writes       | bulk HR import, payroll run| latency عالي |
+  | Single API process CPU  | workflow engine + HTTP     | saturation   |
+  | N+1 queries             | employee detail nested tabs| بطء UI       |
+  | Large esbuild bundle    | api-server 8.6mb dist      | cold start   |
+  | SSE connections         | آلاف users                 | memory       |
+
+── 5.3 كيف يتحمل آلاف المستخدمين — مسار نضج ──
+
+  المرحلة 1 (0–500 concurrent):
+    • PM2 cluster (ecosystem.config.cjs)
+    • PG connection pool tuning
+    • indexes على workspace_id + hot FKs
+    • CDN للـ static assets
+
+  المرحلة 2 (500–5000):
+    • Read replica PG للتقارير/GET heavy
+    • فصل workers (notifications, exports) process منفصل
+    • Redis للـ session/rate-limit/cache
+    • pagination إلزامي على كل list APIs
+
+  المرحلة 3 (5000+):
+    • Horizontal API behind load balancer (stateless JWT)
+    • Queue (Redis/Rabbit) للـ import/payroll
+    • Sharding أو DB-per-tenant للعملاء enterprise كبار
+    • Object storage خارجي (S3-compatible) للمرفقات
+
+  الوضع الحالي: مناسب لـ **مئات** users/workspace؛ يحتاج عمل لـ **آلاف**.
+
+================================================================================
+6. الاختبارات (Testing)
+================================================================================
+
+── 6.1 Stack ──
+
+  • Vitest 4.x (api-server + ops-platform)
+  • ~175 ملف *.test.ts
+  • لا Jest؛ لا root `pnpm test` في package.json الرئيسي
+  • لا Playwright/Cypress E2E في الم repo
+
+── 6.2 تغطية قوية ──
+
+  • lib/workflows/__tests__ (~42 ملف) — engine, versioning, governance
+  • commercial hooks tests (ops-platform)
+  • platform smoke tests (p-hcm*, leave-bridge)
+  • payroll smoke tests
+
+── 6.3 فجوات ──
+
+  • hr.ts (161 handler) — لا test suite شامل
+  • platform.ts (~56 handler) — undertested
+  • hr-import-v2.ts — undertested
+  • OpenAPI drift — لا automated snapshot
+  • E2E user journeys (login → create ticket → approve leave) — مفقود
+  • Load/stress tests — مفقود
+
+── 6.4 pyramid مقترح ──
+
+  Unit (domain lib) → Integration (routes + test DB) → Contract (OpenAPI) →
+  E2E (critical paths) → Load (k6 على /auth/login, /hr/employees)
+
+  مسؤولية: كل PR يمر vitest + migrate dry-run على CI.
+
+================================================================================
+7. التوثيق (Documentation)
+================================================================================
+
+── 7.1 OpenAPI (lib/api-spec/openapi.yaml) ──
+
+  • ~136 path في spec vs ~650 handler في الكود (~79% gap)
+  • auth/login غير موثّق؛ auth/lookup و verify في spec لكن غير منفّذة!
+  • payroll, workforce, commercial, platform P17 — خارج spec
+  • Orval codegen → api-client-react (جزء من UI فقط)
+
+── 7.2 توثيق داخلي ──
+
+  • platform-overview.txt — overview جيد
+  • workflow-phase-*-report.txt — تاريخ migrations
+  • docs/platform-users-custom-access-control.md
+  • replit.md — outdated (Clerk references)
+
+── 7.3 UI i18n ──
+
+  • lib/i18n.ts (~900 EN / ~840 AR)
+  • HR/super-admin: isAr inline — drift
+  • roles block: AR ناقص
+
+── 7.4 مسؤوليات التوثيق ──
+
+  | Artifact           | Owner        | Cadence              |
+  |--------------------|--------------|----------------------|
+  | OpenAPI spec       | API team     | per endpoint PR      |
+  | Architecture ADRs  | Architect    | quarterly            |
+  | Runbooks (ops)     | DevOps       | per release          |
+  | User guides (HR)   | Product      | per major feature    |
+
+================================================================================
+8. CI/CD وإدارة الإصدارات
+================================================================================
+
+── 8.1 الوضع الحالي ──
+
+  • **لا .github/workflows** في الم repository
+  • Root scripts: dev, build, typecheck فقط — لا test
+  • post-merge.sh: pnpm install + db push (محلي/ops)
+  • Deploy: Docker Compose manual أو PM2
+
+── 8.2 Build pipeline ──
+
+  pnpm build → typecheck:libs + artifacts build
+  api-server: esbuild → dist/index.mjs + copy drizzle SQL
+  ops-platform: vite → dist/public
+
+── 8.3 Versioning ──
+
+  • package.json workspace 0.0.0 — semver product غير formal
+  • Git commits (NEWUSER, etc.) — لا changelog automated
+  • platform-runtime: activate/rollback endpoints (platform-runtime.ts)
+
+── 8.4 CI/CD مقترح (minimum viable) ──
+
+  on PR:
+    1. pnpm install --frozen-lockfile
+    2. pnpm typecheck
+    3. pnpm --filter @workspace/api-server test
+    4. pnpm --filter @workspace/ops-platform test
+    5. drizzle migrate dry-run / schema drift script
+    6. OpenAPI vs routes diff (fail on undeclared public routes)
+
+  on main:
+    7. build docker images (api + web)
+    8. tag release semver
+    9. publish migration notes
+
+── 8.5 إدارة التحديثات On-Prem ──
+
+  1. backup PG
+  2. pull new images / replace dist
+  3. restart api → auto-migrate (migrate.ts)
+  4. smoke: /healthz, /auth/login, /hr/settings
+  5. rollback: previous image + DB restore if migration irreversible
+
+  خطر: migrations irreversible بدون rollback scripts.
+
+================================================================================
+9. مراقبة الأخطاء والـ Logs
+================================================================================
+
+── 9.1 Logging ──
+
+  • pino + pino-http على كل request
+  • redact: authorization, cookies
+  • dev: pino-pretty
+  • production: JSON stdout (Docker logs)
+
+  مرجع: artifacts/api-server/src/lib/logger.ts
+
+── 9.2 Activity / Audit ──
+
+  • activity_logs — workspace feed
+  • workspace_event_logs — technical events
+  • platform_governance_audit_logs
+  • payroll_audit_logs, workforce_audit_log
+  • compliance_audit_chains (hash-linked)
+
+  فجوة: لا audit موحّد immutable لـ HR master data changes
+
+── 9.3 Error monitoring ──
+
+  • لا Sentry/Datadog/OpenTelemetry مدمج في الكود
+  • super-admin-settings: metrics/tracing "Coming soon"
+  • SSE health: /health/sse-connections
+
+── 9.4 Observability roadmap ──
+
+  1. Structured correlation ID (requestId في pino — جزئي موجود)
+  2. Export logs → Loki/ELK
+  3. Metrics: Prometheus /health + business KPIs
+  4. Tracing: OpenTelemetry على Express + PG
+  5. Alerting: error rate, migration failure, queue backlog
+
+================================================================================
+10. عزل Workspaces ومنع تسرب البيانات بين الشركات
+================================================================================
+
+── 10.1 نموذج العزل ──
+
+  **Logical isolation** (shared database):
+    • workspaces.id = tenantId
+    • كل جدول تشغيلي: workspace_id NOT NULL FK
+    • JWT يحمل workspaceId — handlers filter eq(table.workspaceId, req.workspaceId)
+
+  **ليس** DB-per-tenant ولا schema-per-tenant.
+
+── 10.2 آليات الدفاع ──
+
+  1. FK cascade من workspaces
+  2. requireAuth يثبت workspaceId من user row (ليس من client body)
+  3. workspaceAccessWriteGuard — read-only mode
+  4. Platform routes منفصلة (/platform/*) — super_admin permissions
+  5. Subscription entitlements — quota limits
+
+── 10.3 مخاطر تسرب (Tenant leakage) ──
+
+  | السبب                              | الوقاية                          |
+  |------------------------------------|----------------------------------|
+  | query بدون workspaceId filter      | code review + lint rule + tests  |
+  | IDOR: /resource/:id بدون scope     | always join workspace_id         |
+  | super_admin cross-tenant access      | audit + least privilege          |
+  | export/report cross-workspace      | validate workspace in job        |
+  | cached data بدون tenant key        | prefix cache keys                |
+  | SQL injection (نادر مع Drizzle)    | parameterized queries only       |
+  | logs تطبع PII                      | pino redaction + policy          |
+
+── 10.4 Enterprise isolation upgrade path ──
+
+  • Row Level Security (RLS) في PostgreSQL:
+      SET app.workspace_id = $
+      POLICY tenant_isolation USING (workspace_id = current_setting(...))
+  • Automated tenant isolation tests (create 2 workspaces, assert no cross-read)
+  • DB-per-tenant للعملاء regulated (healthcare, gov)
+
+================================================================================
+11. إدارة الـ APIs والـ Integrations
+================================================================================
+
+── 11.1 API surface ──
+
+  • REST JSON تحت /api
+  • ~76 route modules
+  • Partial OpenAPI → partial codegen
+  • كثير من UI يستخدم useApiFetch/raw fetch (HR, commercial, approvals)
+
+── 11.2 Integration patterns ──
+
+  | النمط            | مثال                              | النضج    |
+  |------------------|-----------------------------------|----------|
+  | REST internal    | كل routes                         | جيد      |
+  | Webhook inbound  | attendance integrations           | ⚠ security |
+  | SMTP outbound    | workspace-smtp, notifications     | جيد      |
+  | File import      | hr-import v2 Excel                | enterprise|
+  | SSE push         | /stream                           | جيد      |
+  | External ERP     | غير مدمج (dropped finance domain) | —        |
+
+── 11.3 API governance مقترح ──
+
+  1. Public vs Internal route classification
+  2. Versioning: /api/v1 (breaking change policy)
+  3. Idempotency-Key على POST provisioning/import
+  4. Rate limits per workspace + API keys للـ integrations
+  5. Webhook signature verification standard
+  6. OpenAPI as contract gate in CI
+
+================================================================================
+12. الأحداث (Events) و Workflows
+================================================================================
+
+── 12.1 Event architecture ──
+
+  Canonical bus: appEventBus (lib/events/app-bus.ts)
+  Listeners:
+    • activity.ts → activity_logs
+    • notifications-bus.ts → notifications + SSE
+    • bridge.ts → legacy eventDispatcher → workspace_event_logs + WorkflowEngine
+
+  **Dual pipeline** — migration من dispatcher إلى bus **غير مكتمل**.
+
+── 12.2 Workflow engine ──
+
+  • workflow_definitions + versions (snapshot immutability)
+  • WorkflowEngine started in init-sequence
+  • UI: /workflows (technical event triggers)
+  • HR: /process-templates (read-only approval templates)
+  • approval-runtime: approval_instances + steps (canonical)
+
+── 12.3 Forms + smart workflow ──
+
+  • forms.ts — audience, workflow binding, self-service
+  • form-workflow-builder, form-audience-builder (UI)
+  • emit on submission → bus
+
+── 12.4 فجوات Events/Workflows ──
+
+  • ازدواج: technical workflows vs HR process templates
+  • approval inbox vs legacy approvals.tsx
+  • لا outbox pattern — event loss risk if listener fails mid-flight
+  • Idempotency داخل metadata فقط — ليس HTTP header
+
+── 12.5 Best practices roadmap ──
+
+  1. Complete bus migration — remove direct dispatcher calls
+  2. Transactional outbox table
+  3. Unified approval model (leave + forms + tickets)
+  4. Process template authoring UI
+  5. Event schema registry (platform_event_registry exists — extend)
+
+================================================================================
+13. Cloud → On-Prem بدون انهيار
+================================================================================
+
+── 13.1 ما يدعمه اليوم ──
+
+  ✓ Setup wizard (DB + owner account)
+  ✓ data/.platform.json لـ DATABASE_URL
+  ✓ Docker Compose (postgres + api + nginx)
+  ✓ PM2 cluster
+  ✓ No hard cloud dependency in core path (PG + SMTP optional)
+  ✓ Single-tenant deploy possible (workspace واحد)
+
+── 13.2 مخاطر الهجرة ──
+
+  | Risk                         | Mitigation                           |
+  |------------------------------|--------------------------------------|
+  | Migration drift              | reconcile journal قبل cutover        |
+  | Missing env secrets          | .env.example checklist               |
+  | Object storage cloud-only    | S3-compatible MinIO on-prem          |
+  | Email delivery               | local SMTP relay                     |
+  | License/phone-home           | document offline mode                |
+  | Large bundle cold start      | PM2 + adequate RAM                   |
+
+── 13.3 Runbook Cloud → On-Prem ──
+
+  1. Export PG dump من cloud
+  2. Provision on-prem: Docker/VM + secrets
+  3. Restore dump → run api (auto-migrate baseline)
+  4. Configure SMTP, APP_URL, JWT_SECRET (rotate!)
+  5. DNS cutover أو VPN
+  6. Parallel run period — compare healthz + critical flows
+  7. Decommission cloud after validation window
+
+  لا تُنقل secrets أو JWT_SECRET بين environments.
+
+================================================================================
+14. نقاط القوة في الهندسة
+================================================================================
+
+  1. Monorepo منظم — shared types/schema/client
+  2. Domain breadth — ITSM + HCM + platform SaaS في product واحد
+  3. Employee/User separation model (employees.user_id)
+  4. Workflow engine ناضج + versioning + governance snapshots
+  5. HR import enterprise (v2 validate/shadow/commit/rollback)
+  6. Platform RBAC متقدم (P17 overrides + access review UI)
+  7. workspaceAccessWriteGuard — subscription enforcement
+  8. On-prem first-run wizard — نادر في products مماثلة
+  9. Vitest coverage في workflows/commercial
+  10. Payroll/leave canonical path — اتجاه enterprise صحيح
+  11. pino structured logging
+  12. Supply chain: pnpm minimumReleaseAge 1440
+
+================================================================================
+15. نقاط الضعف في الهندسة
+================================================================================
+
+  1. Monolith hr.ts — god module (~161 routes)
+  2. OpenAPI drift ~79% — contract-first مكسور عملياً
+  3. لا CI/CD automated
+  4. Dual legacy/canonical domains (leave, payroll, attendance, org)
+  5. Migration journal drift
+  6. RBAC inconsistent + admin bypass
+  7. CORS/JWT defaults غير production-hardened
+  8. لا rate limiting / helmet
+  9. UI dual fetch patterns (codegen vs raw) — maintenance burden
+  10. i18n fragmented
+  11. No APM/tracing
+  12. Workers in-process — scaling limited
+  13. Orphan pages/routes (forms-submit, approvals legacy)
+  14. commercial tables migration gap
+
+================================================================================
+16. المسؤوليات والالتزامات (Engineering ownership matrix)
+================================================================================
+
+  | Domain              | Primary owner     | Key obligations                          |
+  |---------------------|-------------------|------------------------------------------|
+  | API / routes        | Backend team      | auth on every route, workspace filter    |
+  | lib/db schema       | Backend + DBA     | migrations reviewed, no drift            |
+  | OpenAPI             | API team          | spec updated with every public endpoint  |
+  | ops-platform UI     | Frontend team     | use codegen hooks, i18n, a11y            |
+  | Platform admin      | Platform squad    | tenant isolation, audit                  |
+  | HCM                 | HR squad          | cutover legacy, data integrity           |
+  | Workflows/Events    | Automation squad  | bus migration completion                 |
+  | Security            | Security champion | secrets, pentest, RBAC audit             |
+  | DevOps              | Ops               | CI, deploy, backup, monitoring           |
+  | QA                  | QA / all          | smoke checklist per release              |
+
+================================================================================
+17. السبلات الحالية وكيفية تجنبها
+================================================================================
+
+  | # | السبيل (Pitfall)                              | كيف يحدث                    | تجنبه                              |
+  |---|-----------------------------------------------|-----------------------------|------------------------------------|
+  | 1 | API route not found على production            | build/restart نسي           | CI deploy checklist + health probe |
+  | 2 | White screen (missing import)                 | PR بدون lint/typecheck      | CI typecheck + E2E smoke           |
+  | 3 | Tenant data leak                              | query بدون workspaceId      | RLS + isolation tests            |
+  | 4 | Migration partial apply                       | journal drift               | reconcile SQL ↔ journal            |
+  | 5 | Dual write legacy+canonical                   | parallel code paths         | cutover flags + single write path  |
+  | 6 | UI/backend drift                              | raw fetch bypass OpenAPI    | codegen or internal SDK            |
+  | 7 | JWT compromise                                | weak secret                 | rotate + short expiry + HTTPS    |
+  | 8 | Import duplicate rows                         | no idempotency              | Idempotency-Key + unique constraints|
+  | 9 | Payroll wrong workspace                       | job missing scope           | workspaceId in every job row       |
+  |10 | On-prem setup fail silent                     | fail-open setup check       | strict setup status in App.tsx     |
+  |11 | super_admin accidental tenant write           | bypass guards               | separate impersonation audit       |
+  |12 | Performance collapse on bulk import           | sync in request thread      | async queue workers                |
+
+================================================================================
+18. الإصلاحات المقترحة (Prioritized roadmap)
+================================================================================
+
+  ── P0 — استقرار وأمن (0–3 أشهر) ──
+    □ CI: typecheck + vitest + migrate dry-run
+    □ Reconcile drizzle journal مع SQL files
+    □ JWT_SECRET enforcement في production (fail if default)
+    □ Rate limit /auth/login
+    □ Fix migration gaps (commercial tables)
+    □ Tenant isolation automated tests
+    □ Globe/useApiFetch class bugs — prevent via CI
+
+  ── P1 — عقد API و RBAC (3–6 أشهر) ──
+    □ OpenAPI batch: auth, provisioning, org-units, leave, payroll ops
+    □ Replace raw fetch في HR foundation/employee-detail
+    □ RBAC audit: requirePermission على كل HR routes
+    □ Wire cors_origins من settings
+    □ Idempotency-Key على provisioning/import commit
+
+  ── P2 — توحيد domains (6–12 شهر) ──
+    □ Cutover departments → hr_org_units
+    □ Cutover leave → leave_requests canonical
+    □ Cutover payroll → payroll-canonical
+    □ Complete appEventBus migration
+    □ Split hr.ts إلى modules (employees, foundation, import)
+
+  ── P3 — Scale & observability (12+ شهر) ──
+    □ Redis cache + rate limit
+    □ Separate worker processes
+    □ OpenTelemetry + centralized logs
+    □ Read replica for reports
+    □ Optional RLS in PostgreSQL
+    □ Load testing baseline (k6)
+
+================================================================================
+19. Checklist تقييم جاهزية Production
+================================================================================
+
+  [ ] CI passes on every merge
+  [ ] JWT_SECRET قوي وم rotated
+  [ ] DATABASE_URL secured (mode 600 on .platform.json)
+  [ ] HTTPS termination (nginx TLS)
+  [ ] Backup PG automated + tested restore
+  [ ] Migrations journal = SQL files on disk
+  [ ] OpenAPI covers all public tenant APIs
+  [ ] Tenant isolation test suite green
+  [ ] Rate limiting on auth
+  [ ] Error monitoring connected
+  [ ] Runbook: deploy, rollback, incident
+  [ ] Load test: N concurrent users acceptable
+  [ ] On-prem smoke: wizard → login → HR → ticket → leave
+
+================================================================================
+20. مراجع ملفات رئيسية
+================================================================================
+
+  Architecture:
+    package.json, pnpm-workspace.yaml
+    artifacts/api-server/src/app.ts
+    artifacts/api-server/src/routes/index.ts
+    artifacts/api-server/src/lib/init-sequence.ts
+
+  Security:
+    artifacts/api-server/src/middlewares/requireAuth.ts
+    artifacts/api-server/src/middlewares/workspaceAccessWriteGuard.ts
+    artifacts/api-server/src/lib/platform-permissions.ts
+
+  Database:
+    lib/db/src/schema/index.ts
+    lib/db/drizzle/meta/_journal.json
+    lib/db/src/resolve-database-url.ts
+
+  Deploy:
+    deploy/docker-compose.yml
+    deploy/Dockerfile.api, Dockerfile.web
+    deploy/ecosystem.config.cjs
+
+  Events:
+    artifacts/api-server/src/lib/events/app-bus.ts
+    artifacts/api-server/src/lib/workflows/engine.ts
+
+  Docs:
+    lib/api-spec/openapi.yaml
+    platform-overview.txt
+    docs/platform-users-custom-access-control.md
+
+  Reports (same repo):
+    البحث والتطوير 1.txt
+    runtime-integrity-validation.md
+    subscription-platform-architecture-audit.md
+
+================================================================================
+                              نهاية التقرير
+================================================================================
+هذا التقرير للتخطيط والحوكمة الهندسية — لا يُعدّ التزاماً تنفيذياً.
+للتنفيذ: راجع P0–P3 مع Product وOps وحدّد owners ومواعيد sprint.

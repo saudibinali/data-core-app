@@ -43,6 +43,7 @@ import {
   getEnterpriseRuntimeStatus,
 } from "../lib/hr-import/activation/enterprise-runtime-activation";
 import { getEnterpriseMasterDataCapabilities } from "../lib/hr-import/activation/enterprise-confirm-bridge";
+import { evaluateImportCutoverGates } from "../lib/workforce/stabilization/import-cutover-gates";
 
 const router: IRouter = Router();
 
@@ -220,16 +221,25 @@ router.post("/hr/import/v2/commit", requireAuth, requirePermission("hr.manage"),
   if (!sessionId) { res.status(400).json({ error: "sessionId required" }); return; }
   try {
     const settings = await getImportRuntimeSettings(req.workspaceId);
+    const gates = await evaluateImportCutoverGates(req.workspaceId);
     const result = await commitOrchestrator.executeCommit({
       workspaceId: req.workspaceId,
       sessionId,
       userId: req.userId,
     });
-    const statusCode = result.committed ? 200 : result.mode === "shadow_simulation" ? 200 : 403;
+    const blockedByCutover = result.reason === "IMPORT_CUTOVER_NOT_READY";
+    const statusCode = result.committed
+      ? 200
+      : blockedByCutover
+        ? 409
+        : result.mode === "shadow_simulation"
+          ? 200
+          : 403;
     res.status(statusCode).json({
       ...result,
       commitMode: getCommitModeLabel(settings),
-      strictEnforcementEnabled: false,
+      strictEnforcementEnabled: gates.strictRowValidation,
+      importGates: gates,
       autoCreateEnabled: false,
     });
   } catch (e) {

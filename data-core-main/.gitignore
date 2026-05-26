@@ -10,6 +10,8 @@ out-tsc
 
 # dependencies
 node_modules
+backups/
+.vitest-smoke-db
 
 # IDEs and editors
 /.idea

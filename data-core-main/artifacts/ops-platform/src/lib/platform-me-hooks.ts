@@ -17,24 +17,18 @@
  *   - 1-minute stale time to avoid hammering the endpoint.
  */
 
-import { useQuery } from "@tanstack/react-query";
+import {
+  useGetPlatformMe,
+  type PlatformMe,
+} from "@workspace/api-client-react";
 import { useAppAuth } from "./auth";
 import type { PlatformPermissionCode } from "./platform-permissions-config";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface CurrentPlatformUserData {
-  id: number;
-  email: string | null;
-  displayName: string;
-  role: string;
-  workspaceId: number | null;
-  platformRoleCode: string | null;
-  effectivePlatformRoleCode: string;
-  isRootOwner: boolean;
-  isProtected: boolean;
+export type CurrentPlatformUserData = PlatformMe & {
   permissions: PlatformPermissionCode[];
-}
+};
 
 // ── Hook: useCurrentPlatformUser ──────────────────────────────────────────────
 
@@ -46,30 +40,24 @@ export function useCurrentPlatformUser() {
     user?.role === "super_admin" &&
     (user?.workspaceId == null || user?.workspaceId === null);
 
-  return useQuery<CurrentPlatformUserData, Error>({
-    queryKey: ["platform", "me"],
-    queryFn: async () => {
-      const token = (() => {
-        try { return localStorage.getItem("ops_access_token"); } catch { return null; }
-      })();
-      const r = await fetch("/api/platform/me", {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({})) as Record<string, unknown>;
-        throw new Error(
-          typeof body["error"] === "string"
-            ? body["error"]
-            : "Failed to load platform user context",
-        );
-      }
-      return r.json() as Promise<CurrentPlatformUserData>;
+  const query = useGetPlatformMe({
+    query: {
+      enabled: isPlatformUser,
+      staleTime: 60_000,
+      gcTime: 120_000,
+      retry: 1,
     },
-    enabled: isPlatformUser,
-    staleTime: 60_000,
-    gcTime: 120_000,
-    retry: 1,
   });
+
+  return {
+    ...query,
+    data: query.data
+      ? ({
+          ...query.data,
+          permissions: query.data.permissions as PlatformPermissionCode[],
+        } satisfies CurrentPlatformUserData)
+      : undefined,
+  };
 }
 
 // ── Hook: useCurrentPlatformPermissions ───────────────────────────────────────
@@ -84,3 +72,4 @@ export function useCurrentPlatformPermissions(): {
     isReady: isSuccess,
   };
 }
+

@@ -4,6 +4,7 @@
 
 import { Router, type Request, type Response } from "express";
 import { checkContactRateLimit } from "../lib/contact-rate-limit";
+import { clientIp } from "../lib/client-ip";
 import { isContactDeliveryReady, sendContactInquiryEmail } from "../lib/contact-mail";
 import {
   validateContactForm,
@@ -12,14 +13,6 @@ import {
 } from "../lib/contact-validation";
 
 const router = Router();
-
-function clientIp(req: Request): string {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0]?.trim() ?? "unknown";
-  }
-  return req.ip ?? req.socket.remoteAddress ?? "unknown";
-}
 
 /** POST /contact — public contact form submission */
 router.post("/contact", async (req: Request, res: Response): Promise<void> => {

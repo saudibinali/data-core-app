@@ -40,5 +40,31 @@ export const workspaceEventLogsTable = pgTable(
   ],
 );
 
+/** F7.2 — transactional outbox rows drained by api-server worker → appEventBus */
+export const eventOutboxTable = pgTable(
+  "event_outbox",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    module: text("module").notNull(),
+    payload: jsonb("payload").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_event_outbox_pending").on(t.status, t.nextRetryAt, t.createdAt),
+    index("idx_event_outbox_workspace").on(t.workspaceId, t.createdAt),
+  ],
+);
+
 export type PlatformEventRegistry = typeof platformEventRegistryTable.$inferSelect;
 export type WorkspaceEventLog = typeof workspaceEventLogsTable.$inferSelect;
+export type EventOutboxRow = typeof eventOutboxTable.$inferSelect;

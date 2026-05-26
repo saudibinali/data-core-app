@@ -14,7 +14,7 @@ import {
   hrJobTitlesTable,
   legacyDepartmentOrgMapTable,
 } from "@workspace/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { generateEmployeeNumber } from "../employeeNumber";
 import { linkEmployeeToUser } from "../hr/employee-account-service";
@@ -22,11 +22,19 @@ import { syncLegacyUserFieldsFromEmployee } from "../workforce/manager-resolver"
 import { resolveDirectManagerUserId } from "../workforce/manager-resolver";
 import { appEventBus } from "../events/app-bus";
 import { EVENT_TYPES } from "@workspace/core-events";
+import {
+  buildRequestFingerprint,
+  claimProvisionIdempotency,
+  finalizeProvisionIdempotency,
+  recordProvisionAudit,
+  resolveProvisionIdempotency,
+  type ProvisionReplay,
+} from "./hr-provision-audit";
 
 const TERMINAL_EMPLOYEE_STATUSES = new Set(["terminated", "resigned"]);
 
 export type ProvisionError = { ok: false; status: number; error: string; field?: string };
-export type ProvisionOk<T> = { ok: true; data: T };
+export type ProvisionOk<T> = { ok: true; data: T; replay?: boolean };
 
 export interface EmployeeProvisionPreview {
   employeeId: number;
@@ -72,6 +80,7 @@ export interface CreateGeneralUserInput {
   position?: string | null;
   departmentIds?: number[];
   mustResetPassword?: boolean;
+  idempotencyKey?: string | null;
 }
 
 const managerAlias = alias(employeesTable, "mgr");
@@ -129,7 +138,7 @@ async function fetchEmployeeRow(workspaceId: number, employeeId: number) {
   return row ?? null;
 }
 
-function buildPreview(row: NonNullable<Awaited<ReturnType<typeof fetchEmployeeRow>>>): EmployeeProvisionPreview {
+export function buildPreview(row: NonNullable<Awaited<ReturnType<typeof fetchEmployeeRow>>>): EmployeeProvisionPreview {
   let blockReason: string | null = null;
   if (!row.employeeNumber?.trim()) {
     blockReason = "Employee has no employee number assigned in HR";
@@ -188,6 +197,43 @@ export async function getEmployeeProvisionPreviewById(
   const row = await fetchEmployeeRow(workspaceId, employeeId);
   if (!row) return null;
   return buildPreview(row);
+}
+
+export async function listProvisionCandidates(
+  workspaceId: number,
+  options: { canProvisionOnly?: boolean; search?: string; limit?: number } = {},
+): Promise<EmployeeProvisionPreview[]> {
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+  const search = options.search?.trim();
+
+  const conditions = [eq(employeesTable.workspaceId, workspaceId)];
+  if (search) {
+    conditions.push(
+      or(
+        ilike(employeesTable.fullName, `%${search}%`),
+        ilike(employeesTable.employeeNumber, `%${search}%`),
+        ilike(employeesTable.email, `%${search}%`),
+      )!,
+    );
+  }
+
+  const rows = await db
+    .select({ id: employeesTable.id })
+    .from(employeesTable)
+    .where(and(...conditions))
+    .orderBy(asc(employeesTable.fullName))
+    .limit(limit * 3);
+
+  const previews: EmployeeProvisionPreview[] = [];
+  for (const { id } of rows) {
+    const row = await fetchEmployeeRow(workspaceId, id);
+    if (!row) continue;
+    const preview = buildPreview(row);
+    if (options.canProvisionOnly && !preview.canProvision) continue;
+    previews.push(preview);
+    if (previews.length >= limit) break;
+  }
+  return previews;
 }
 
 async function syncUserDepartments(userId: number, departmentIds: number[]) {
@@ -259,9 +305,136 @@ async function emitEmployeeCreatedEvent(
   });
 }
 
+type UserProvisionResponse = NonNullable<Awaited<ReturnType<typeof selectUserResponse>>>;
+
+function employeeProvisionFingerprint(input: CreateFromEmployeeInput): string {
+  return buildRequestFingerprint({
+    op: "employee_account",
+    employeeId: input.employeeId ?? null,
+    employeeNumber: input.employeeNumber?.trim() ?? null,
+    role: input.role ?? "member",
+    customRoleId: input.customRoleId ?? null,
+    mustResetPassword: Boolean(input.mustResetPassword),
+    password: input.password,
+  });
+}
+
+function generalProvisionFingerprint(input: CreateGeneralUserInput): string {
+  return buildRequestFingerprint({
+    op: "general_user",
+    firstName: input.firstName.trim(),
+    lastName: input.lastName.trim(),
+    email: input.email?.trim() ?? null,
+    role: input.role ?? "member",
+    customRoleId: input.customRoleId ?? null,
+    position: input.position?.trim() ?? null,
+    departmentIds: [...(input.departmentIds ?? [])].sort((a, b) => a - b),
+    mustResetPassword: Boolean(input.mustResetPassword),
+    password: input.password,
+  });
+}
+
+function mapProvisionReplay<T>(
+  replay: ProvisionReplay<T>,
+): ProvisionOk<T> | ProvisionError | null {
+  if (replay.kind === "none") return null;
+  if (replay.kind === "conflict") {
+    return { ok: false, status: 409, error: replay.error };
+  }
+  if (replay.httpStatus >= 200 && replay.httpStatus < 300 && replay.data) {
+    return { ok: true, data: replay.data, replay: true };
+  }
+  return {
+    ok: false,
+    status: replay.httpStatus >= 400 ? replay.httpStatus : 409,
+    error: replay.error ?? "Provision failed",
+  };
+}
+
+async function auditProvisionResult(input: {
+  workspaceId: number;
+  idempotencyKey?: string | null;
+  operation: "employee_account" | "general_user";
+  requestFingerprint: string;
+  employeeId?: number | null;
+  actorUserId?: number | null;
+  result: ProvisionOk<UserProvisionResponse> | ProvisionError;
+}): Promise<void> {
+  const userId = input.result.ok ? input.result.data?.id ?? null : null;
+
+  if (input.idempotencyKey) {
+    await finalizeProvisionIdempotency({
+      workspaceId: input.workspaceId,
+      clientIdempotencyKey: input.idempotencyKey,
+      operation: input.operation,
+      requestFingerprint: input.requestFingerprint,
+      employeeId: input.employeeId,
+      userId,
+      actorUserId: input.actorUserId,
+      outcome: input.result.ok ? "success" : "failed",
+      httpStatus: input.result.ok ? 201 : input.result.status,
+      errorMessage: input.result.ok ? null : input.result.error,
+      responseSnapshot: input.result.ok ? input.result.data : null,
+    });
+    return;
+  }
+
+  await recordProvisionAudit({
+    workspaceId: input.workspaceId,
+    operation: input.operation,
+    employeeId: input.employeeId,
+    userId,
+    actorUserId: input.actorUserId,
+    outcome: input.result.ok ? "success" : "failed",
+    httpStatus: input.result.ok ? 201 : input.result.status,
+    errorMessage: input.result.ok ? null : input.result.error,
+    requestFingerprint: input.requestFingerprint,
+    responseSnapshot: input.result.ok ? input.result.data : null,
+  });
+}
+
 export async function createUserFromEmployee(
   input: CreateFromEmployeeInput,
-): Promise<ProvisionOk<Awaited<ReturnType<typeof selectUserResponse>>> | ProvisionError> {
+): Promise<ProvisionOk<UserProvisionResponse> | ProvisionError> {
+  const requestFingerprint = employeeProvisionFingerprint(input);
+
+  if (input.idempotencyKey) {
+    const existing = await resolveProvisionIdempotency<UserProvisionResponse>({
+      workspaceId: input.workspaceId,
+      clientIdempotencyKey: input.idempotencyKey,
+      requestFingerprint,
+    });
+    const replay = mapProvisionReplay(existing);
+    if (replay) return replay;
+
+    const claim = await claimProvisionIdempotency({
+      workspaceId: input.workspaceId,
+      clientIdempotencyKey: input.idempotencyKey,
+      operation: "employee_account",
+      requestFingerprint,
+      actorUserId: input.actorUserId,
+      employeeId: input.employeeId ?? null,
+    });
+    const blocked = mapProvisionReplay(claim);
+    if (blocked) return blocked;
+  }
+
+  const result = await createUserFromEmployeeCore(input);
+  await auditProvisionResult({
+    workspaceId: input.workspaceId,
+    idempotencyKey: input.idempotencyKey,
+    operation: "employee_account",
+    requestFingerprint,
+    employeeId: result.ok ? result.data?.linkedEmployeeId ?? input.employeeId ?? null : input.employeeId ?? null,
+    actorUserId: input.actorUserId,
+    result,
+  });
+  return result;
+}
+
+async function createUserFromEmployeeCore(
+  input: CreateFromEmployeeInput,
+): Promise<ProvisionOk<UserProvisionResponse> | ProvisionError> {
   const {
     workspaceId, actorUserId, actorRole,
     employeeId, employeeNumber, password,
@@ -371,7 +544,44 @@ export async function createUserFromEmployee(
 
 export async function createGeneralUser(
   input: CreateGeneralUserInput,
-): Promise<ProvisionOk<Awaited<ReturnType<typeof selectUserResponse>>> | ProvisionError> {
+): Promise<ProvisionOk<UserProvisionResponse> | ProvisionError> {
+  const requestFingerprint = generalProvisionFingerprint(input);
+
+  if (input.idempotencyKey) {
+    const existing = await resolveProvisionIdempotency<UserProvisionResponse>({
+      workspaceId: input.workspaceId,
+      clientIdempotencyKey: input.idempotencyKey,
+      requestFingerprint,
+    });
+    const replay = mapProvisionReplay(existing);
+    if (replay) return replay;
+
+    const claim = await claimProvisionIdempotency({
+      workspaceId: input.workspaceId,
+      clientIdempotencyKey: input.idempotencyKey,
+      operation: "general_user",
+      requestFingerprint,
+      actorUserId: input.actorUserId,
+    });
+    const blocked = mapProvisionReplay(claim);
+    if (blocked) return blocked;
+  }
+
+  const result = await createGeneralUserCore(input);
+  await auditProvisionResult({
+    workspaceId: input.workspaceId,
+    idempotencyKey: input.idempotencyKey,
+    operation: "general_user",
+    requestFingerprint,
+    actorUserId: input.actorUserId,
+    result,
+  });
+  return result;
+}
+
+async function createGeneralUserCore(
+  input: CreateGeneralUserInput,
+): Promise<ProvisionOk<UserProvisionResponse> | ProvisionError> {
   const {
     workspaceId, actorUserId, actorRole,
     firstName, lastName, email, password,

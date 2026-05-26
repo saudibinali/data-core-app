@@ -1,6 +1,11 @@
 import jwt from "jsonwebtoken";
 import { type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
+import { JWT_SECRET } from "../lib/security-config";
+import { evaluatePolicy } from "@workspace/core-permissions";
+import { isWorkspaceRbacStrict } from "../lib/workspace-rbac-config";
+import { setWorkspaceRlsSessionContext } from "./workspace-rls-context";
+import { recordPlatformTenantAccessIfNeeded } from "../lib/platform-tenant-access-audit";
 import { usersTable, workspaceRolePermissionsTable, activityLogsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import {
@@ -14,7 +19,7 @@ import {
   resolveActorEffectivePermissionSet,
 } from "../lib/platform-effective-permissions";
 
-export const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret-change-in-production";
+export { JWT_SECRET };
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -93,6 +98,9 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     req.userPermissions = [];
   }
 
+  await setWorkspaceRlsSessionContext(req);
+  recordPlatformTenantAccessIfNeeded(req);
+
   next();
 };
 
@@ -123,17 +131,28 @@ export const requirePermission = (
       return;
     }
 
-    if (role === "super_admin" || role === "admin" || role === "manager") {
-      next();
-      return;
-    }
-
     const resolved = typeof keyOrFn === "function" ? keyOrFn(req) : keyOrFn;
     const keys = Array.isArray(resolved) ? resolved : [resolved];
 
-    if (keys.some(k => req.userPermissions?.includes(k))) {
-      next();
-      return;
+    for (const key of keys) {
+      const result = evaluatePolicy(
+        {
+          actor: {
+            userId: req.userId!,
+            workspaceId: req.workspaceId ?? null,
+            role: role as "super_admin" | "admin" | "manager" | "member",
+          },
+          permission: key as never,
+        },
+        {
+          customPermissions: req.userPermissions,
+          strictWorkspaceRbac: isWorkspaceRbacStrict(),
+        },
+      );
+      if (result.granted) {
+        next();
+        return;
+      }
     }
 
     res.status(403).json({ error: "Permission denied", required: keys[0] });

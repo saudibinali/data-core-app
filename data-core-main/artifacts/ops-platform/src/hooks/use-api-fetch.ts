@@ -9,6 +9,9 @@ function getStoredToken(): string | null {
 /**
  * Returns an auth-aware fetch function that automatically adds
  * the Bearer token to every request.
+ *
+ * @deprecated F3.3 — Prefer generated hooks/functions from `@workspace/api-client-react`
+ * when the route exists in OpenAPI. This hook remains as a fallback during migration.
  */
 export function useApiFetch() {
   const apiFetch = useCallback(

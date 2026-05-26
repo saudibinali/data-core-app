@@ -1,10 +1,19 @@
 #!/usr/bin/env node
 /**
- * Read-only workforce integrity validation (Phase 1).
- * Exit 0 = pass, 1 = issues found.
+ * Read-only workforce + canonical cutover integrity validation (Phase 1 / F6.4).
+ * Exit 0 = pass, 1 = errors (or warnings when FAIL_ON_WARN=1).
  */
 const { Pool } = require("pg");
 const { resolveDatabaseUrl } = require("./lib/db-resolver.cjs");
+const {
+  issue,
+  tableExists,
+  isPilotWorkspace,
+  cutoverFlags,
+  listWorkspaceIds,
+  finalizeReport,
+  parseEnvBool,
+} = require("./lib/integrity-helpers.cjs");
 
 let DATABASE_URL;
 try {
@@ -16,18 +25,6 @@ try {
 const WORKSPACE_ID = process.env.WORKSPACE_ID ? Number(process.env.WORKSPACE_ID) : null;
 
 const pool = new Pool({ connectionString: DATABASE_URL });
-
-function issue(code, message, meta = {}) {
-  return { code, message, ...meta };
-}
-
-async function tableExists(client, table) {
-  const { rows } = await client.query(
-    `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`,
-    [table],
-  );
-  return rows.length > 0;
-}
 
 async function validateWorkspace(client, workspaceId) {
   const findings = [];
@@ -129,6 +126,126 @@ async function validateWorkspace(client, workspaceId) {
   return findings;
 }
 
+async function validateCutoverData(client, workspaceId) {
+  const findings = [];
+  const flags = cutoverFlags();
+  const pilot = isPilotWorkspace(workspaceId);
+  const strictOrg = pilot && flags.orgCutover;
+  const strictAttendance = pilot && flags.attendanceCanonical;
+
+  if (await tableExists(client, "legacy_department_org_map")) {
+    const { rows } = await client.query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM departments d
+       LEFT JOIN legacy_department_org_map m
+         ON m.workspace_id = d.workspace_id AND m.department_id = d.id
+       WHERE d.workspace_id = $1 AND m.org_unit_id IS NULL`,
+      [workspaceId],
+    );
+    const unmapped = rows[0]?.cnt ?? 0;
+    if (unmapped > 0) {
+      findings.push(
+        issue(
+          "DEPARTMENTS_UNMAPPED_TO_ORG",
+          `${unmapped} legacy departments without org unit mapping`,
+          { workspaceId, unmappedDepartments: unmapped },
+          strictOrg ? "error" : "warn",
+        ),
+      );
+    }
+  }
+
+  if (await tableExists(client, "hr_leave_migration_map")) {
+    const { rows } = await client.query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM hr_employee_leaves l
+       LEFT JOIN hr_leave_migration_map m
+         ON m.workspace_id = l.workspace_id AND m.legacy_leave_id = l.id
+       WHERE l.workspace_id = $1
+         AND l.status IN ('pending', 'approved')
+         AND m.canonical_request_id IS NULL`,
+      [workspaceId],
+    );
+    const unmigrated = rows[0]?.cnt ?? 0;
+    if (unmigrated > 0) {
+      findings.push(
+        issue(
+          "LEAVE_LEGACY_ACTIVE_UNMIGRATED",
+          `${unmigrated} active legacy leaves without canonical migration map`,
+          { workspaceId, unmigratedActiveLeaves: unmigrated },
+          pilot ? "error" : "warn",
+        ),
+      );
+    }
+  }
+
+  if (await tableExists(client, "attendance_daily_summaries")) {
+    const { rows: orphanSummary } = await client.query(
+      `SELECT ads.id, ads.employee_id, ads.date
+       FROM attendance_daily_summaries ads
+       LEFT JOIN employees e ON e.id = ads.employee_id AND e.workspace_id = ads.workspace_id
+       WHERE ads.workspace_id = $1 AND e.id IS NULL
+       LIMIT 20`,
+      [workspaceId],
+    );
+    for (const row of orphanSummary) {
+      findings.push(
+        issue("ATTENDANCE_SUMMARY_ORPHAN_EMPLOYEE", "attendance_daily_summaries references missing employee", {
+          workspaceId,
+          summaryId: row.id,
+          employeeId: row.employee_id,
+          date: row.date,
+        }),
+      );
+    }
+
+    if (strictAttendance) {
+      const { rows: legacyMismatch } = await client.query(
+        `SELECT COUNT(*)::int AS cnt
+         FROM attendance_daily_summaries ads
+         LEFT JOIN hr_attendance ha ON ha.id = ads.legacy_attendance_id
+         WHERE ads.workspace_id = $1
+           AND ads.legacy_attendance_id IS NOT NULL
+           AND ha.id IS NULL`,
+        [workspaceId],
+      );
+      const cnt = legacyMismatch[0]?.cnt ?? 0;
+      if (cnt > 0) {
+        findings.push(
+          issue(
+            "ATTENDANCE_LEGACY_LINK_BROKEN",
+            `${cnt} canonical summaries with missing legacy_attendance_id target`,
+            { workspaceId, count: cnt },
+            "warn",
+          ),
+        );
+      }
+    }
+  }
+
+  if (flags.legacyAttendanceFreeze && pilot) {
+    const { rows: recentLegacyAtt } = await client.query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM hr_attendance
+       WHERE workspace_id = $1 AND created_at > NOW() - INTERVAL '7 days'`,
+      [workspaceId],
+    );
+    const cnt = recentLegacyAtt[0]?.cnt ?? 0;
+    if (cnt > 0) {
+      findings.push(
+        issue(
+          "ATTENDANCE_LEGACY_ROWS_RECENT",
+          `${cnt} hr_attendance rows created in last 7d while LEGACY_ATTENDANCE_FREEZE expected`,
+          { workspaceId, count: cnt },
+          strictAttendance ? "warn" : "warn",
+        ),
+      );
+    }
+  }
+
+  return findings;
+}
+
 async function main() {
   const client = await pool.connect();
   try {
@@ -143,27 +260,18 @@ async function main() {
       process.exit(1);
     }
 
-    let workspaceIds;
-    if (WORKSPACE_ID) {
-      workspaceIds = [WORKSPACE_ID];
-    } else {
-      const { rows } = await client.query(`SELECT id FROM workspaces ORDER BY id`);
-      workspaceIds = rows.map((r) => r.id);
-    }
+    const workspaceIds = await listWorkspaceIds(client, WORKSPACE_ID);
 
     const allFindings = [];
     for (const wsId of workspaceIds) {
-      const findings = await validateWorkspace(client, wsId);
-      allFindings.push(...findings);
+      allFindings.push(...(await validateWorkspace(client, wsId)));
+      allFindings.push(...(await validateCutoverData(client, wsId)));
     }
 
-    const report = {
-      ok: allFindings.length === 0,
-      workspaceCount: workspaceIds.length,
-      issueCount: allFindings.length,
-      findings: allFindings,
-      checkedAt: new Date().toISOString(),
-    };
+    const report = finalizeReport(allFindings, workspaceIds.length, {
+      failOnWarn: parseEnvBool(process.env.FAIL_ON_WARN),
+    });
+    report.script = "validate-workforce-integrity";
 
     console.log(JSON.stringify(report, null, 2));
     process.exit(report.ok ? 0 : 1);

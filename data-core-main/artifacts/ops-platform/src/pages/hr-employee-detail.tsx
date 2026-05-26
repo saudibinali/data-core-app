@@ -1,8 +1,20 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "wouter";
-import { useQuery } from "@tanstack/react-query";
-import { apiClient, useGetHrEmployee, useUpdateHrEmployee } from "@workspace/api-client-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  apiClient,
+  getGetHrEmployeeAccountQueryKey,
+  linkHrEmployeeUser,
+  listHrEmployeeLeaves,
+  unlinkHrEmployeeUser,
+  useGetHrEmployee,
+  useGetHrEmployeeAccount,
+  useListHrEmployeeContracts,
+  useListHrEmployeeDocuments,
+  useListHrEmployeeLeaves,
+  useUpdateHrEmployee,
+} from "@workspace/api-client-react";
 import { fetchLeaveListBridge, type NormalizedLeaveRow } from "@/lib/leave-bridge";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useApiFetch } from "@/hooks/use-api-fetch";
@@ -17,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -25,8 +38,9 @@ import {
   FileText, Phone, Mail, MapPin, Calendar, Briefcase, Shield,
   Hash, History, StickyNote, Activity, GitBranch, Plane,
   FileBadge, Loader2, Plus, Trash2, CheckCircle2, XCircle,
-  Clock, AlertCircle, Link2, Unlink, UserCheck,
+  Clock, AlertCircle, Link2, Unlink, UserCheck, ChevronDown,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -81,7 +95,7 @@ function initials(name: string) {
   return name.split(" ").filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
 }
 
-// ── Sub-resource hooks (raw fetch) ────────────────────────────────────────────
+// ── Sub-resource hooks ────────────────────────────────────────────────────────
 
 function useSubResource<T>(url: string, deps: unknown[]) {
   const [data, setData] = useState<T[]>([]);
@@ -113,41 +127,44 @@ function useJsonObject<T>(url: string, deps: unknown[]) {
   return { data, loading, reload };
 }
 
+function useCodegenEmployeeList<T>(
+  employeeId: number,
+  useHook: (id: number, opts?: { query?: { enabled?: boolean } }) => {
+    data?: T[];
+    isLoading: boolean;
+    refetch: () => void;
+  },
+) {
+  const enabled = Number.isFinite(employeeId) && employeeId > 0;
+  const q = useHook(employeeId, { query: { enabled } });
+  return {
+    data: q.data ?? [],
+    loading: q.isLoading,
+    reload: () => { void q.refetch(); },
+  };
+}
+
 // ── Employee ↔ user account (P-HCM2) ─────────────────────────────────────────
 
 function EmployeeAccountCard({
   employeeId,
-  isAr,
   canManage,
 }: {
   employeeId: number;
-  isAr: boolean;
   canManage: boolean;
 }) {
+  const { t } = useTranslation();
   const apiFetch = useApiFetch();
+  const queryClient = useQueryClient();
   const { toast } = useToast();
-  const [account, setAccount] = useState<{
-    linked: boolean;
-    userId: number | null;
-    userEmail: string | null;
-    userName: string | null;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { data: account, isLoading: loading, refetch } = useGetHrEmployeeAccount(employeeId, {
+    query: { enabled: employeeId > 0 },
+  });
   const [users, setUsers] = useState<{ id: number; fullName: string; email?: string }[]>([]);
   const [pickUserId, setPickUserId] = useState("");
   const [busy, setBusy] = useState(false);
   const [provisionOpen, setProvisionOpen] = useState(false);
-  const [showLinkExisting, setShowLinkExisting] = useState(false);
-
-  const reload = useCallback(() => {
-    setLoading(true);
-    apiFetch(`/api/hr/employees/${employeeId}/account`)
-      .then(r => r.json())
-      .then(d => { setAccount(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [apiFetch, employeeId]);
-
-  useEffect(() => { reload(); }, [reload]);
+  const [linkExistingOpen, setLinkExistingOpen] = useState(false);
 
   useEffect(() => {
     if (!canManage || account?.linked) return;
@@ -162,21 +179,13 @@ function EmployeeAccountCard({
     if (!uid) return;
     setBusy(true);
     try {
-      const r = await apiFetch(`/api/hr/employees/${employeeId}/link-user`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: uid }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.error || "Link failed");
-      }
-      setAccount(await r.json());
+      const status = await linkHrEmployeeUser(employeeId, { userId: uid });
+      queryClient.setQueryData(getGetHrEmployeeAccountQueryKey(employeeId), status);
       setPickUserId("");
-      toast({ title: isAr ? "تم ربط الحساب" : "User linked" });
+      toast({ title: t("hr_account_linked_toast") });
     } catch (e: unknown) {
       toast({
-        title: isAr ? "فشل الربط" : "Link failed",
+        title: t("hr_account_link_failed"),
         description: e instanceof Error ? e.message : undefined,
         variant: "destructive",
       });
@@ -188,9 +197,8 @@ function EmployeeAccountCard({
   async function unlinkUser() {
     setBusy(true);
     try {
-      const r = await apiFetch(`/api/hr/employees/${employeeId}/link-user`, { method: "DELETE" });
-      if (!r.ok) throw new Error("Unlink failed");
-      setAccount(await r.json());
+      const status = await unlinkHrEmployeeUser(employeeId);
+      queryClient.setQueryData(getGetHrEmployeeAccountQueryKey(employeeId), status);
       toast({ title: isAr ? "تم فك الربط" : "User unlinked" });
     } catch {
       toast({ title: isAr ? "فشل فك الربط" : "Unlink failed", variant: "destructive" });
@@ -205,7 +213,7 @@ function EmployeeAccountCard({
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
           <Link2 className="w-4 h-4" />
-          {isAr ? "حساب الدخول (Employee Central)" : "Login Account"}
+          {t("hr_login_account_central")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -218,7 +226,7 @@ function EmployeeAccountCard({
               {account.userEmail && (
                 <p className="text-xs text-muted-foreground">{account.userEmail}</p>
               )}
-              <Badge variant="secondary" className="mt-1">{isAr ? "مرتبط" : "Linked"}</Badge>
+              <Badge variant="secondary" className="mt-1">{t("hr_account_linked")}</Badge>
             </div>
             {canManage && (
               <Button variant="outline" size="sm" onClick={unlinkUser} disabled={busy}>
@@ -230,45 +238,46 @@ function EmployeeAccountCard({
         ) : (
           <>
             <p className="text-sm text-muted-foreground">
-              {isAr
-                ? "أنشئ حساباً جديداً يستورد بيانات الموظف من HR، أو اربط مستخدماً موجوداً."
-                : "Create a new account that imports HR data, or link an existing user."}
+              {t("hr_account_create_desc")}
             </p>
             {canManage ? (
               <div className="space-y-3">
                 <Button size="sm" className="w-full sm:w-auto" onClick={() => setProvisionOpen(true)}>
                   <UserCheck className="w-4 h-4 mr-2" />
-                  {isAr ? "إنشاء حساب للموظف" : "Create employee account"}
+                  {t("hr_account_create_btn")}
                 </Button>
-                <Button variant="ghost" size="sm" className="text-xs h-8 px-0" onClick={() => setShowLinkExisting(v => !v)}>
-                  {showLinkExisting
-                    ? (isAr ? "إخفاء ربط مستخدم موجود" : "Hide link existing user")
-                    : (isAr ? "ربط مستخدم موجود" : "Link existing user")}
-                </Button>
-                {showLinkExisting && (
-                  <div className="flex flex-wrap gap-2 items-end pt-1 border-t">
-                    <div className="flex-1 min-w-[200px] space-y-1">
-                      <Label className="text-xs">{isAr ? "مستخدم موجود" : "Existing user"}</Label>
-                      <Select value={pickUserId} onValueChange={setPickUserId}>
-                        <SelectTrigger><SelectValue placeholder={isAr ? "اختر مستخدم" : "Select user"} /></SelectTrigger>
-                        <SelectContent>
-                          {users.map(u => (
-                            <SelectItem key={u.id} value={String(u.id)}>
-                              {u.fullName}{u.email ? ` (${u.email})` : ""}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <Button size="sm" variant="outline" onClick={linkUser} disabled={busy || !pickUserId}>
-                      <Link2 className="w-4 h-4 mr-2" />
-                      {isAr ? "ربط" : "Link"}
+                <Collapsible open={linkExistingOpen} onOpenChange={setLinkExistingOpen}>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" size="sm" className="text-xs h-8 px-0 w-full justify-start">
+                      <ChevronDown className={cn("w-4 h-4 mr-1 transition-transform", linkExistingOpen && "rotate-180")} />
+                      {t("hr_account_link_existing")}
                     </Button>
-                  </div>
-                )}
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="pt-2">
+                    <div className="flex flex-wrap gap-2 items-end border-t pt-3">
+                      <div className="flex-1 min-w-[200px] space-y-1">
+                      <Label className="text-xs">{t("hr_account_select_user")}</Label>
+                      <Select value={pickUserId} onValueChange={setPickUserId}>
+                        <SelectTrigger><SelectValue placeholder={t("hr_account_select_user")} /></SelectTrigger>
+                          <SelectContent>
+                            {users.map(u => (
+                              <SelectItem key={u.id} value={String(u.id)}>
+                                {u.fullName}{u.email ? ` (${u.email})` : ""}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={linkUser} disabled={busy || !pickUserId}>
+                        <Link2 className="w-4 h-4 mr-2" />
+                        {t("hr_account_link_btn")}
+                      </Button>
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground">{isAr ? "غير مرتبط" : "Not linked"}</p>
+              <p className="text-xs text-muted-foreground">{t("hr_account_not_linked")}</p>
             )}
           </>
         )}
@@ -278,9 +287,8 @@ function EmployeeAccountCard({
       <EmployeeAccountProvisionDialog
         open={provisionOpen}
         onClose={() => setProvisionOpen(false)}
-        isAr={isAr}
         employeeId={employeeId}
-        onSuccess={reload}
+        onSuccess={() => { void refetch(); }}
       />
     )}
     </>
@@ -331,8 +339,9 @@ export default function HrEmployeeDetailPage() {
   }
 
   // Sub-resources
-  const contracts     = useSubResource<any>(`/api/hr/employees/${id}/contracts`,       [id]);
-  const documents     = useSubResource<any>(`/api/hr/employees/${id}/documents`,       [id]);
+  const empId = Number(id);
+  const contracts     = useCodegenEmployeeList(empId, useListHrEmployeeContracts);
+  const documents     = useCodegenEmployeeList(empId, useListHrEmployeeDocuments);
   const posHistory    = useSubResource<any>(`/api/hr/employees/${id}/position-history`,[id]);
   const notes         = useSubResource<any>(`/api/hr/employees/${id}/notes`,           [id]);
   const activity      = useSubResource<any>(`/api/hr/employees/${id}/activity`,        [id]);
@@ -463,7 +472,7 @@ export default function HrEmployeeDetailPage() {
 
         {/* ── Profile ────────────────────────────────────────────────────── */}
         <TabsContent value="profile" className="space-y-4 mt-4">
-          <EmployeeAccountCard employeeId={Number(id)} isAr={isAr} canManage={isAdmin} />
+          <EmployeeAccountCard employeeId={Number(id)} canManage={isAdmin} />
           <Card>
             <CardHeader><CardTitle className="text-base">{isAr ? "المعلومات الشخصية" : "Personal Information"}</CardTitle></CardHeader>
             <CardContent>
@@ -896,9 +905,9 @@ function LeavesTab({ empId, isAdmin, isAr }: { empId: number; isAdmin: boolean; 
     queryKey: ["/hr/leave-requests", "employee", empId],
     queryFn: async (): Promise<NormalizedLeaveRow[]> => {
       const canonical = await fetchLeaveListBridge(apiClient, { employeeId: empId });
-      const res = await apiFetch(`/api/hr/employees/${empId}/leaves`);
-      const legacyRows: NormalizedLeaveRow[] = res.ok
-        ? ((await res.json()) as Record<string, unknown>[]).map((row) => ({
+      const legacyRaw = await listHrEmployeeLeaves(empId);
+      const legacyRows: NormalizedLeaveRow[] = Array.isArray(legacyRaw)
+        ? (legacyRaw as Record<string, unknown>[]).map((row) => ({
             id: Number(row.id),
             source: "legacy" as const,
             leaveType: String(row.leaveType ?? "annual"),

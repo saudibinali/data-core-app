@@ -9,7 +9,8 @@
 | Category | Scripts / tests |
 |----------|-----------------|
 | Schema consistency | Drizzle schema vs DB introspection |
-| Workforce graph | validate-workforce-integrity.cjs (full) |
+| Workforce graph | validate-workforce-integrity.cjs (full + F6 cutover) |
+| Payroll canonical | validate-payroll-integrity.cjs (F6.4) |
 | Position occupancy | occupancy = count(employees) |
 | Approval consistency | no pending without approver |
 | Leave balances | sum matches policy accrual rules |
@@ -24,7 +25,9 @@
 **Pre-deploy (staging):**
 ```
 pnpm run migrate
-node scripts/validate-workforce-integrity.cjs --fail-on-warn
+pnpm run validate:canonical-cutover
+# أو: validate:workforce + validate:payroll
+FAIL_ON_WARN=1 pnpm run validate:canonical-cutover
 pnpm --filter api-server test
 pnpm --filter ops-platform test
 node scripts/validate-schema-drift.cjs

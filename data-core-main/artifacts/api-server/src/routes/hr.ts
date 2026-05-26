@@ -104,6 +104,8 @@ import { applyImportPreviewIntelligence, applyDeferredManagerLinks } from "../li
 import { getEnterpriseRuntimeStatus } from "../lib/hr-import/activation/enterprise-runtime-activation";
 import { isSchemaMismatchError } from "../lib/commercial-route-utils";
 import { logger } from "../lib/logger";
+import { HrEmployeeCreateBody, formatZodError } from "../lib/security-validation";
+import { maybeDeactivateLinkedUserOnTermination } from "../lib/hr/employee-offboarding";
 
 const router: IRouter = Router();
 
@@ -1200,7 +1202,17 @@ router.post("/hr/employees/bulk", requireAuth, requirePermission("hr.manage"), a
     if (!emp) continue;
 
     if (action === "set_status" && value) {
+      const [before] = await db.select({ status: employeesTable.status })
+        .from(employeesTable)
+        .where(and(eq(employeesTable.id, empId), eq(employeesTable.workspaceId, workspaceId)));
       await db.update(employeesTable).set({ status: value }).where(eq(employeesTable.id, empId));
+      void maybeDeactivateLinkedUserOnTermination({
+        workspaceId,
+        employeeId: empId,
+        newStatus: value,
+        previousStatus: before?.status,
+        actorUserId: req.userId,
+      }).catch(() => undefined);
       affected++;
     } else if (action === "set_employment_type" && value) {
       await db.update(employeesTable).set({ employmentType: value }).where(eq(employeesTable.id, empId));
@@ -1294,6 +1306,13 @@ router.post("/hr/employees", requireAuth, requireWorkspaceAdmin, async (req: Aut
   const workspaceId = req.workspaceId;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
+  const bodyParsed = HrEmployeeCreateBody.safeParse(req.body);
+  if (!bodyParsed.success) {
+    res.status(400).json({ error: formatZodError(bodyParsed.error) });
+    return;
+  }
+
+  const body = bodyParsed.data;
   const {
     fullName, firstName, lastName, email, phoneNumber,
     avatarUrl, status, nationality, gender, dateOfBirth, maritalStatus,
@@ -1302,14 +1321,14 @@ router.post("/hr/employees", requireAuth, requireWorkspaceAdmin, async (req: Aut
     position, directManagerId, company, branch, location,
     emergencyContactName, emergencyContactPhone, emergencyContactRelation,
     notes, userId,
-  } = req.body;
+  } = body;
 
   if (!fullName?.trim()) { res.status(400).json({ error: "fullName is required" }); return; }
 
   // Resolve numbering mode for this workspace
   const [settings] = await db.select().from(hrWorkspaceSettingsTable).where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId));
   const numberingMode = settings?.numberingMode ?? "auto";
-  const providedNumber = (req.body.employeeNumber as string | undefined)?.trim();
+  const providedNumber = (body.employeeNumber as string | undefined)?.trim();
 
   let employeeNumber: string;
   if (numberingMode === "manual") {
@@ -1467,6 +1486,16 @@ router.patch("/hr/employees/:id", requireAuth, requirePermission("hr.manage"), a
     .set(updates as any)
     .where(eq(employeesTable.id, id))
     .returning();
+
+  if ("status" in updates) {
+    void maybeDeactivateLinkedUserOnTermination({
+      workspaceId,
+      employeeId: id,
+      newStatus: String(updates.status),
+      previousStatus: existing.status,
+      actorUserId: req.userId,
+    }).catch(() => undefined);
+  }
 
   await logActivity(workspaceId, id, "profile_updated", "Employee profile updated", req.userId, null, { before, after: updates });
 
@@ -2259,7 +2288,7 @@ router.get("/hr/employees/:id/activity", requireAuth, requirePermission("hr.view
 
 // ── HR SERVICE CATEGORIES ──────────────────────────────────────────────────────
 
-router.get("/hr/categories", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.get("/hr/categories", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
   if (!req.workspaceId) { res.json([]); return; }
   const cats = await db.select().from(hrServiceCategoriesTable)
     .where(eq(hrServiceCategoriesTable.workspaceId, req.workspaceId))
@@ -3620,54 +3649,7 @@ router.get("/hr/payroll/runs/:runId/payslips/:id", requireAuth, requirePermissio
   res.json({ ...payslip, lines });
 });
 
-// Employee's own payslips (self-service)
-router.get("/hr/me/payslips", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const { workspaceId, userId } = req;
-  if (!workspaceId || !userId) { res.status(403).json({ error: "No workspace" }); return; }
-  const [emp] = await db.select({ id: employeesTable.id })
-    .from(employeesTable)
-    .where(and(eq(employeesTable.workspaceId, workspaceId), eq(employeesTable.userId, userId)));
-  if (!emp) { res.json([]); return; }
-  const rows = await db
-    .select({
-      id: hrPayslipsTable.id,
-      payrollRunId: hrPayslipsTable.payrollRunId,
-      runName: hrPayrollRunsTable.name,
-      periodYear: hrPayrollRunsTable.periodYear,
-      periodMonth: hrPayrollRunsTable.periodMonth,
-      basicSalary: hrPayslipsTable.basicSalary,
-      totalAllowances: hrPayslipsTable.totalAllowances,
-      totalDeductions: hrPayslipsTable.totalDeductions,
-      grossSalary: hrPayslipsTable.grossSalary,
-      netSalary: hrPayslipsTable.netSalary,
-      currencyCode: hrPayslipsTable.currencyCode,
-      status: hrPayslipsTable.status,
-    })
-    .from(hrPayslipsTable)
-    .innerJoin(hrPayrollRunsTable, eq(hrPayslipsTable.payrollRunId, hrPayrollRunsTable.id))
-    .where(and(eq(hrPayslipsTable.workspaceId, workspaceId), eq(hrPayslipsTable.employeeId, emp.id)))
-    .orderBy(desc(hrPayrollRunsTable.periodYear), desc(hrPayrollRunsTable.periodMonth));
-  res.json(rows);
-});
-
-router.get("/hr/me/payslips/:id", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const { workspaceId, userId } = req;
-  if (!workspaceId || !userId) { res.status(403).json({ error: "No workspace" }); return; }
-  const id = parseId(req.params.id);
-  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
-  const [emp] = await db.select({ id: employeesTable.id })
-    .from(employeesTable)
-    .where(and(eq(employeesTable.workspaceId, workspaceId), eq(employeesTable.userId, userId)));
-  if (!emp) { res.status(403).json({ error: "Not an employee" }); return; }
-  const [payslip] = await db.select().from(hrPayslipsTable)
-    .where(and(eq(hrPayslipsTable.id, id), eq(hrPayslipsTable.employeeId, emp.id)));
-  if (!payslip) { res.status(404).json({ error: "Not found" }); return; }
-  const lines = await db.select().from(hrPayslipLinesTable)
-    .where(eq(hrPayslipLinesTable.payslipId, id))
-    .orderBy(asc(hrPayslipLinesTable.displayOrder));
-  const [run] = await db.select().from(hrPayrollRunsTable).where(eq(hrPayrollRunsTable.id, payslip.payrollRunId));
-  res.json({ ...payslip, lines, run });
-});
+// Self-service payslips: see routes/me-payslips.ts (F6.3 canonical + PDF)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LEAVE & ATTENDANCE ENGINE
@@ -3897,6 +3879,7 @@ router.post("/hr/attendance", requireAuth, requirePermission("hr.manage"), async
 });
 
 router.patch("/hr/attendance/:id", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!assertLegacyAttendanceWriteAllowed(req, res)) return;
   const { workspaceId, userId } = req;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
   const id = parseId(req.params.id);
@@ -3917,6 +3900,7 @@ router.patch("/hr/attendance/:id", requireAuth, requirePermission("hr.manage"), 
 });
 
 router.delete("/hr/attendance/:id", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
+  if (!assertLegacyAttendanceWriteAllowed(req, res)) return;
   const { workspaceId } = req;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
   const id = parseId(req.params.id);
@@ -4230,6 +4214,7 @@ router.get("/hr/attendance/import-template", requireAuth, requirePermission("hr.
 
 // ── Attendance Import Preview ──────────────────────────────────────────────────
 router.post("/hr/attendance/import/preview", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!assertLegacyAttendanceWriteAllowed(req, res)) return;
   const { workspaceId } = req;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
@@ -4335,6 +4320,7 @@ router.post("/hr/attendance/import/preview", requireAuth, requirePermission("hr.
 
 // ── Attendance Import Confirm ──────────────────────────────────────────────────
 router.post("/hr/attendance/import/confirm", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!assertLegacyAttendanceWriteAllowed(req, res)) return;
   const { workspaceId, userId } = req;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
@@ -4417,6 +4403,7 @@ router.get("/hr/attendance/export", requireAuth, requirePermission("hr.manage"),
 
 // ── Attendance Bulk Update ────────────────────────────────────────────────────
 router.post("/hr/attendance/bulk", requireAuth, requirePermission("hr.manage"), async (req: AuthRequest, res): Promise<void> => {
+  if (!assertLegacyAttendanceWriteAllowed(req, res)) return;
   const { workspaceId } = req;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
   const { ids, status, notes } = req.body;

@@ -9,6 +9,7 @@ import { getLegacyAuditReport } from "../lib/workforce/stabilization/legacy-audi
 import { getWorkforceRuntimeHealth } from "../lib/workforce/stabilization/runtime-health-service";
 import { getLegacyUsageSummary, getRecentLegacyUsageEvents } from "../lib/workforce/stabilization/usage-telemetry";
 import { getGovernanceCutoverReadiness } from "../lib/workforce/stabilization/governance-finalization";
+import { orgCutoverStatusForWorkspace, resolveOrgCutoverStatus } from "../lib/org-cutover-flags";
 import { getRuntimeMetrics } from "../lib/workforce/stabilization/observability-metrics";
 import { handleLegacyCompatRouteError } from "../lib/workforce/stabilization/schema-guard";
 
@@ -68,6 +69,17 @@ router.get("/hr/legacy-usage", requireAuth, requirePermission("hr.view"), async 
     if (handleLegacyCompatRouteError(res, e, { route: "GET /hr/legacy-usage" })) return;
     throw e;
   }
+});
+
+// GET /hr/org-cutover/status — F5.1 pilot + effective org canonical flags
+router.get("/hr/org-cutover/status", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const workspaceId = req.workspaceId;
+  if (!workspaceId) {
+    res.json(orgCutoverStatusForWorkspace(null));
+    return;
+  }
+  const status = await resolveOrgCutoverStatus(workspaceId);
+  res.json(status);
 });
 
 // GET /hr/settings/cutover-readiness — governance + cleanup gate checklist

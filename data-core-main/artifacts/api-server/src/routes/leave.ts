@@ -77,10 +77,14 @@ import {
   leaveOverlapErrorMessage,
 } from "../lib/leave-overlap";
 import { incrementLeaveMetric, getLeaveCutoverMetrics } from "../lib/leave-cutover-metrics";
-import { leaveCutoverStatusForWorkspace, resolveLeaveCutoverStatus } from "../lib/leave-cutover-flags";
+import { leaveCutoverStatusForWorkspace } from "../lib/leave-cutover-flags";
+import { getEffectiveLeaveCutoverStatus } from "../lib/leave/canonical-write-policy";
+import { mirrorCanonicalLeaveToLegacy } from "../lib/leave/legacy-mirror-service";
 import { getLeaveRuntimeMode } from "../lib/hr/hcm-workspace-settings";
 import { resolveLeaveApprover } from "../lib/workforce/manager-resolver";
 import { startLeaveApproval, syncLeaveStepDecision } from "../lib/approval/runtime-service";
+import { isWorkspaceRbacStrict } from "../lib/workspace-rbac-config";
+import { SubmitLeaveRequestBody, formatZodError } from "../lib/security-validation";
 const router: IRouter = Router();
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -92,18 +96,26 @@ function parseId(val: unknown): number | null {
 
 /** HR-wide leave list (not limited to role name manager). */
 function canViewAllLeaveRequests(req: AuthRequest): boolean {
+  if (req.userPermissions?.includes("leave.view") || req.userPermissions?.includes("hr.manage")) {
+    return true;
+  }
+  if (isWorkspaceRbacStrict()) return false;
   if (req.userRole === "admin" || req.userRole === "super_admin" || req.userRole === "manager") {
     return true;
   }
-  return Boolean(req.userPermissions?.includes("hr.manage") || req.userPermissions?.includes("hr.view"));
+  return false;
 }
 
-/** Approver authorization: designated approver, role manager/admin, or hr.manage. */
+/** Approver authorization: designated approver, role manager/admin, or leave.manage / hr.manage. */
 function canActAsLeaveApprover(req: AuthRequest): boolean {
+  if (req.userPermissions?.includes("leave.manage") || req.userPermissions?.includes("hr.manage")) {
+    return true;
+  }
+  if (isWorkspaceRbacStrict()) return false;
   if (req.userRole === "admin" || req.userRole === "super_admin" || req.userRole === "manager") {
     return true;
   }
-  return Boolean(req.userPermissions?.includes("hr.manage"));
+  return false;
 }
 
 async function employeeOwnedByUser(
@@ -251,8 +263,6 @@ async function resolveApproverWithFallback(
 
 // ── Validation helpers ─────────────────────────────────────────────────────────
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
 function parseSubmitLeaveBody(body: unknown):
   | {
       ok: true;
@@ -264,36 +274,11 @@ function parseSubmitLeaveBody(body: unknown):
       attachmentUrls?: string[];
     }
   | { ok: false; error: string } {
-  if (!body || typeof body !== "object") return { ok: false, error: "Request body required" };
-  const b = body as Record<string, unknown>;
-  if (!b.leaveType || typeof b.leaveType !== "string" || !b.leaveType.trim())
-    return { ok: false, error: "leaveType is required" };
-  if (!b.startDate || typeof b.startDate !== "string" || !ISO_DATE.test(b.startDate))
-    return { ok: false, error: "startDate must be YYYY-MM-DD" };
-  if (!b.endDate || typeof b.endDate !== "string" || !ISO_DATE.test(b.endDate))
-    return { ok: false, error: "endDate must be YYYY-MM-DD" };
-  if (b.employeeNote !== undefined && (typeof b.employeeNote !== "string" || b.employeeNote.length > 1000))
-    return { ok: false, error: "employeeNote must be a string (max 1000 chars)" };
-  if (b.leavePolicyId !== undefined) {
-    const pid = Number(b.leavePolicyId);
-    if (!Number.isInteger(pid) || pid < 1) return { ok: false, error: "leavePolicyId must be a positive integer" };
+  const parsed = SubmitLeaveRequestBody.safeParse(body);
+  if (!parsed.success) {
+    return { ok: false, error: formatZodError(parsed.error) };
   }
-  let attachmentUrls: string[] | undefined;
-  if (b.attachmentUrls !== undefined) {
-    if (!Array.isArray(b.attachmentUrls) || b.attachmentUrls.some((u) => typeof u !== "string")) {
-      return { ok: false, error: "attachmentUrls must be an array of strings" };
-    }
-    attachmentUrls = b.attachmentUrls as string[];
-  }
-  return {
-    ok: true,
-    leaveType:     b.leaveType.trim(),
-    startDate:     b.startDate,
-    endDate:       b.endDate,
-    employeeNote:  typeof b.employeeNote === "string" ? b.employeeNote : undefined,
-    leavePolicyId: b.leavePolicyId !== undefined ? Number(b.leavePolicyId) : undefined,
-    attachmentUrls,
-  };
+  return { ok: true, ...parsed.data };
 }
 
 function parseComment(body: unknown): string | undefined {
@@ -520,6 +505,8 @@ router.post("/hr/leave-requests", requireAuth, async (req: AuthRequest, res): Pr
   // ── HTTP response ─────────────────────────────────────────────────────────────
   res.status(201).json({ leaveRequest, leaveApprovalStep });
 
+  void mirrorCanonicalLeaveToLegacy(workspaceId, leaveRequest.id).catch(() => undefined);
+
   if (requiresApproval && leaveApprovalStep) {
     void startLeaveApproval(
       workspaceId,
@@ -666,6 +653,93 @@ router.get("/hr/leave-requests", requireAuth, async (req: AuthRequest, res): Pro
   res.json(rows);
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /hr/leave-requests/team-calendar — read-only team leave overlay (F5.3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.get("/hr/leave-requests/team-calendar", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const { workspaceId, userId } = req;
+  if (!workspaceId || !userId) { res.status(403).json({ error: "No workspace access" }); return; }
+
+  const monthRaw = String(req.query.month ?? "").trim();
+  const monthMatch = /^(\d{4})-(\d{2})$/.exec(monthRaw);
+  if (!monthMatch) {
+    res.status(400).json({ error: "month query required (YYYY-MM)" });
+    return;
+  }
+  const year = Number(monthMatch[1]);
+  const mon = Number(monthMatch[2]);
+  if (mon < 1 || mon > 12) { res.status(400).json({ error: "Invalid month" }); return; }
+
+  const monthStart = `${year}-${String(mon).padStart(2, "0")}-01`;
+  const lastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+  const monthEnd = `${year}-${String(mon).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+  const viewAll = canViewAllLeaveRequests(req);
+  let teamEmployeeIds: number[] | null = null;
+
+  if (!viewAll) {
+    const [mgr] = await db
+      .select({ id: employeesTable.id })
+      .from(employeesTable)
+      .where(and(eq(employeesTable.workspaceId, workspaceId), eq(employeesTable.userId, userId)));
+    if (!mgr) {
+      res.json({ month: monthRaw, scope: "team", readOnly: true, entries: [] });
+      return;
+    }
+    const reports = await db
+      .select({ id: employeesTable.id })
+      .from(employeesTable)
+      .where(
+        and(
+          eq(employeesTable.workspaceId, workspaceId),
+          eq(employeesTable.directManagerId, mgr.id),
+        ),
+      );
+    teamEmployeeIds = reports.map((r) => r.id);
+    if (!teamEmployeeIds.length) {
+      res.json({ month: monthRaw, scope: "team", readOnly: true, entries: [] });
+      return;
+    }
+  }
+
+  const conditions: Parameters<typeof and>[0][] = [
+    eq(leaveRequestsTable.workspaceId, workspaceId),
+    lte(leaveRequestsTable.startDate, monthEnd),
+    gte(leaveRequestsTable.endDate, monthStart),
+    inArray(leaveRequestsTable.status, ["pending", "pending_approval", "approved"]),
+  ];
+
+  if (teamEmployeeIds) {
+    conditions.push(inArray(leaveRequestsTable.employeeId, teamEmployeeIds));
+  }
+
+  const rows = await db
+    .select({
+      requestId: leaveRequestsTable.id,
+      employeeId: leaveRequestsTable.employeeId,
+      employeeName: employeesTable.fullName,
+      employeeNumber: employeesTable.employeeNumber,
+      leaveType: leaveRequestsTable.leaveType,
+      startDate: leaveRequestsTable.startDate,
+      endDate: leaveRequestsTable.endDate,
+      status: leaveRequestsTable.status,
+      businessDaysCount: leaveRequestsTable.businessDaysCount,
+      requestNumber: leaveRequestsTable.requestNumber,
+    })
+    .from(leaveRequestsTable)
+    .innerJoin(employeesTable, eq(leaveRequestsTable.employeeId, employeesTable.id))
+    .where(and(...(conditions as [ReturnType<typeof eq>])))
+    .orderBy(asc(leaveRequestsTable.startDate));
+
+  res.json({
+    month: monthRaw,
+    scope: viewAll ? "workspace" : "team",
+    readOnly: true,
+    entries: rows,
+  });
+});
+
 // Self-service: active leave policies (read-only; no hr.view required)
 router.get("/hr/me/leave-policies", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const { workspaceId } = req;
@@ -739,7 +813,7 @@ router.get("/hr/leave-requests/:id", requireAuth, async (req: AuthRequest, res):
 //   2. Update leave_requests: status → approved, approvedByUserId, approvedAt
 //   3. Update balance: pending -= businessDaysCount, used += businessDaysCount
 
-router.patch("/hr/leave-requests/:id/approve", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/hr/leave-requests/:id/approve", requireAuth, requirePermission("leave.manage"), async (req: AuthRequest, res): Promise<void> => {
   const { workspaceId, userId } = req;
   if (!workspaceId || !userId) { res.status(403).json({ error: "No workspace access" }); return; }
 
@@ -861,6 +935,7 @@ router.patch("/hr/leave-requests/:id/approve", requireAuth, async (req: AuthRequ
   incrementLeaveMetric("canonical_approve_total");
   res.json(updated);
 
+  void mirrorCanonicalLeaveToLegacy(workspaceId, id).catch(() => undefined);
   void syncLeaveStepDecision(workspaceId, id, "approved", userId, comment ?? null).catch(() => undefined);
 
   // ── Bus: leave.approved ───────────────────────────────────────────────────────
@@ -893,7 +968,7 @@ router.patch("/hr/leave-requests/:id/approve", requireAuth, async (req: AuthRequ
 //   2. Update leave_requests: status → rejected, rejectedByUserId, rejectedAt
 //   3. Update balance: pending -= businessDaysCount (release reservation)
 
-router.patch("/hr/leave-requests/:id/reject", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/hr/leave-requests/:id/reject", requireAuth, requirePermission("leave.manage"), async (req: AuthRequest, res): Promise<void> => {
   const { workspaceId, userId } = req;
   if (!workspaceId || !userId) { res.status(403).json({ error: "No workspace access" }); return; }
 
@@ -901,6 +976,13 @@ router.patch("/hr/leave-requests/:id/reject", requireAuth, async (req: AuthReque
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
 
   const comment = parseComment(req.body);
+  if (!comment?.trim()) {
+    res.status(400).json({
+      error: "Rejection reason is required",
+      code: "REJECT_REASON_REQUIRED",
+    });
+    return;
+  }
   const canOverride = canActAsLeaveApprover(req);
 
   let rejectedReq: typeof leaveRequestsTable.$inferSelect;
@@ -999,6 +1081,7 @@ router.patch("/hr/leave-requests/:id/reject", requireAuth, async (req: AuthReque
   incrementLeaveMetric("canonical_reject_total");
   res.json(rejectedReq);
 
+  void mirrorCanonicalLeaveToLegacy(workspaceId, id).catch(() => undefined);
   void syncLeaveStepDecision(workspaceId, id, "rejected", userId, comment ?? null).catch(() => undefined);
 
   // ── Bus: leave.rejected ───────────────────────────────────────────────────────
@@ -1127,6 +1210,8 @@ router.patch("/hr/leave-requests/:id/withdraw", requireAuth, async (req: AuthReq
 
   res.json(withdrawnReq);
 
+  void mirrorCanonicalLeaveToLegacy(workspaceId, id).catch(() => undefined);
+
   // ── Bus: leave.withdrawn ──────────────────────────────────────────────────────
   void appEventBus.emit({
     type:      EVENT_TYPES.LEAVE_WITHDRAWN,
@@ -1156,8 +1241,8 @@ router.get("/hr/leave-cutover/status", requireAuth, async (req: AuthRequest, res
     res.json(leaveCutoverStatusForWorkspace(null));
     return;
   }
-  const mode = await getLeaveRuntimeMode(workspaceId);
-  res.json(resolveLeaveCutoverStatus(workspaceId, mode));
+  const status = await getEffectiveLeaveCutoverStatus(workspaceId);
+  res.json(status);
 });
 
 router.get(

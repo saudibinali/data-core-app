@@ -760,3 +760,53 @@ export type ProcurementOverrideRequestedEvent = TypedEvent<
   "procurement.override.requested",
   ProcurementOverrideRequestedPayload
 >;
+
+// ── Inventory (P25-B) — domain event payloads ───────────────────────────────
+
+/** Shared minimal payload for inventory domain events (extended at emit sites). */
+export interface InventoryDomainEventPayload {
+  workspaceId: number;
+  documentId: number;
+  referenceNumber?: string;
+}
+
+export type InventoryReceiptPostedEvent = TypedEvent<
+  "inventory.receipt.posted",
+  InventoryDomainEventPayload
+>;
+export type InventoryReceiptVoidedEvent = TypedEvent<
+  "inventory.receipt.voided",
+  InventoryDomainEventPayload
+>;
+export type InventoryMovementPostedEvent = TypedEvent<
+  "inventory.movement.posted",
+  InventoryDomainEventPayload & { movementType?: string }
+>;
+export type InventoryIssuePostedEvent = TypedEvent<
+  "inventory.issue.posted",
+  InventoryDomainEventPayload
+>;
+export type InventoryTransferCompletedEvent = TypedEvent<
+  "inventory.transfer.completed",
+  InventoryDomainEventPayload
+>;
+export type InventoryReservationCreatedEvent = TypedEvent<
+  "inventory.reservation.created",
+  InventoryDomainEventPayload
+>;
+export type InventoryAdjustmentPostedEvent = TypedEvent<
+  "inventory.adjustment.posted",
+  InventoryDomainEventPayload
+>;
+export type InventoryCountPostedEvent = TypedEvent<
+  "inventory.count.posted",
+  InventoryDomainEventPayload
+>;
+export type InventoryReservationExpiredEvent = TypedEvent<
+  "inventory.reservation.expired",
+  InventoryDomainEventPayload
+>;
+export type InventoryCountCompletedEvent = TypedEvent<
+  "inventory.count.completed",
+  InventoryDomainEventPayload
+>;

@@ -5,6 +5,7 @@ import { checkReplayToken, verifyWebhookSignature } from "./integration-security
 import { decryptCredentials } from "./integration-credential-vault";
 import { ingestVendorDrafts } from "./integration-pipeline";
 import { logger } from "../logger";
+import { isProductionRuntime, isSecurityStrict } from "../security-config";
 
 registerWorkforceConnectors();
 
@@ -27,13 +28,29 @@ export async function handleAttendanceWebhook(input: WebhookIngestInput) {
 
   const creds = decryptCredentials(integration.credentialEncrypted);
   const secret = creds.webhookSecret;
-  if (secret) {
-    const sig =
-      (input.headers["x-signature"] as string) ??
-      (input.headers["x-hub-signature-256"] as string);
+  const sig =
+    (input.headers["x-signature"] as string) ??
+    (input.headers["x-hub-signature-256"] as string);
+
+  if (isProductionRuntime() && isSecurityStrict()) {
+    if (!secret) {
+      throw new Error("Webhook secret not configured for this integration");
+    }
     if (!verifyWebhookSignature(secret, input.rawBody, sig)) {
       throw new Error("Invalid webhook signature");
     }
+  } else if (secret) {
+    if (!verifyWebhookSignature(secret, input.rawBody, sig)) {
+      if (isProductionRuntime()) {
+        throw new Error("Invalid webhook signature");
+      }
+      logger.warn(
+        { integrationId: integration.id },
+        "[integration] webhook signature mismatch (log-only in non-strict mode)",
+      );
+    }
+  } else if (isProductionRuntime() && isSecurityStrict()) {
+    throw new Error("Unsigned webhook rejected in production");
   }
 
   const connector = connectorRegistry.resolve(integration.connectorKey);

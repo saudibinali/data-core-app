@@ -7,6 +7,7 @@ export * from "./catalog/master-data-catalog";
 export * from "./session/import-session-service";
 export * from "./validation/import-validation-foundation";
 export * from "./validation/hr-import-validator";
+export * from "./validation/canonical-import-gates";
 export * from "./validation/shadow-validation";
 export * from "./validation/shadow-validation-runner";
 export * from "./mapping/mapping-foundation";

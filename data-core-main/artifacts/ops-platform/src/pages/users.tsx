@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "wouter";
 import {
   useListUsers, useListInvitations, useCreateInvitation, useCancelInvitation,
-  useAdminCreateUser, useGetMe, useUpdateUser, useAdminResetUserPassword,
+  adminCreateUser, useGetMe, useUpdateUser, useAdminResetUserPassword,
   useDeleteUser, useListDepartments, useListWorkspaceRoles,
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +30,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 import EmployeeAccountProvisionDialog from "@/components/hr/employee-account-provision-dialog";
+import { idempotencyRequestInit } from "@/lib/idempotency-key";
 
 type Role = "admin" | "manager" | "member";
 
@@ -90,7 +91,7 @@ type FieldErrors = Partial<Record<"firstName" | "lastName" | "password" | "email
 const EMPTY_FORM = {
   firstName: "", lastName: "", email: "",
   password: "", role: "member" as Role, customRoleId: "__none__",
-  position: "", departmentIds: [] as number[], mustResetPassword: false,
+  position: "", departmentIds: [] as number[], mustResetPassword: true,
 };
 
 function FieldError({ msg }: { msg?: string }) {
@@ -106,7 +107,7 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [apiError, setApiError] = useState<string | null>(null);
   const { toast } = useToast();
-  const adminCreateUser = useAdminCreateUser();
+  const [creating, setCreating] = useState(false);
   const { data: departments } = useListDepartments({});
   const queryClient = useQueryClient();
 
@@ -143,15 +144,16 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
     return errors;
   };
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     const errors = validate();
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       return;
     }
 
-    adminCreateUser.mutate({
-      data: {
+    setCreating(true);
+    try {
+      await adminCreateUser({
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
         email: form.email.trim() || null,
@@ -161,25 +163,23 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
         position: form.position.trim() || null,
         departmentIds: form.departmentIds,
         mustResetPassword: form.mustResetPassword,
-      } as any
-    }, {
-      onSuccess: () => {
-        toast({ title: t("user_created"), description: t("user_created_desc", { name: fullName }) });
-        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
-        handleClose();
-      },
-      onError: (err: any) => {
-        const data = err?.response?.data;
-        const message: string = data?.error ?? t("create_failed");
-        const field: string | undefined = data?.field;
+      } as Parameters<typeof adminCreateUser>[0], idempotencyRequestInit());
+      toast({ title: t("user_created"), description: t("user_created_desc", { name: fullName }) });
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      handleClose();
+    } catch (err: unknown) {
+      const data = (err as { response?: { data?: { error?: string; field?: string } } })?.response?.data;
+      const message: string = data?.error ?? t("create_failed");
+      const field: string | undefined = data?.field;
 
-        if (field && field in EMPTY_FORM) {
-          setFieldErrors({ [field]: message } as FieldErrors);
-        } else {
-          setApiError(message);
-        }
-      },
-    });
+      if (field && field in EMPTY_FORM) {
+        setFieldErrors({ [field]: message } as FieldErrors);
+      } else {
+        setApiError(message);
+      }
+    } finally {
+      setCreating(false);
+    }
   };
 
   const hasFieldErrors = Object.keys(fieldErrors).length > 0;
@@ -191,14 +191,14 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <UserPlus className="w-4 h-4" />
-            {isAr ? "إنشاء مستخدم جديد" : "Create new user"}
+            {t("create_user_title")}
           </DialogTitle>
         </DialogHeader>
 
         <Tabs value={accountType} onValueChange={(v) => setAccountType(v as "employee" | "general")}>
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="employee">{isAr ? "موظف حالي" : "Existing employee"}</TabsTrigger>
-            <TabsTrigger value="general">{isAr ? "حساب عام" : "General account"}</TabsTrigger>
+            <TabsTrigger value="employee">{t("users_tab_existing_employee")}</TabsTrigger>
+            <TabsTrigger value="general">{t("users_tab_general_account")}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="employee" className="mt-4">
@@ -239,7 +239,7 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
 
           <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-muted/50 border text-sm text-muted-foreground">
             <Hash className="w-3.5 h-3.5 shrink-0" />
-            <span>{isAr ? "يُولَّد رقم EXT- تلقائياً (حساب غير مرتبط بـ HR)" : "An EXT- number is auto-generated (not linked to HR)"}</span>
+            <span>{t("users_ext_auto_hint")}</span>
           </div>
 
           {/* Password */}
@@ -326,10 +326,10 @@ function CreateUserDialog({ open, onClose }: { open: boolean; onClose: () => voi
             <Button variant="outline" onClick={handleClose}>{t("cancel")}</Button>
             <Button
               onClick={handleCreate}
-              disabled={adminCreateUser.isPending}
+              disabled={creating}
               className={cn(hasFieldErrors && "opacity-80")}
             >
-              {adminCreateUser.isPending ? t("creating") : t("create_user_directly")}
+              {creating ? t("creating") : t("create_user_directly")}
             </Button>
           </DialogFooter>
           </TabsContent>

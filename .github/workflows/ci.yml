@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: data-core-main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Typecheck, test, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: data-core-main/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate runbooks (F0.4)
+        run: pnpm run validate:runbooks
+
+      - name: Validate migration journal
+        run: pnpm run validate:migration-journal
+
+      - name: OpenAPI route drift gate (F3.2)
+        run: pnpm run validate:openapi-drift
+
+      - name: Typecheck libraries (F0 CI gate)
+        run: pnpm run typecheck:ci
+
+      - name: Test api-server
+        run: pnpm --filter @workspace/api-server test
+
+      - name: Test ops-platform
+        run: pnpm --filter @workspace/ops-platform test
+
+      - name: Build api-server
+        run: pnpm --filter @workspace/api-server run build
+
+  database-integrity:
+    name: Migrations and workforce integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: workspace_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d workspace_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/workspace_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: data-core-main/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate runbooks (F0.4)
+        run: pnpm run validate:runbooks
+
+      - name: Validate migration journal
+        run: pnpm run validate:migration-journal
+
+      - name: OpenAPI route drift gate (F3.2)
+        run: pnpm run validate:openapi-drift
+
+      - name: Apply Drizzle migrations
+        run: pnpm run db:migrate
+
+      - name: Validate workforce integrity
+        run: pnpm run validate:workforce
+
+      - name: Validate payroll integrity (F6.4)
+        run: pnpm run validate:payroll
+
+      - name: Production smoke suite (F0.3)
+        env:
+          RUN_POST_DEPLOY_SMOKE: "1"
+          RUN_LEAVE_SMOKE: "1"
+        run: pnpm --filter @workspace/api-server exec vitest run src/routes/__tests__/production-smoke.core.test.ts
+
+      - name: Tenant isolation security (F2.1)
+        env:
+          RUN_TENANT_ISOLATION_TESTS: "1"
+        run: pnpm --filter @workspace/api-server exec vitest run src/routes/__tests__/tenant-isolation.security.test.ts

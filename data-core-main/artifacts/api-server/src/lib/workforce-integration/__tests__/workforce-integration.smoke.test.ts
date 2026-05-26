@@ -88,8 +88,9 @@ describe("P20-E idempotency key (unit)", () => {
   });
 });
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_WORKFORCE_INTEGRATION_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_WORKFORCE_INTEGRATION_SMOKE !== "0";
 
 describe.skipIf(!RUN)("P20-E integration smoke (DB)", () => {
   beforeAll(async () => {

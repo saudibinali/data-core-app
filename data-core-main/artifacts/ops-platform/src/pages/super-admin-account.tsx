@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAppAuth } from "@/lib/auth";
-import { useApiFetch } from "@/hooks/use-api-fetch";
+import {
+  authChangePassword,
+  getAuthMe,
+  patchAuthMeEmail,
+  patchAuthMeProfile,
+  type AuthSessionUser,
+} from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,18 +15,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ShieldCheck, KeyRound, Mail, User, Loader2, CheckCircle2 } from "lucide-react";
 
-interface AuthMeResponse {
-  id: number;
-  email: string | null;
-  fullName: string;
+interface AuthMeResponse extends AuthSessionUser {
   role: string;
-  mustResetPassword: boolean;
-  isRootOwner?: boolean;
-  platformRoleCode?: string | null;
-  platformJobTitle?: string | null;
-  platformDepartment?: string | null;
-  platformPhone?: string | null;
-  phoneNumber?: string | null;
 }
 
 interface AccountView {
@@ -32,12 +28,6 @@ interface AccountView {
   department: string;
   phone: string;
   mustResetPassword: boolean;
-}
-
-function apiErrorMessage(body: unknown, status: number): string {
-  const o = body as { error?: string; message?: string; code?: string };
-  const parts = [o.error, o.message, o.code ? `(${o.code})` : null].filter(Boolean);
-  return parts.length > 0 ? parts.join(" — ") : `Request failed (${status})`;
 }
 
 function mapAuthMe(data: AuthMeResponse): AccountView {
@@ -59,7 +49,6 @@ function mapAuthMe(data: AuthMeResponse): AccountView {
 
 export default function SuperAdminAccountPage() {
   const { user: authUser, refreshUser } = useAppAuth();
-  const apiFetch = useApiFetch();
   const { toast } = useToast();
 
   const [me, setMe] = useState<AccountView | null>(null);
@@ -95,16 +84,11 @@ export default function SuperAdminAccountPage() {
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await apiFetch("/api/auth/me");
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(apiErrorMessage(err, res.status));
-      }
-      const data = (await res.json()) as AuthMeResponse;
+      const data = await getAuthMe();
       if (data.role !== "super_admin") {
         throw new Error("Forbidden — My Account is for the platform super administrator only. (SUPER_ADMIN_ONLY)");
       }
-      applyAccount(mapAuthMe(data));
+      applyAccount(mapAuthMe(data as AuthMeResponse));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setLoadError(msg);
@@ -128,7 +112,7 @@ export default function SuperAdminAccountPage() {
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, toast, applyAccount, authUser]);
+  }, [toast, applyAccount, authUser]);
 
   useEffect(() => {
     void loadMe();
@@ -137,20 +121,12 @@ export default function SuperAdminAccountPage() {
   async function saveProfile() {
     setProfileSaving(true);
     try {
-      const res = await apiFetch("/api/auth/me/profile", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          displayName: displayName.trim(),
-          jobTitle: jobTitle.trim() || null,
-          department: department.trim() || null,
-          phone: phone.trim() || null,
-        }),
+      await patchAuthMeProfile({
+        displayName: displayName.trim(),
+        jobTitle: jobTitle.trim() || null,
+        department: department.trim() || null,
+        phone: phone.trim() || null,
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(apiErrorMessage(body, res.status));
-      }
       toast({ title: "Profile updated", description: "Your profile information was saved." });
       await loadMe();
       await refreshUser();
@@ -168,18 +144,10 @@ export default function SuperAdminAccountPage() {
   async function saveEmail() {
     setEmailSaving(true);
     try {
-      const res = await apiFetch("/api/auth/me/email", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: newEmail.trim(),
-          currentPassword: emailCurrentPassword,
-        }),
+      await patchAuthMeEmail({
+        email: newEmail.trim(),
+        currentPassword: emailCurrentPassword,
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(apiErrorMessage(body, res.status));
-      }
       setEmailCurrentPassword("");
       toast({ title: "Email updated", description: "Your sign-in email was updated." });
       await loadMe();
@@ -206,15 +174,7 @@ export default function SuperAdminAccountPage() {
     }
     setPasswordSaving(true);
     try {
-      const res = await apiFetch("/api/auth/change-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentPassword, newPassword }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(apiErrorMessage(body, res.status));
-      }
+      await authChangePassword({ currentPassword, newPassword });
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");

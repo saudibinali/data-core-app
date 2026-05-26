@@ -6,7 +6,18 @@
     "dev": "concurrently --names \"api,web\" --prefix-colors \"cyan,magenta\" \"pnpm --filter @workspace/api-server run dev\" \"pnpm --filter @workspace/ops-platform run dev\"",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "test": "pnpm --filter @workspace/api-server test && pnpm --filter @workspace/ops-platform test",
+    "validate:migration-journal": "node scripts/validate-migration-journal.cjs",
+    "validate:workforce": "node scripts/validate-workforce-integrity.cjs",
+    "validate:payroll": "node scripts/validate-payroll-integrity.cjs",
+    "validate:canonical-cutover": "node scripts/validate-workforce-integrity.cjs && node scripts/validate-payroll-integrity.cjs",
+    "db:migrate": "node scripts/apply-drizzle-migrations.cjs",
+    "db:backup": "node scripts/backup-database.cjs",
+    "test:smoke": "node scripts/post-deploy-smoke.cjs",
+    "validate:runbooks": "node scripts/validate-runbooks.cjs",
+    "validate:openapi-drift": "node scripts/openapi-route-diff.cjs",
+    "typecheck:ci": "pnpm run typecheck:libs"
   },
   "private": true,
   "devDependencies": {

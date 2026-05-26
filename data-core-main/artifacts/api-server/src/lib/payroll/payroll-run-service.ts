@@ -13,6 +13,7 @@ import { payrollPayslipService } from "./payroll-payslip-service";
 import { legacyPayrollBridge } from "./legacy-payroll-bridge";
 import { logPayrollAccess } from "./payroll-audit";
 import { emitPayrollEvent } from "./payroll-events";
+import { schedulePayslipPdfBatchForRun } from "./payslip-pdf-batch";
 
 export type RunType = "preview" | "final" | "correction";
 
@@ -176,6 +177,7 @@ export class PayrollRunService {
     const run = await payrollRunWorkflow.lockRun(workspaceId, runId, userId);
     if (issuePayslips && (run.runType === "final" || run.runType === "correction")) {
       await payrollPayslipService.issuePayslips(workspaceId, runId, userId);
+      schedulePayslipPdfBatchForRun(workspaceId, runId, userId);
     }
     return run;
   }

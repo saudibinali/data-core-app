@@ -8,7 +8,8 @@ import { usePermissions } from "@/hooks/use-permissions";
 import {
   Users, UserCheck, UserPlus, Briefcase, ClipboardList,
   Building2, ChevronRight, Settings2, HeartPulse, FileText,
-  CheckCircle2, BriefcaseBusiness, Layers, DollarSign, Clock,   Activity, Scale, ShieldCheck, ConciergeBell, Plug,
+  CheckCircle2, BriefcaseBusiness, Layers, DollarSign, Clock, CalendarDays,
+  Activity, Scale, ShieldCheck, ConciergeBell, Plug,
 } from "lucide-react";
 
 const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
@@ -103,6 +104,12 @@ export default function HrDashboardPage() {
                   {isAr ? "الحضور" : "Attendance"}
                 </button>
               </Link>
+              <Link href="/admin/hr/leave">
+                <button className="flex items-center gap-2 text-sm px-3 py-2 rounded-md border border-border hover:bg-accent transition-colors">
+                  <CalendarDays className="w-4 h-4" />
+                  {isAr ? "إدارة الإجازات" : "Leave"}
+                </button>
+              </Link>
               <Link href="/admin/platform/stabilization">
                 <button className="flex items-center gap-2 text-sm px-3 py-2 rounded-md border border-border hover:bg-accent transition-colors">
                   <ShieldCheck className="w-4 h-4" />
@@ -127,7 +134,8 @@ export default function HrDashboardPage() {
           { href: "/hr/services",           icon: ClipboardList, label: isAr ? "الخدمات" : "Services",     color: "bg-violet-500/10 text-violet-600 dark:text-violet-400", show: true },
           { href: "/admin/hr/forms",        icon: ClipboardList, label: isAr ? "إدارة النماذج" : "Forms",  color: "bg-teal-500/10 text-teal-600 dark:text-teal-400",       show: isAdmin },
           { href: "/admin/hr/payroll",      icon: DollarSign,    label: isAr ? "الرواتب" : "Payroll",      color: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400", show: isAdmin },
-          { href: "/admin/hr/attendance",   icon: Clock,         label: isAr ? "الحضور والإجازات" : "Attendance & Leave", color: "bg-sky-500/10 text-sky-600 dark:text-sky-400", show: isAdmin },
+          { href: "/admin/hr/attendance",   icon: Clock,         label: isAr ? "الحضور" : "Attendance", color: "bg-sky-500/10 text-sky-600 dark:text-sky-400", show: isAdmin },
+          { href: "/admin/hr/leave",       icon: CalendarDays,  label: isAr ? "إدارة الإجازات" : "Leave Management", color: "bg-violet-500/10 text-violet-600 dark:text-violet-400", show: isAdmin },
           { href: "/admin/hr/workforce-ops", icon: Activity,    label: isAr ? "عمليات القوى العاملة" : "Workforce Ops", color: "bg-orange-500/10 text-orange-600 dark:text-orange-400", show: isAdmin },
           { href: "/admin/integrations",     icon: Plug,        label: isAr ? "مركز التكاملات" : "Integrations", color: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400", show: isAdmin },
           { href: "/admin/hr/payroll-ops",   icon: Scale,       label: isAr ? "عمليات الرواتب" : "Payroll Ops", color: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400", show: isAdmin },

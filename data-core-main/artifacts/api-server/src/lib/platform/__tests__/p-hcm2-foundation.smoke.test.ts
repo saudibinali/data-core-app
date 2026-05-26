@@ -64,6 +64,6 @@ describe("P-HCM2 HCM foundation", () => {
       "utf8",
     );
     expect(page).toContain("EmployeeAccountCard");
-    expect(page).toContain("link-user");
+    expect(page).toContain("linkUser");
   });
 });

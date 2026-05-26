@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 import { CalendarCheck, Plus } from "lucide-react";
-import { fetchLeaveListBridge, fetchMeLeavePolicies, LEAVE_STATUS_UI } from "@/lib/leave-bridge";
+import { fetchLeaveListBridge, fetchMeLeavePolicies, LEAVE_STATUS_UI, submitLeaveViaBridge } from "@/lib/leave-bridge";
 import { useLeaveCutover } from "@/lib/leave-cutover-flags";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -44,8 +44,13 @@ export default function HrMeLeavePage() {
 
   const balancesQ  = useQuery({ queryKey: ["/hr/me/leave-balances", year], queryFn: () => apiClient.get(`/api/hr/me/leave-balances?year=${year}`).then((r) => r.data) });
   const myLeavesQ  = useQuery({
-    queryKey: ["/hr/leave-requests", "me"],
-    queryFn: () => fetchLeaveListBridge(apiClient),
+    queryKey: ["/hr/leave-requests", "me", leaveCutover.status?.legacyFreeze],
+    queryFn: () => fetchLeaveListBridge(apiClient, {
+      cutover: {
+        legacyFreeze: leaveCutover.status?.legacyFreeze,
+        canonicalRead: leaveCutover.status?.canonicalRead,
+      },
+    }),
   });
   const policiesQ  = useQuery({
     queryKey: ["/hr/me/leave-policies"],
@@ -53,18 +58,18 @@ export default function HrMeLeavePage() {
   });
 
   const requestLeave = useMutation({
-    mutationFn: (body: Record<string, unknown>) => {
-      if (leaveCutover.useCanonicalSubmit) {
-        return apiClient.post("/api/hr/leave-requests", {
-          leaveType: body.leaveType,
-          startDate: body.startDate,
-          endDate: body.endDate,
-          employeeNote: body.reason ?? undefined,
-          leavePolicyId: body.leavePolicyId ?? undefined,
-        }).then((r) => r.data);
-      }
-      return apiClient.post("/api/hr/me/leave-requests", body).then((r) => r.data);
-    },
+    mutationFn: (body: Record<string, unknown>) => submitLeaveViaBridge(
+      apiClient,
+      {
+        leaveType: String(body.leaveType),
+        startDate: String(body.startDate),
+        endDate: String(body.endDate),
+        reason: body.reason != null ? String(body.reason) : undefined,
+        leavePolicyId: body.leavePolicyId as string | number | null | undefined,
+        daysCount: body.daysCount != null ? Number(body.daysCount) : undefined,
+      },
+      { canonicalSubmit: leaveCutover.useCanonicalSubmit },
+    ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/hr/leave-requests", "me"] });
       qc.invalidateQueries({ queryKey: ["/hr/me/leave-balances"] });

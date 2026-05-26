@@ -8,6 +8,8 @@ servers:
   - url: /api
     description: Base API path
 tags:
+  - name: auth
+    description: Authentication and session
   - name: calendar
     description: Calendar & meeting management
   - name: health
@@ -82,11 +84,160 @@ paths:
         "409":
           description: Platform already initialized
 
+  /auth/login:
+    post:
+      operationId: authLogin
+      tags: [auth]
+      summary: Employee number + password login (public)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLoginBody"
+      responses:
+        "200":
+          description: JWT access token and user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthLoginResponse"
+        "400":
+          description: Validation error
+        "401":
+          description: Invalid credentials
+        "429":
+          description: Rate limited
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      tags: [auth]
+      summary: Client-side logout acknowledgement (public)
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthLogoutResponse"
+
+  /auth/me:
+    get:
+      operationId: getAuthMe
+      tags: [auth]
+      summary: Current authenticated user profile
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionUser"
+        "401":
+          description: Unauthorized
+
+  /auth/change-password:
+    post:
+      operationId: authChangePassword
+      tags: [auth]
+      summary: Change own password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthChangePasswordBody"
+      responses:
+        "200":
+          description: Password updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400":
+          description: Validation error
+        "401":
+          description: Unauthorized
+
+  /auth/me/profile:
+    patch:
+      operationId: patchAuthMeProfile
+      tags: [auth]
+      summary: Super admin self-service profile update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthMeProfilePatchBody"
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMeProfilePatchResponse"
+        "400":
+          description: Validation error
+        "403":
+          description: Super admin only
+
+  /auth/me/email:
+    patch:
+      operationId: patchAuthMeEmail
+      tags: [auth]
+      summary: Super admin self-service email update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthMeEmailPatchBody"
+      responses:
+        "200":
+          description: Email updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMeEmailPatchResponse"
+        "400":
+          description: Validation error
+        "401":
+          description: Invalid current password
+        "409":
+          description: Duplicate email
+
+  /auth/reset-password:
+    post:
+      operationId: authResetPassword
+      tags: [auth]
+      summary: Admin resets another user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthResetPasswordBody"
+      responses:
+        "200":
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "403":
+          description: Forbidden
+        "404":
+          description: User not found
+
   /auth/lookup:
     post:
       operationId: authLookup
+      deprecated: true
       tags: [auth]
-      summary: Resolve employee number to Clerk sign-in identifier (public)
+      summary: "[Removed] Legacy Clerk lookup — not implemented on API server"
+      description: Deprecated. Use POST /auth/login instead.
       requestBody:
         required: true
         content:
@@ -94,22 +245,16 @@ paths:
             schema:
               $ref: "#/components/schemas/AuthLookupBody"
       responses:
-        "200":
-          description: Clerk identifier for the given employee number
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthLookupResponse"
-        "400":
-          description: Missing employeeNumber
-        "404":
-          description: Employee number not found
+        "410":
+          description: Endpoint removed
 
   /auth/verify:
     post:
       operationId: authVerify
+      deprecated: true
       tags: [auth]
-      summary: Verify employee credentials and return a Clerk sign-in token (public)
+      summary: "[Removed] Legacy Clerk verify — not implemented on API server"
+      description: Deprecated. Use POST /auth/login instead.
       requestBody:
         required: true
         content:
@@ -117,16 +262,8 @@ paths:
             schema:
               $ref: "#/components/schemas/AuthVerifyBody"
       responses:
-        "200":
-          description: Clerk sign-in token (one-time, short-lived)
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/AuthVerifyResponse"
-        "400":
-          description: Missing fields
-        "401":
-          description: Invalid credentials
+        "410":
+          description: Endpoint removed
 
   /healthz:
     get:
@@ -363,6 +500,1491 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlatformSettings"
+
+  /platform/me:
+    get:
+      operationId: getPlatformMe
+      tags: [platform]
+      summary: Current platform user context (super-admin self-service)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Platform user profile with effective permissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformMe"
+        "403":
+          description: Not a platform user
+
+  /platform/me/profile:
+    patch:
+      operationId: patchPlatformMeProfile
+      tags: [platform]
+      summary: Update own platform profile fields
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformMeProfileUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  profile:
+                    type: object
+                    additionalProperties: true
+
+  /platform/me/email:
+    patch:
+      operationId: patchPlatformMeEmail
+      tags: [platform]
+      summary: Change own platform login email
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformMeEmailUpdate"
+      responses:
+        "200":
+          description: Email updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  email: { type: string }
+
+  /platform/me/change-password:
+    post:
+      operationId: changePlatformMePassword
+      tags: [platform]
+      summary: Change own platform password
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformMeChangePasswordInput"
+      responses:
+        "200":
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+
+  /platform/users:
+    get:
+      operationId: listPlatformUsers
+      tags: [platform]
+      summary: List platform directory users
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: userType
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 25 }
+      responses:
+        "200":
+          description: Paginated platform users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserListResponse"
+    post:
+      operationId: createPlatformUser
+      tags: [platform]
+      summary: Create platform directory user
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserResponse"
+
+  /platform/users/{userId}:
+    get:
+      operationId: getPlatformUser
+      tags: [platform]
+      summary: Get platform user by ID
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PlatformUserIdPath"
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserResponse"
+        "404":
+          description: Not found
+    patch:
+      operationId: updatePlatformUser
+      tags: [platform]
+      summary: Update platform user directory fields
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PlatformUserIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserResponse"
+
+  /platform/users/{userId}/status:
+    patch:
+      operationId: updatePlatformUserStatus
+      tags: [platform]
+      summary: Activate or suspend platform user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PlatformUserIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserResponse"
+
+  /platform/users/{userId}/role:
+    patch:
+      operationId: updatePlatformUserRole
+      tags: [platform]
+      summary: Change platform user role assignment
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PlatformUserIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformUserResponse"
+
+  /platform/tenants:
+    get:
+      operationId: listPlatformTenants
+      tags: [platform]
+      summary: List tenant registry profiles
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: subscriptionStatus
+          schema: { type: string }
+        - in: query
+          name: riskLevel
+          schema: { type: string }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        "200":
+          description: Tenant list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformTenantListResponse"
+
+  /platform/tenants/{tenantId}:
+    get:
+      operationId: getPlatformTenant
+      tags: [platform]
+      summary: Get tenant profile by workspace ID
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Tenant profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformTenantResponse"
+        "404":
+          description: Not found
+
+  /platform/tenants/{tenantId}/summary:
+    get:
+      operationId: getPlatformTenantSummary
+      tags: [platform]
+      summary: Lightweight tenant summary
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/lifecycle:
+    patch:
+      operationId: patchPlatformTenantLifecycle
+      tags: [platform]
+      summary: Controlled tenant lifecycle transition
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformTenantLifecycleInput"
+      responses:
+        "200":
+          description: Transition applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformTenantLifecycleResponse"
+
+  /platform/tenants/{tenantId}/health:
+    get:
+      operationId: getPlatformTenantHealth
+      tags: [platform]
+      summary: Tenant operational health snapshot
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Health
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/subscription:
+    get:
+      operationId: getPlatformTenantSubscription
+      tags: [platform]
+      summary: Get workspace subscription record
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Subscription
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSubscriptionResponse"
+    post:
+      operationId: createPlatformTenantSubscription
+      tags: [platform]
+      summary: Create workspace subscription
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSubscriptionResponse"
+        "409":
+          description: Already exists
+    patch:
+      operationId: updatePlatformTenantSubscription
+      tags: [platform]
+      summary: Update workspace subscription metadata
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSubscriptionResponse"
+
+  /platform/tenants/{tenantId}/subscription/status:
+    patch:
+      operationId: updatePlatformTenantSubscriptionStatus
+      tags: [platform]
+      summary: Change subscription status with audit reason
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Status changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformSubscriptionResponse"
+
+  /platform/tenants/{tenantId}/commercial-account:
+    get:
+      operationId: getPlatformTenantCommercialAccount
+      tags: [platform, commercial]
+      summary: Get commercial account for tenant
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Commercial account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformCommercialAccountResponse"
+    put:
+      operationId: upsertPlatformTenantCommercialAccount
+      tags: [platform, commercial]
+      summary: Create or update commercial account
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformCommercialAccountResponse"
+
+  /platform/tenants/{tenantId}/commercial-contacts:
+    get:
+      operationId: listPlatformTenantCommercialContacts
+      tags: [platform, commercial]
+      summary: List commercial billing contacts
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Contacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+    post:
+      operationId: createPlatformTenantCommercialContact
+      tags: [platform, commercial]
+      summary: Add commercial billing contact
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/commercial-contacts/{contactId}:
+    patch:
+      operationId: updatePlatformTenantCommercialContact
+      tags: [platform, commercial]
+      summary: Update commercial contact
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+        - $ref: "#/components/parameters/CommercialContactIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/commercial-contacts/{contactId}/primary:
+    patch:
+      operationId: setPlatformTenantCommercialContactPrimary
+      tags: [platform, commercial]
+      summary: Mark contact as primary billing contact
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+        - $ref: "#/components/parameters/CommercialContactIdPath"
+      responses:
+        "200":
+          description: Primary set
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/commercial-contracts:
+    get:
+      operationId: listPlatformTenantCommercialContracts
+      tags: [platform, commercial]
+      summary: List commercial contracts
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Contracts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createPlatformTenantCommercialContract
+      tags: [platform, commercial]
+      summary: Create commercial contract
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/commercial-contracts/{contractId}:
+    get:
+      operationId: getPlatformTenantCommercialContract
+      tags: [platform, commercial]
+      summary: Get commercial contract by ID
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+        - $ref: "#/components/parameters/CommercialContractIdPath"
+      responses:
+        "200":
+          description: Contract
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          description: Not found
+
+  /platform/tenants/{tenantId}/commercial-invoices:
+    get:
+      operationId: listPlatformTenantCommercialInvoices
+      tags: [platform, commercial]
+      summary: List commercial invoices
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Invoices
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    post:
+      operationId: createPlatformTenantCommercialInvoice
+      tags: [platform, commercial]
+      summary: Create commercial invoice
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /platform/tenants/{tenantId}/commercial-invoices/{invoiceId}:
+    get:
+      operationId: getPlatformTenantCommercialInvoice
+      tags: [platform, commercial]
+      summary: Get commercial invoice by ID
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+        - $ref: "#/components/parameters/CommercialInvoiceIdPath"
+      responses:
+        "200":
+          description: Invoice
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          description: Not found
+
+  /platform/tenants/{tenantId}/commercial-payments:
+    get:
+      operationId: listPlatformTenantCommercialPayments
+      tags: [platform, commercial]
+      summary: List commercial payments for tenant
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TenantIdPath"
+      responses:
+        "200":
+          description: Payments
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /tenant/subscription/summary:
+    get:
+      operationId: getTenantSubscriptionSummary
+      tags: [tenant]
+      summary: Tenant-facing subscription summary (workspace member)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:
+                    type: object
+                    additionalProperties: true
+
+  /tenant/subscription/entitlements:
+    get:
+      operationId: getTenantSubscriptionEntitlements
+      tags: [tenant]
+      summary: Tenant-facing entitlements visibility
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Entitlements
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /tenant/subscription/quotas:
+    get:
+      operationId: getTenantSubscriptionQuotas
+      tags: [tenant]
+      summary: Tenant-facing quota usage visibility
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Quotas
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/components:
+    get:
+      operationId: listHrPayrollComponents
+      tags: [hr, payroll]
+      summary: List salary components (legacy payroll foundation)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Components
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    post:
+      operationId: createHrPayrollComponent
+      tags: [hr, payroll]
+      summary: Create salary component
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/components/{id}:
+    patch:
+      operationId: updateHrPayrollComponent
+      tags: [hr, payroll]
+      summary: Update salary component
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteHrPayrollComponent
+      tags: [hr, payroll]
+      summary: Delete salary component
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "204":
+          description: Deleted
+
+  /hr/payroll/bands:
+    get:
+      operationId: listHrPayrollBands
+      tags: [hr, payroll]
+      summary: List salary bands
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Bands
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    post:
+      operationId: createHrPayrollBand
+      tags: [hr, payroll]
+      summary: Create salary band
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+
+  /hr/payroll/bands/{id}:
+    patch:
+      operationId: updateHrPayrollBand
+      tags: [hr, payroll]
+      summary: Update salary band
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    delete:
+      operationId: deleteHrPayrollBand
+      tags: [hr, payroll]
+      summary: Delete salary band
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "204":
+          description: Deleted
+
+  /hr/payroll/structures:
+    get:
+      operationId: listHrPayrollStructures
+      tags: [hr, payroll]
+      summary: List salary structures
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Structures
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    post:
+      operationId: createHrPayrollStructure
+      tags: [hr, payroll]
+      summary: Create salary structure
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+
+  /hr/payroll/structures/{id}/components:
+    get:
+      operationId: listHrPayrollStructureComponents
+      tags: [hr, payroll]
+      summary: List components in a structure
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Structure components
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/runs:
+    get:
+      operationId: listHrPayrollRuns
+      tags: [hr, payroll]
+      summary: List payroll runs (legacy)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    post:
+      operationId: createHrPayrollRun
+      tags: [hr, payroll]
+      summary: Create payroll run
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/runs/{id}:
+    get:
+      operationId: getHrPayrollRun
+      tags: [hr, payroll]
+      summary: Get payroll run by ID
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Run
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          description: Not found
+    patch:
+      operationId: updateHrPayrollRun
+      tags: [hr, payroll]
+      summary: Update payroll run status
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated
+
+  /hr/payroll/runs/{id}/process:
+    post:
+      operationId: processHrPayrollRun
+      tags: [hr, payroll]
+      summary: Process payroll run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Processed
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/runs/{runId}/payslips:
+    get:
+      operationId: listHrPayrollRunPayslips
+      tags: [hr, payroll]
+      summary: List payslips for a payroll run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollRunIdPath"
+      responses:
+        "200":
+          description: Payslips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/runs/{runId}/payslips/{id}:
+    get:
+      operationId: getHrPayrollRunPayslip
+      tags: [hr, payroll]
+      summary: Get payslip in run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollRunIdPath"
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Payslip
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/me/payslips:
+    get:
+      operationId: listHrMePayslips
+      tags: [hr, payroll]
+      summary: Self-service payslip list
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Payslips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/me/payslips/{id}:
+    get:
+      operationId: getHrMePayslip
+      tags: [hr, payroll]
+      summary: Self-service payslip detail
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Payslip
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404":
+          description: Not found
+
+  /hr/payroll/canonical/periods:
+    get:
+      operationId: listHrPayrollCanonicalPeriods
+      tags: [hr, payroll]
+      summary: List canonical payroll periods
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Periods
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+    post:
+      operationId: createHrPayrollCanonicalPeriod
+      tags: [hr, payroll]
+      summary: Create canonical payroll period
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrPayrollCanonicalPeriodInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/canonical/locks:
+    get:
+      operationId: listHrPayrollCanonicalLocks
+      tags: [hr, payroll]
+      summary: List payroll period locks
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Locks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/canonical/runs:
+    get:
+      operationId: listHrPayrollCanonicalRuns
+      tags: [hr, payroll]
+      summary: List canonical payroll runs
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/canonical/runs/preview:
+    post:
+      operationId: previewHrPayrollCanonicalRun
+      tags: [hr, payroll]
+      summary: Create preview payroll run
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Preview run created
+
+  /hr/payroll/canonical/runs/final:
+    post:
+      operationId: createHrPayrollCanonicalFinalRun
+      tags: [hr, payroll]
+      summary: Create final payroll run
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "201":
+          description: Final run created
+
+  /hr/payroll/canonical/runs/{id}:
+    get:
+      operationId: getHrPayrollCanonicalRun
+      tags: [hr, payroll]
+      summary: Get canonical payroll run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Run
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/canonical/runs/{id}/review:
+    get:
+      operationId: getHrPayrollCanonicalRunReview
+      tags: [hr, payroll]
+      summary: Payroll run review queue payload
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Review data
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/canonical/runs/{id}/payslips:
+    get:
+      operationId: listHrPayrollCanonicalRunPayslips
+      tags: [hr, payroll]
+      summary: List payslips for canonical run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Payslips
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/canonical/runs/{id}/calculate:
+    post:
+      operationId: calculateHrPayrollCanonicalRun
+      tags: [hr, payroll]
+      summary: Calculate canonical payroll run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Calculated
+
+  /hr/payroll/canonical/runs/{id}/approve:
+    post:
+      operationId: approveHrPayrollCanonicalRun
+      tags: [hr, payroll]
+      summary: Approve canonical payroll run
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Approved
+
+  /hr/payroll/canonical/attendance-summary:
+    get:
+      operationId: getHrPayrollCanonicalAttendanceSummary
+      tags: [hr, payroll]
+      summary: Attendance summary for payroll period
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: periodId
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/canonical/packages/{employeeId}/active:
+    get:
+      operationId: getHrPayrollCanonicalActivePackage
+      tags: [hr, payroll]
+      summary: Active compensation package for employee
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: employeeId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Package
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/ops/overview:
+    get:
+      operationId: getHrPayrollOpsOverview
+      tags: [hr, payroll]
+      summary: Payroll operations dashboard overview
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/payroll/ops/runs:
+    get:
+      operationId: listHrPayrollOpsRuns
+      tags: [hr, payroll]
+      summary: List payroll ops runs
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/ops/exceptions:
+    get:
+      operationId: listHrPayrollOpsExceptions
+      tags: [hr, payroll]
+      summary: List open payroll exceptions
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        "200":
+          description: Exceptions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/ops/exceptions/{id}/resolve:
+    post:
+      operationId: resolveHrPayrollOpsException
+      tags: [hr, payroll]
+      summary: Resolve payroll exception
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/PayrollEntityIdPath"
+      responses:
+        "200":
+          description: Resolved
+
+  /hr/payroll/ops/audit/logs:
+    get:
+      operationId: listHrPayrollOpsAuditLogs
+      tags: [hr, payroll]
+      summary: Payroll audit logs
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: Logs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/payroll/ops/audit/payslips:
+    get:
+      operationId: listHrPayrollOpsAuditPayslips
+      tags: [hr, payroll]
+      summary: Payslip audit trail entries
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Payslip audit rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/workforce/me/status:
+    get:
+      operationId: getHrWorkforceMeStatus
+      tags: [hr, workforce]
+      summary: Current employee attendance status
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/workforce/me/today:
+    get:
+      operationId: getHrWorkforceMeToday
+      tags: [hr, workforce]
+      summary: Today attendance summary for current user
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Today
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/workforce/me/history:
+    get:
+      operationId: getHrWorkforceMeHistory
+      tags: [hr, workforce]
+      summary: Attendance history for current user
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: History
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/workforce/clock-in:
+    post:
+      operationId: hrWorkforceClockIn
+      tags: [hr, workforce]
+      summary: Clock in (self-service)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Clocked in
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /hr/workforce/clock-out:
+    post:
+      operationId: hrWorkforceClockOut
+      tags: [hr, workforce]
+      summary: Clock out (self-service)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Clocked out
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
 
   /admin/reset-password:
     post:
@@ -3070,6 +4692,107 @@ paths:
                   affected:
                     type: integer
 
+  /hr/employees/provision:
+    post:
+      operationId: provisionHrEmployee
+      tags: [hr]
+      summary: Create HR employee record (admin provisioning)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrEmployeeProvisionCreateInput"
+      responses:
+        "201":
+          description: Employee provisioned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeProvisionCreateResponse"
+        "400":
+          description: Validation error
+
+  /hr/employees/provision/candidates:
+    get:
+      operationId: listHrEmployeeProvisionCandidates
+      tags: [hr]
+      summary: List employees eligible for account provisioning (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: canProvision
+          required: false
+          schema: { type: boolean }
+          description: When true, return only employees that can be provisioned now
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Filter by name, employee number, or email
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Provision candidate previews
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrEmployeeProvisionPreview"
+
+  /hr/employees/provision/lookup:
+    get:
+      operationId: lookupHrEmployeeProvision
+      tags: [hr]
+      summary: Lookup employee by number for account provisioning (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: employeeNumber
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Provision preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeProvisionPreview"
+        "404":
+          description: Employee not found
+
+  /hr/employees/provision/account:
+    post:
+      operationId: createHrEmployeeProvisionAccount
+      tags: [hr]
+      summary: Create platform user from employee number (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrEmployeeProvisionAccountInput"
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Validation error
+        "409":
+          description: Conflict
+
   /hr/employees/{id}:
     get:
       operationId: getHrEmployee
@@ -3126,6 +4849,669 @@ paths:
       responses:
         "204":
           description: Deleted
+
+  /hr/employees/{id}/account:
+    get:
+      operationId: getHrEmployeeAccount
+      tags: [hr]
+      summary: Employee linked platform account status
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Account link status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeAccountStatus"
+        "404":
+          description: Not found
+
+  /hr/employees/{id}/provision-preview:
+    get:
+      operationId: getHrEmployeeProvisionPreview
+      tags: [hr]
+      summary: Preview account provisioning for employee
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Provision preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeProvisionPreview"
+        "404":
+          description: Not found
+
+  /hr/employees/{id}/provision-account:
+    post:
+      operationId: createHrEmployeeProvisionAccountById
+      tags: [hr]
+      summary: Create platform user for employee by ID (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrEmployeeProvisionAccountInput"
+      responses:
+        "201":
+          description: User created and linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeProvisionAccountByIdResponse"
+        "400":
+          description: Validation error
+
+  /hr/employees/{id}/link-user:
+    post:
+      operationId: linkHrEmployeeUser
+      tags: [hr]
+      summary: Link employee to existing workspace user (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrEmployeeLinkUserInput"
+      responses:
+        "200":
+          description: Linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeAccountStatus"
+    delete:
+      operationId: unlinkHrEmployeeUser
+      tags: [hr]
+      summary: Unlink employee from platform user (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Unlinked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrEmployeeAccountStatus"
+
+  /hr/employees/{id}/contracts:
+    get:
+      operationId: listHrEmployeeContracts
+      tags: [hr]
+      summary: List employee contracts
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Contracts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrEmployeeContract"
+
+  /hr/employees/{id}/documents:
+    get:
+      operationId: listHrEmployeeDocuments
+      tags: [hr]
+      summary: List employee documents
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrEmployeeDocument"
+
+  /hr/employees/{id}/leaves:
+    get:
+      operationId: listHrEmployeeLeaves
+      tags: [hr]
+      summary: List legacy HR employee leave records
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrEmployeeIdPath"
+      responses:
+        "200":
+          description: Leave records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrEmployeeLeave"
+
+  /hr/org-units:
+    get:
+      operationId: listHrOrgUnits
+      tags: [hr]
+      summary: List active org units (flat)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Org units
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrOrgUnit"
+    post:
+      operationId: createHrOrgUnit
+      tags: [hr]
+      summary: Create org unit (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrOrgUnitInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrOrgUnit"
+
+  /hr/org-units/tree:
+    get:
+      operationId: getHrOrgUnitsTree
+      tags: [hr]
+      summary: Org unit hierarchy tree
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Tree
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrOrgUnitTreeNode"
+
+  /hr/org-units/{id}:
+    patch:
+      operationId: updateHrOrgUnit
+      tags: [hr]
+      summary: Update org unit (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrOrgUnitIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrOrgUnitUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrOrgUnit"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteHrOrgUnit
+      tags: [hr]
+      summary: Delete org unit (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrOrgUnitIdPath"
+      responses:
+        "204":
+          description: Deleted
+
+  /hr/org-units/{id}/ancestors:
+    get:
+      operationId: getHrOrgUnitAncestors
+      tags: [hr]
+      summary: Ancestor chain for org unit
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrOrgUnitIdPath"
+      responses:
+        "200":
+          description: Ancestors
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrOrgUnit"
+
+  /hr/org-units/{id}/descendants:
+    get:
+      operationId: getHrOrgUnitDescendants
+      tags: [hr]
+      summary: Descendant org unit IDs
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrOrgUnitIdPath"
+      responses:
+        "200":
+          description: Descendant IDs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrOrgUnitDescendantsResponse"
+
+  /hr/org-units/{id}/employees:
+    get:
+      operationId: listHrOrgUnitEmployees
+      tags: [hr]
+      summary: Employees in org unit subtree
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrOrgUnitIdPath"
+      responses:
+        "200":
+          description: Employees
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
+  /hr/job-grades:
+    get:
+      operationId: listHrJobGrades
+      tags: [hr]
+      summary: List job grades
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Job grades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrJobGrade"
+    post:
+      operationId: createHrJobGrade
+      tags: [hr]
+      summary: Create job grade (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrJobGradeInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrJobGrade"
+
+  /hr/job-grades/{id}:
+    patch:
+      operationId: updateHrJobGrade
+      tags: [hr]
+      summary: Update job grade (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrJobGradeIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrJobGradeInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrJobGrade"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteHrJobGrade
+      tags: [hr]
+      summary: Delete job grade (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrJobGradeIdPath"
+      responses:
+        "204":
+          description: Deleted
+
+  /hr/job-titles:
+    get:
+      operationId: listHrJobTitles
+      tags: [hr]
+      summary: List job titles with grade labels
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Job titles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrJobTitleListItem"
+    post:
+      operationId: createHrJobTitle
+      tags: [hr]
+      summary: Create job title (admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrJobTitleInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrJobTitle"
+
+  /hr/job-titles/{id}:
+    patch:
+      operationId: updateHrJobTitle
+      tags: [hr]
+      summary: Update job title (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrJobTitleIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrJobTitleInput"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrJobTitle"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteHrJobTitle
+      tags: [hr]
+      summary: Delete job title (admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/HrJobTitleIdPath"
+      responses:
+        "204":
+          description: Deleted
+
+  /hr/leave-requests:
+    get:
+      operationId: listHrLeaveRequests
+      tags: [hr, leave]
+      summary: List leave requests (own or all with leave.manage)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: leaveType
+          schema: { type: string }
+        - in: query
+          name: employeeId
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Leave requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrLeaveRequestListItem"
+    post:
+      operationId: createHrLeaveRequest
+      tags: [hr, leave]
+      summary: Submit a canonical leave request
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrLeaveRequestSubmitInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrLeaveRequestSubmitResponse"
+        "400":
+          description: Validation error
+        "409":
+          description: Date overlap conflict
+        "422":
+          description: Insufficient balance
+
+  /hr/leave-requests/{id}:
+    get:
+      operationId: getHrLeaveRequest
+      tags: [hr, leave]
+      summary: Get leave request with approval steps
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/LeaveRequestIdPath"
+      responses:
+        "200":
+          description: Leave request detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrLeaveRequestDetailResponse"
+        "403":
+          description: Access denied
+        "404":
+          description: Not found
+
+  /hr/leave-requests/{id}/approve:
+    patch:
+      operationId: approveHrLeaveRequest
+      tags: [hr, leave]
+      summary: Approve a pending leave request (leave.manage)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/LeaveRequestIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrLeaveDecisionInput"
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrLeaveRequest"
+        "403":
+          description: Not designated approver
+        "422":
+          description: Invalid state
+
+  /hr/leave-requests/{id}/reject:
+    patch:
+      operationId: rejectHrLeaveRequest
+      tags: [hr, leave]
+      summary: Reject a pending leave request (leave.manage)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/LeaveRequestIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrLeaveDecisionInput"
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrLeaveRequest"
+        "422":
+          description: Invalid state
+
+  /hr/leave-requests/{id}/withdraw:
+    patch:
+      operationId: withdrawHrLeaveRequest
+      tags: [hr, leave]
+      summary: Withdraw own pending leave request
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/LeaveRequestIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HrLeaveWithdrawInput"
+      responses:
+        "200":
+          description: Withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HrLeaveRequest"
+        "403":
+          description: Not requester
+        "422":
+          description: Invalid state
+
+  /hr/me/leave-policies:
+    get:
+      operationId: listHrMeLeavePolicies
+      tags: [hr, leave]
+      summary: Active leave policies for self-service
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HrMeLeavePolicy"
+
+  /self-service/approvals:
+    get:
+      operationId: listSelfServiceApprovals
+      tags: [self-service, approvals]
+      summary: Unified approval inbox for current user
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Pending approval items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SelfServiceApprovalInboxItem"
+        "503":
+          description: Approval runtime unavailable
+
+  /self-service/approvals/{instanceId}:
+    get:
+      operationId: getSelfServiceApproval
+      tags: [self-service, approvals]
+      summary: Approval instance detail with steps
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalInstanceIdPath"
+      responses:
+        "200":
+          description: Instance detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelfServiceApprovalDetailResponse"
+        "404":
+          description: Not found
+
+  /self-service/approvals/{instanceId}/steps/{stepId}/approve:
+    patch:
+      operationId: approveSelfServiceApprovalStep
+      tags: [self-service, approvals]
+      summary: Approve a workflow approval step
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalInstanceIdPath"
+        - $ref: "#/components/parameters/ApprovalStepIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelfServiceApprovalDecisionInput"
+      responses:
+        "200":
+          description: Step approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelfServiceApprovalDecisionResponse"
+
+  /self-service/approvals/{instanceId}/steps/{stepId}/reject:
+    patch:
+      operationId: rejectSelfServiceApprovalStep
+      tags: [self-service, approvals]
+      summary: Reject a workflow approval step
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalInstanceIdPath"
+        - $ref: "#/components/parameters/ApprovalStepIdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelfServiceApprovalDecisionInput"
+      responses:
+        "200":
+          description: Step rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelfServiceApprovalDecisionResponse"
 
   /hr/categories:
     get:
@@ -4117,6 +6503,88 @@ paths:
           description: Forbidden
 
 components:
+  parameters:
+    IdempotencyKeyHeader:
+      in: header
+      name: Idempotency-Key
+      required: false
+      description: >
+        Optional client-generated key (max 128 chars). Replays the same HTTP response
+        for identical provision payloads within the workspace. Required for safe retries.
+      schema:
+        type: string
+        maxLength: 128
+
+    HrEmployeeIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    HrOrgUnitIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    HrJobGradeIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    HrJobTitleIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    LeaveRequestIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    ApprovalInstanceIdPath:
+      in: path
+      name: instanceId
+      required: true
+      schema: { type: integer }
+    ApprovalStepIdPath:
+      in: path
+      name: stepId
+      required: true
+      schema: { type: integer }
+    TenantIdPath:
+      in: path
+      name: tenantId
+      required: true
+      schema: { type: integer }
+    PlatformUserIdPath:
+      in: path
+      name: userId
+      required: true
+      schema: { type: integer }
+    CommercialContactIdPath:
+      in: path
+      name: contactId
+      required: true
+      schema: { type: integer }
+    CommercialContractIdPath:
+      in: path
+      name: contractId
+      required: true
+      schema: { type: integer }
+    CommercialInvoiceIdPath:
+      in: path
+      name: invoiceId
+      required: true
+      schema: { type: integer }
+    PayrollEntityIdPath:
+      in: path
+      name: id
+      required: true
+      schema: { type: integer }
+    PayrollRunIdPath:
+      in: path
+      name: runId
+      required: true
+      schema: { type: integer }
   schemas:
     # ── Governance Console schemas (P6-D/P6-E) ──────────────────────────────
     GovernanceAlertItem:
@@ -5805,8 +8273,126 @@ components:
           items:
             type: object
 
+    AuthLoginBody:
+      type: object
+      properties:
+        employeeNumber:
+          type: string
+        password:
+          type: string
+      required:
+        - employeeNumber
+        - password
+
+    AuthLoginResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        expiresIn:
+          type: string
+        user:
+          $ref: "#/components/schemas/AuthSessionUser"
+      required:
+        - accessToken
+        - user
+
+    AuthLogoutResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success
+
+    AuthSessionUser:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            platformRoleCode:
+              type: ["string", "null"]
+            isRootOwner:
+              type: boolean
+            platformJobTitle:
+              type: ["string", "null"]
+            platformDepartment:
+              type: ["string", "null"]
+            platformPhone:
+              type: ["string", "null"]
+
+    AuthChangePasswordBody:
+      type: object
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+      required:
+        - currentPassword
+        - newPassword
+
+    AuthMeProfilePatchBody:
+      type: object
+      properties:
+        displayName:
+          type: string
+        jobTitle:
+          type: ["string", "null"]
+        department:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+
+    AuthMeProfilePatchResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        profile:
+          $ref: "#/components/schemas/AuthSessionUser"
+
+    AuthMeEmailPatchBody:
+      type: object
+      properties:
+        email:
+          type: string
+        currentPassword:
+          type: string
+      required:
+        - email
+        - currentPassword
+
+    AuthMeEmailPatchResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        email:
+          type: string
+
+    AuthResetPasswordBody:
+      type: object
+      properties:
+        userId:
+          type: integer
+        password:
+          type: string
+      required:
+        - userId
+        - password
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success
+
     AuthLookupBody:
       type: object
+      deprecated: true
       properties:
         employeeNumber:
           type: string
@@ -5815,6 +8401,7 @@ components:
 
     AuthLookupResponse:
       type: object
+      deprecated: true
       properties:
         identifier:
           type: string
@@ -5823,6 +8410,7 @@ components:
 
     AuthVerifyBody:
       type: object
+      deprecated: true
       properties:
         employeeNumber:
           type: string
@@ -5834,6 +8422,7 @@ components:
 
     AuthVerifyResponse:
       type: object
+      deprecated: true
       properties:
         token:
           type: string
@@ -5920,6 +8509,131 @@ components:
         - ticketCount
         - departmentCount
         - openTicketCount
+
+    PlatformMe:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string, nullable: true }
+        displayName: { type: string }
+        role: { type: string }
+        workspaceId: { type: integer, nullable: true }
+        platformRoleCode: { type: string, nullable: true }
+        effectivePlatformRoleCode: { type: string }
+        isRootOwner: { type: boolean }
+        isProtected: { type: boolean }
+        permissions:
+          type: array
+          items: { type: string }
+        jobTitle: { type: string, nullable: true }
+        department: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        employeeNumber: { type: string, nullable: true }
+        mustResetPassword: { type: boolean }
+        canSelfManageAccount: { type: boolean }
+
+    PlatformMeProfileUpdate:
+      type: object
+      properties:
+        displayName: { type: string }
+        jobTitle: { type: string, nullable: true }
+        department: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+
+    PlatformMeEmailUpdate:
+      type: object
+      required: [email, currentPassword]
+      properties:
+        email: { type: string }
+        currentPassword: { type: string }
+
+    PlatformMeChangePasswordInput:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string }
+        newPassword: { type: string }
+
+    PlatformUserListResponse:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+
+    PlatformUserResponse:
+      type: object
+      properties:
+        user:
+          type: object
+          additionalProperties: true
+
+    PlatformTenantListResponse:
+      type: object
+      properties:
+        tenants:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total: { type: integer }
+
+    PlatformTenantResponse:
+      type: object
+      properties:
+        tenant:
+          type: object
+          additionalProperties: true
+
+    PlatformTenantLifecycleInput:
+      type: object
+      properties:
+        action: { type: string }
+        reason: { type: string }
+        internalNote: { type: string }
+        confirmation: {}
+        initFinance:
+          type: object
+          additionalProperties: true
+
+    PlatformTenantLifecycleResponse:
+      type: object
+      properties:
+        tenant:
+          type: object
+          additionalProperties: true
+        lifecycleEvent:
+          type: object
+          additionalProperties: true
+
+    PlatformSubscriptionResponse:
+      type: object
+      properties:
+        subscription:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    PlatformCommercialAccountResponse:
+      type: object
+      properties:
+        commercialAccount:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    HrPayrollCanonicalPeriodInput:
+      type: object
+      required: [periodStart, periodEnd, periodLabel]
+      properties:
+        periodStart: { type: string, format: date }
+        periodEnd: { type: string, format: date }
+        periodLabel: { type: string }
 
     PlatformStats:
       type: object
@@ -7913,6 +10627,420 @@ components:
           additionalProperties: true
         notes:
           type: string
+
+    HrOrgUnit:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        type: { type: string }
+        name: { type: string }
+        nameAr: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+        parentId: { type: integer, nullable: true }
+        managerEmployeeId: { type: integer, nullable: true }
+        color: { type: string }
+        displayOrder: { type: integer }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrOrgUnitTreeNode:
+      allOf:
+        - $ref: "#/components/schemas/HrOrgUnit"
+        - type: object
+          properties:
+            children:
+              type: array
+              items:
+                $ref: "#/components/schemas/HrOrgUnitTreeNode"
+
+    HrOrgUnitInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        nameAr: { type: string }
+        type: { type: string }
+        parentId: { type: integer, nullable: true }
+        color: { type: string }
+        displayOrder: { type: integer }
+        managerEmployeeId: { type: integer, nullable: true }
+        _computedCode: { type: string }
+
+    HrOrgUnitUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        nameAr: { type: string }
+        type: { type: string }
+        parentId: { type: integer, nullable: true }
+        code: { type: string }
+        color: { type: string }
+        displayOrder: { type: integer }
+        isActive: { type: boolean }
+        managerEmployeeId: { type: integer, nullable: true }
+
+    HrOrgUnitDescendantsResponse:
+      type: object
+      properties:
+        orgUnitId: { type: integer }
+        descendantIds:
+          type: array
+          items: { type: integer }
+
+    HrJobGrade:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        name: { type: string }
+        nameAr: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+        level: { type: integer, nullable: true }
+        description: { type: string, nullable: true }
+        displayOrder: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrJobGradeInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        nameAr: { type: string }
+        level: { type: integer }
+        description: { type: string }
+        displayOrder: { type: integer }
+        _computedCode: { type: string }
+
+    HrJobTitle:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        name: { type: string }
+        nameAr: { type: string, nullable: true }
+        code: { type: string, nullable: true }
+        gradeId: { type: integer, nullable: true }
+        description: { type: string, nullable: true }
+        displayOrder: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrJobTitleListItem:
+      allOf:
+        - $ref: "#/components/schemas/HrJobTitle"
+        - type: object
+          properties:
+            gradeName: { type: string, nullable: true }
+            gradeCode: { type: string, nullable: true }
+
+    HrJobTitleInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        nameAr: { type: string }
+        gradeId: { type: integer, nullable: true }
+        description: { type: string }
+        displayOrder: { type: integer }
+        _computedCode: { type: string }
+
+    HrEmployeeAccountStatus:
+      type: object
+      properties:
+        employeeId: { type: integer }
+        userId: { type: integer, nullable: true }
+        linked: { type: boolean }
+        userEmail: { type: string, nullable: true }
+        userName: { type: string, nullable: true }
+
+    HrEmployeeProvisionPreview:
+      type: object
+      properties:
+        employeeId: { type: integer }
+        employeeNumber: { type: string }
+        fullName: { type: string }
+        firstName: { type: string, nullable: true }
+        lastName: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phoneNumber: { type: string, nullable: true }
+        status: { type: string }
+        orgUnitName: { type: string, nullable: true }
+        jobTitleName: { type: string, nullable: true }
+        position: { type: string, nullable: true }
+        managerName: { type: string, nullable: true }
+        alreadyLinked: { type: boolean }
+        linkedUserId: { type: integer, nullable: true }
+        canProvision: { type: boolean }
+        blockReason: { type: string, nullable: true }
+
+    HrEmployeeProvisionAccountInput:
+      type: object
+      required: [password]
+      properties:
+        employeeNumber: { type: string }
+        password: { type: string }
+        role: { type: string }
+        customRoleId: { type: integer, nullable: true }
+        mustResetPassword: { type: boolean }
+
+    HrEmployeeProvisionAccountByIdResponse:
+      type: object
+      properties:
+        user:
+          type: object
+          additionalProperties: true
+        account:
+          $ref: "#/components/schemas/HrEmployeeAccountStatus"
+
+    HrEmployeeLinkUserInput:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: integer }
+
+    HrEmployeeProvisionCreateInput:
+      type: object
+      required: [fullName]
+      properties:
+        fullName: { type: string }
+        email: { type: string, nullable: true }
+        phoneNumber: { type: string, nullable: true }
+        userId: { type: integer, nullable: true }
+        employmentType: { type: string, nullable: true }
+        hireDate: { type: string, nullable: true }
+        orgUnitId: { type: integer, nullable: true }
+        jobTitleId: { type: integer, nullable: true }
+
+    HrEmployeeProvisionCreateResponse:
+      type: object
+      properties:
+        employee:
+          type: object
+          additionalProperties: true
+        linked: { type: boolean }
+        userId: { type: integer, nullable: true }
+        linkSource: { type: string, nullable: true }
+
+    HrEmployeeContract:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        employeeId: { type: integer }
+        contractType: { type: string }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        status: { type: string }
+        salary: { type: string, nullable: true }
+        currency: { type: string }
+        notes: { type: string, nullable: true }
+        attachments: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        createdBy: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrEmployeeDocument:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        employeeId: { type: integer }
+        documentType: { type: string }
+        name: { type: string }
+        documentNumber: { type: string, nullable: true }
+        issueDate: { type: string, format: date, nullable: true }
+        expiryDate: { type: string, format: date, nullable: true }
+        objectPath: { type: string, nullable: true }
+        fileName: { type: string, nullable: true }
+        fileSize: { type: integer, nullable: true }
+        mimeType: { type: string, nullable: true }
+        checksum: { type: string, nullable: true }
+        storageKey: { type: string, nullable: true }
+        categoryCode: { type: string, nullable: true }
+        isSigned: { type: boolean }
+        notes: { type: string, nullable: true }
+        createdBy: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrEmployeeLeave:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        employeeId: { type: integer }
+        leaveType: { type: string }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        daysCount: { type: integer, nullable: true }
+        status: { type: string }
+        reason: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        approvedBy: { type: integer, nullable: true }
+        approvedAt: { type: string, format: date-time, nullable: true }
+        createdBy: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrLeaveRequest:
+      type: object
+      properties:
+        id: { type: integer }
+        workspaceId: { type: integer }
+        employeeId: { type: integer }
+        requestedByUserId: { type: integer }
+        leavePolicyId: { type: integer, nullable: true }
+        leaveType: { type: string }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        daysRequested: { type: integer }
+        businessDaysCount: { type: integer }
+        status: { type: string }
+        employeeNote: { type: string, nullable: true }
+        managerNote: { type: string, nullable: true }
+        attachmentUrls:
+          type: array
+          items: { type: string }
+          nullable: true
+        currentApproverId: { type: integer, nullable: true }
+        approvedByUserId: { type: integer, nullable: true }
+        approvedAt: { type: string, format: date-time, nullable: true }
+        rejectedByUserId: { type: integer, nullable: true }
+        rejectedAt: { type: string, format: date-time, nullable: true }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        requestNumber: { type: string }
+        sourceFormId: { type: integer, nullable: true }
+        sourceSubmissionId: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    HrLeaveRequestListItem:
+      allOf:
+        - $ref: "#/components/schemas/HrLeaveRequest"
+        - type: object
+          properties:
+            employeeName: { type: string }
+            employeeNumber: { type: string, nullable: true }
+
+    HrLeaveApprovalStep:
+      type: object
+      properties:
+        id: { type: integer }
+        leaveRequestId: { type: integer }
+        stepOrder: { type: integer }
+        approverUserId: { type: integer }
+        approverRole: { type: string }
+        status: { type: string }
+        comment: { type: string, nullable: true }
+        decidedAt: { type: string, format: date-time, nullable: true }
+        notifiedAt: { type: string, format: date-time, nullable: true }
+        timeoutAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    HrLeaveRequestDetailResponse:
+      type: object
+      properties:
+        leaveRequest:
+          $ref: "#/components/schemas/HrLeaveRequest"
+        approvalSteps:
+          type: array
+          items:
+            $ref: "#/components/schemas/HrLeaveApprovalStep"
+
+    HrLeaveRequestSubmitInput:
+      type: object
+      required: [leaveType, startDate, endDate]
+      properties:
+        leaveType: { type: string }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        employeeNote: { type: string }
+        leavePolicyId: { type: integer }
+        attachmentUrls:
+          type: array
+          items: { type: string }
+
+    HrLeaveRequestSubmitResponse:
+      type: object
+      properties:
+        leaveRequest:
+          $ref: "#/components/schemas/HrLeaveRequest"
+        leaveApprovalStep:
+          $ref: "#/components/schemas/HrLeaveApprovalStep"
+          nullable: true
+
+    HrLeaveDecisionInput:
+      type: object
+      properties:
+        comment: { type: string, maxLength: 1000 }
+
+    HrLeaveWithdrawInput:
+      type: object
+      properties:
+        reason: { type: string, maxLength: 500 }
+
+    HrMeLeavePolicy:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        nameAr: { type: string, nullable: true }
+        leaveType: { type: string }
+        requiresApproval: { type: boolean }
+        isActive: { type: boolean }
+
+    SelfServiceApprovalInboxItem:
+      type: object
+      properties:
+        instanceId: { type: integer }
+        stepId: { type: integer }
+        stepOrder: { type: integer }
+        entityType: { type: string }
+        entityId: { type: integer }
+        processCode: { type: string }
+        processName: { type: string }
+        status: { type: string }
+        stepStatus: { type: string }
+        dueAt: { type: string, format: date-time, nullable: true }
+        slaWarning: { type: boolean }
+        isDelegated: { type: boolean }
+        routingSource: { type: string }
+        context:
+          type: object
+          additionalProperties: true
+          nullable: true
+        requesterUserId: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    SelfServiceApprovalDetailResponse:
+      type: object
+      properties:
+        instance:
+          type: object
+          additionalProperties: true
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        policy:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    SelfServiceApprovalDecisionInput:
+      type: object
+      properties:
+        notes: { type: string }
+
+    SelfServiceApprovalDecisionResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        decision: { type: string }
 
     HrServiceCategory:
       type: object

@@ -14,3 +14,10 @@ export type {
   PermissionCheckRequest,
   PermissionCheckResult,
 } from "./types";
+
+export { evaluatePolicy, type EvaluatePolicyOptions } from "./evaluate-policy";
+export {
+  ADMIN_ROLE_PERMISSIONS,
+  MANAGER_ROLE_PERMISSIONS,
+  builtInRoleGrantsPermission,
+} from "./role-bundles";

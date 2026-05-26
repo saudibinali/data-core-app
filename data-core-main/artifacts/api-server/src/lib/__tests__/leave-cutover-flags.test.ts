@@ -52,4 +52,9 @@ describe("leave-cutover-flags", () => {
     expect(status.canonicalSubmit).toBe(true);
     expect(status.legacyFreeze).toBe(false);
   });
+
+  it("includes canonicalWriteEnabled in status payload", () => {
+    const status = resolveLeaveCutoverStatus(1, "canonical", {});
+    expect(status.canonicalWriteEnabled).toBe(true);
+  });
 });

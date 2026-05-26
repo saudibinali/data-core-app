@@ -5,6 +5,10 @@
 import type { MasterDataCatalogSnapshot } from "../catalog/master-data-catalog";
 import { normalizeName, normalizeRuntimeKey, canonicalSlug } from "../normalization";
 import { topologicalSortOrgUnits, MASTER_DATA_IMPORT_ORDER } from "./dependency-ordering";
+import {
+  validateMasterDataRowCanonical,
+  type CanonicalImportModes,
+} from "../validation/canonical-import-gates";
 
 export type MasterDataImportRow = {
   rowNumber: number;
@@ -66,6 +70,7 @@ function normalizeEntityType(raw: string): string | null {
 export function validateMasterDataImportDryRun(
   catalog: MasterDataCatalogSnapshot,
   rawRows: Record<string, string>[],
+  canonicalModes?: CanonicalImportModes,
 ): MasterDataDryRunResult {
   const parsed: MasterDataImportRow[] = [];
   for (let i = 0; i < rawRows.length; i++) {
@@ -94,6 +99,12 @@ export function validateMasterDataImportDryRun(
     const warnings: string[] = [];
 
     if (!row.name && !row.code) errors.push("name or code required");
+
+    if (canonicalModes) {
+      const canon = validateMasterDataRowCanonical(row.entityType, canonicalModes);
+      errors.push(...canon.errors);
+      warnings.push(...canon.warnings);
+    }
 
     const canonicalKey = row.code ?? canonicalSlug(row.name);
     const entityList = catalog.entities[row.entityType as keyof typeof catalog.entities];

@@ -1,5 +1,34 @@
 -- P24-B: Canonical procurement foundation (no inventory, no AP, no payments, no posting)
 
+-- Prerequisite: approval-link tables reference workflow_approvals (defined in schema, missing from 0000 journal)
+CREATE TABLE IF NOT EXISTS "workflow_approvals" (
+  "id" serial PRIMARY KEY NOT NULL,
+  "execution_id" integer NOT NULL REFERENCES "workflow_executions"("id") ON DELETE CASCADE,
+  "workspace_id" integer NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "workflow_id" integer REFERENCES "workflow_definitions"("id") ON DELETE SET NULL,
+  "workflow_version" integer,
+  "step_index" integer NOT NULL,
+  "step_name" text NOT NULL,
+  "step_snapshot" jsonb,
+  "action" text NOT NULL,
+  "decided_by" integer REFERENCES "users"("id") ON DELETE SET NULL,
+  "notes" text,
+  "decided_at" timestamptz NOT NULL DEFAULT now(),
+  "execution_timeout_at" timestamptz
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_execution" ON "workflow_approvals" ("execution_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_workspace" ON "workflow_approvals" ("workspace_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_decider" ON "workflow_approvals" ("decided_by");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_decided_at" ON "workflow_approvals" ("decided_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_workflow" ON "workflow_approvals" ("workflow_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_wf_approval_version" ON "workflow_approvals" ("workflow_id", "workflow_version");
+
 -- ── procurement_vendors ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS "procurement_vendors" (
   "id" serial PRIMARY KEY NOT NULL,

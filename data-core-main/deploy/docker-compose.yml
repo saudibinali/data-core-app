@@ -30,7 +30,7 @@ services:
       NODE_ENV: production
       PORT: 8080
       DATABASE_URL: postgresql://opsuser:${POSTGRES_PASSWORD:-changeme}@postgres:5432/opsplatform
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
       SESSION_SECRET: ${SESSION_SECRET}
       APP_URL: ${APP_URL:-http://localhost}

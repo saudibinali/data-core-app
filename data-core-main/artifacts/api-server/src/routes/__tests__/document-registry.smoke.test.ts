@@ -23,8 +23,9 @@ import { validateMimeType } from "../../lib/documents/mime-policy";
 import { issueDocumentDownloadToken, verifyDocumentDownloadToken } from "../../lib/documents/download-token";
 import { ObjectStorageService } from "../../lib/objectStorage";
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_P19C_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_P19C_SMOKE !== "0";
 
 vi.mock("../../lib/logger", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

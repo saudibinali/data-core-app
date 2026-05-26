@@ -76,6 +76,17 @@ const STATIC_PERMISSION_GROUPS = [
     ],
   },
   {
+    module: "leave",
+    label: "Leave",
+    labelAr: "الإجازات",
+    icon: "CalendarDays",
+    permissions: [
+      { key: "leave.view",   label: "View leave requests",    labelAr: "عرض طلبات الإجازة" },
+      { key: "leave.manage", label: "Approve / manage leave", labelAr: "اعتماد وإدارة الإجازات" },
+      { key: "leave.submit", label: "Submit own leave",       labelAr: "تقديم إجازة شخصية" },
+    ],
+  },
+  {
     module: "hr",
     label: "Human Resources",
     labelAr: "الموارد البشرية",

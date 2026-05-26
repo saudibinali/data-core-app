@@ -461,7 +461,7 @@ router.patch(
 
     if (body.subscriptionName !== undefined) {
       const name = strRequired(body.subscriptionName, MAX_NAME);
-      if (name === "MISSING" || name === "INVALID") {
+      if (name === "MISSING" || name === "INVALID" || typeof name !== "string") {
         res.status(400).json({ error: "Invalid subscriptionName" });
         return;
       }
@@ -610,7 +610,7 @@ router.patch(
 
     const body = req.body as Record<string, unknown>;
     const reason = strRequired(body.reason, MAX_TEXT);
-    if (reason === "MISSING" || reason === "INVALID") {
+    if (reason === "MISSING" || reason === "INVALID" || typeof reason !== "string") {
       res.status(400).json({ error: "reason is required for status change" });
       return;
     }

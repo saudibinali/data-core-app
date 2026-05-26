@@ -75,8 +75,9 @@ describe("P21-B payroll lock date range (unit)", () => {
   });
 });
 
-const HAS_DB = Boolean(process.env.DATABASE_URL);
-const RUN = HAS_DB && process.env.RUN_PAYROLL_FOUNDATION_SMOKE !== "0";
+import { isSmokeDatabaseAvailable } from "../../../test-utils/smoke-db";
+
+const RUN = isSmokeDatabaseAvailable() && process.env.RUN_PAYROLL_FOUNDATION_SMOKE !== "0";
 
 describe.skipIf(!RUN)("P21-B payroll foundation (DB)", () => {
   it("creates period and idempotent preview run", async () => {

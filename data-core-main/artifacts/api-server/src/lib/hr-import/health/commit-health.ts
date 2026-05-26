@@ -5,10 +5,12 @@
 import { getImportRuntimeHealth } from "../health/import-runtime-health";
 import { getRuntimeMetrics } from "../../workforce/stabilization/observability-metrics";
 import { getCommitModeLabel, getImportRuntimeSettings } from "../runtime-settings";
+import { evaluateImportCutoverGates } from "../../workforce/stabilization/import-cutover-gates";
 
 export async function getCommitRuntimeHealth(workspaceId?: number) {
   const base = await getImportRuntimeHealth();
   const settings = workspaceId ? await getImportRuntimeSettings(workspaceId) : null;
+  const importGates = workspaceId ? await evaluateImportCutoverGates(workspaceId) : null;
 
   const v4Metrics = Object.fromEntries(
     Object.entries(getRuntimeMetrics()).filter(([k]) => k.startsWith("import.v4.")),
@@ -22,7 +24,8 @@ export async function getCommitRuntimeHealth(workspaceId?: number) {
     activeModeAutoCommit: false,
     rollbackExecutionEnabled: settings?.employeeImportRuntimeMode === "controlled_commit",
     commitMetrics: v4Metrics,
-    strictEnforcementEnabled: false,
+    strictEnforcementEnabled: importGates?.strictRowValidation ?? false,
+    canonicalImportGates: importGates,
     autoCreateEnabled: false,
   };
 }

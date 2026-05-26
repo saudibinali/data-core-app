@@ -95,6 +95,11 @@
  *   leave.rejected     → activity.ts ✅ ACTIVE (Phase 1)
  *   leave.withdrawn    → activity.ts ✅ ACTIVE (Phase 1)
  *
+ * ── F7.2 Transactional outbox ─────────────────────────────────────────────────
+ *   event_outbox table + publishDomainEvent() + outbox-worker (optional drain).
+ *   Pilot: EVENT_OUTBOX_PUBLISH_MODE=shadow (enqueue + direct emit, drain off).
+ *   Cutover: mode=outbox + migrate routes to publishDomainEvent inside transactions.
+ *
  * ── Deprecation Strategy ──────────────────────────────────────────────────────
  *   Phase 1 (now):    Bridge in place. Both systems active. New code uses bus.
  *   Phase 2 (done):   Migrated tickets.ts, admin.ts, forms.ts to appEventBus.emit().
@@ -116,6 +121,12 @@ export type { EventPayload, EventListener, EventName } from "./types";
 
 // ── Canonical typed bus ───────────────────────────────────────────────────────
 export { appEventBus }                   from "./app-bus";
+export {
+  publishDomainEvent,
+  enqueueEventOutbox,
+  eventPublishMode,
+  shouldDrainEventOutbox,
+} from "./outbox";
 export { EVENT_TYPES, LEGACY_EVENT_NAMES } from "@workspace/core-events";
 
 // ── Listener registration (side effects - ORDER MATTERS) ──────────────────────

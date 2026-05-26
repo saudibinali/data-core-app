@@ -270,7 +270,14 @@ export default function WorkflowDetailPage() {
         </div>
 
         {isAdmin && (
-          <Button
+          <div className="flex items-center gap-2">
+            <Link href="/process-templates">
+              <Button variant="outline" size="sm" className="gap-1">
+                <GitFork className="w-4 h-4" />
+                {isAr ? "قوالب العمليات" : "Process templates"}
+              </Button>
+            </Link>
+            <Button
             variant={workflow.isActive ? "outline" : "default"}
             size="sm"
             className="gap-2"
@@ -282,6 +289,7 @@ export default function WorkflowDetailPage() {
               : <><Play  className="w-4 h-4" />{isAr ? "تفعيل" : "Activate"}</>
             }
           </Button>
+          </div>
         )}
       </div>
 
@@ -394,3 +402,4 @@ export default function WorkflowDetailPage() {
     </div>
   );
 }
+

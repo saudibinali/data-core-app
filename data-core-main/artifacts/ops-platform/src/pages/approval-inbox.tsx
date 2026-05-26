@@ -1,6 +1,18 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Link } from "wouter";
+import { Textarea } from "@/components/ui/textarea";
+import { useLeaveCutover } from "@/lib/leave-cutover-flags";
+import {
+  approveHrLeaveRequest,
+  approveSelfServiceApprovalStep,
+  getListSelfServiceApprovalsQueryKey,
+  rejectHrLeaveRequest,
+  rejectSelfServiceApprovalStep,
+  useListSelfServiceApprovals,
+  type SelfServiceApprovalInboxItem,
+} from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,28 +20,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { Check, X, Clock, AlertTriangle, ArrowLeft } from "lucide-react";
 
-type InboxItem = {
-  instanceId: number;
-  stepId: number;
-  entityType: string;
-  entityId: number;
-  processCode: string;
-  processName: string;
-  dueAt: string | null;
-  slaWarning: boolean;
-  isDelegated: boolean;
-  routingSource: string;
-  context: Record<string, unknown> | null;
-};
-
-async function fetchInbox(): Promise<InboxItem[]> {
-  const res = await fetch("/api/self-service/approvals", { credentials: "include" });
-  if (res.status === 503) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.migrationHint ?? "Approval runtime unavailable");
+function inboxErrorMessage(e: unknown): string {
+  if (e && typeof e === "object" && "data" in e) {
+    const data = (e as { data?: { migrationHint?: string } }).data;
+    if (data?.migrationHint) return data.migrationHint;
   }
-  if (!res.ok) throw new Error("Failed to load approvals");
-  return res.json();
+  if (e instanceof Error) return e.message;
+  return "Failed to load approvals";
 }
 
 export default function ApprovalInboxPage() {
@@ -37,46 +34,34 @@ export default function ApprovalInboxPage() {
   const isAr = i18n.language.startsWith("ar");
   const { toast } = useToast();
   const qc = useQueryClient();
+  const leaveCutover = useLeaveCutover();
+  const [rejectNotes, setRejectNotes] = useState<Record<number, string>>({});
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["approval-inbox"],
-    queryFn: fetchInbox,
-  });
+  const { data, isLoading, error, refetch } = useListSelfServiceApprovals({});
 
   const decide = useMutation({
-    mutationFn: async ({ item, decision }: { item: InboxItem; decision: "approve" | "reject" }) => {
+    mutationFn: async ({ item, decision, comment }: { item: SelfServiceApprovalInboxItem; decision: "approve" | "reject"; comment?: string }) => {
       if (item.entityType === "leave_request") {
-        const path = decision === "approve" ? "approve" : "reject";
-        const res = await fetch(`/api/hr/leave-requests/${item.entityId}/${path}`, {
-          method: "PATCH",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ comment: "" }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error ?? "Leave action failed");
+        const body = { comment: comment ?? "" };
+        if (decision === "approve") {
+          return approveHrLeaveRequest(item.entityId, body);
         }
-        return res.json();
+        return rejectHrLeaveRequest(item.entityId, body);
       }
-      const res = await fetch(`/api/self-service/approvals/${item.instanceId}/steps/${item.stepId}/${decision}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? "Action failed");
+      const notes = comment ?? "";
+      if (decision === "approve") {
+        return approveSelfServiceApprovalStep(item.instanceId, item.stepId, { notes });
       }
-      return res.json();
+      return rejectSelfServiceApprovalStep(item.instanceId, item.stepId, { notes });
     },
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["approval-inbox"] });
+      void qc.invalidateQueries({ queryKey: getListSelfServiceApprovalsQueryKey() });
       toast({ title: isAr ? "تم تحديث الموافقة" : "Approval updated" });
     },
     onError: (e: Error) => toast({ title: e.message, variant: "destructive" }),
   });
+
+  const displayError = error ? inboxErrorMessage(error) : null;
 
   return (
     <div className="space-y-6 p-4 md:p-6 max-w-4xl mx-auto">
@@ -93,13 +78,13 @@ export default function ApprovalInboxPage() {
       </div>
 
       {isLoading && <Skeleton className="h-32 w-full" />}
-      {error && (
+      {displayError && (
         <Card className="border-destructive/50">
-          <CardContent className="pt-6 text-sm text-destructive">{(error as Error).message}</CardContent>
+          <CardContent className="pt-6 text-sm text-destructive">{displayError}</CardContent>
         </Card>
       )}
 
-      {!isLoading && !error && (!data || data.length === 0) && (
+      {!isLoading && !displayError && (!data || data.length === 0) && (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
             {isAr ? "لا توجد موافقات معلقة" : "No pending approvals"}
@@ -115,6 +100,18 @@ export default function ApprovalInboxPage() {
               <p className="text-xs text-muted-foreground mt-1">
                 {item.entityType} #{item.entityId} · {item.routingSource.replace(/_/g, " ")}
               </p>
+              {item.instanceId != null && (
+                <Link
+                  href={
+                    item.entityType === "leave_request"
+                      ? "/admin/hr/leave"
+                      : `/workflows`
+                  }
+                  className="text-xs text-primary hover:underline mt-1 inline-block"
+                >
+                  {isAr ? "عرض السياق" : "View context"}
+                </Link>
+              )}
             </div>
             <div className="flex flex-wrap gap-1 justify-end">
               {item.isDelegated && <Badge variant="secondary">{isAr ? "تفويض" : "Delegated"}</Badge>}
@@ -137,6 +134,12 @@ export default function ApprovalInboxPage() {
                 {isAr ? "الاستحقاق:" : "Due:"} {new Date(item.dueAt).toLocaleString()}
               </p>
             )}
+            <Textarea
+              className="text-sm min-h-[60px]"
+              placeholder={isAr ? "سبب الرفض (مطلوب عند الرفض)" : "Rejection reason (required when rejecting)"}
+              value={rejectNotes[item.stepId] ?? ""}
+              onChange={(e) => setRejectNotes((prev) => ({ ...prev, [item.stepId]: e.target.value }))}
+            />
             <div className="flex gap-2">
               <Button
                 size="sm"
@@ -148,7 +151,17 @@ export default function ApprovalInboxPage() {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => decide.mutate({ item, decision: "reject" })}
+                onClick={() => {
+                  const comment = rejectNotes[item.stepId]?.trim() ?? "";
+                  if (!comment) {
+                    toast({
+                      title: isAr ? "سبب الرفض مطلوب" : "Rejection reason is required",
+                      variant: "destructive",
+                    });
+                    return;
+                  }
+                  decide.mutate({ item, decision: "reject", comment });
+                }}
                 disabled={decide.isPending}
               >
                 <X className="h-4 w-4 mr-1" /> {isAr ? "رفض" : "Reject"}
@@ -164,3 +177,4 @@ export default function ApprovalInboxPage() {
     </div>
   );
 }
+

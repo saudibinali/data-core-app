@@ -437,7 +437,7 @@ export class EventBus {
    *     data: { employeeUserId: 42, employeeNumber: "EMP-001", fullName: "..." },
    *   });
    */
-  async emit<K extends EventType>(
+  async emit<K extends keyof EventTypeMap>(
     input: EventInput<K>,
   ): Promise<EmitResult> {
     const startMs = Date.now();

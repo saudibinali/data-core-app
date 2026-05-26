@@ -1,6 +1,8 @@
 import { db } from "@workspace/db";
 import { hrWorkspaceSettingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { isOrgCutoverEnabledForWorkspace } from "../../org-cutover-flags";
+import { getOrgRuntimeMode } from "../org/org-runtime-settings";
 
 export type CleanupStage = "none" | "stage1" | "stage2" | "stage3" | "stage4";
 
@@ -72,8 +74,28 @@ export type LegacyWriteCheckResult =
 export async function assertLegacyWriteAllowed(
   workspaceId: number,
   surface: LegacyWriteSurface,
-  sourcePath?: string,
+  _sourcePath?: string,
 ): Promise<LegacyWriteCheckResult> {
+  if (surface === "departments") {
+    if (isOrgCutoverEnabledForWorkspace(workspaceId)) {
+      return {
+        ok: false,
+        status: 409,
+        error: "Legacy department writes are frozen — use HR org units (ORG_CUTOVER)",
+        code: "ORG_CUTOVER_LEGACY_WRITE_BLOCKED",
+      };
+    }
+    const orgMode = await getOrgRuntimeMode(workspaceId);
+    if (orgMode === "active") {
+      return {
+        ok: false,
+        status: 409,
+        error: "Legacy department writes are frozen — orgRuntimeMode is active",
+        code: "ORG_RUNTIME_ACTIVE_LEGACY_WRITE_BLOCKED",
+      };
+    }
+  }
+
   const policy = await resolveLegacyWritePolicy(workspaceId, surface);
   if (policy === "allow") return { ok: true };
 

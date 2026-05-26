@@ -7,8 +7,41 @@ import { executeWebClock } from "../lib/workforce-attendance/clock-service";
 import { selfServiceAttendanceService } from "../lib/workforce-attendance/self-service-attendance-service";
 import { attendancePolicyService } from "../lib/workforce-attendance/attendance-policy-service";
 import { parsePolicyJson } from "../lib/workforce-attendance/policy-types";
+import { attendanceCutoverStatusForWorkspace } from "../lib/attendance-cutover-flags";
+import { listAdminAttendanceSummaries } from "../lib/workforce-attendance/admin-attendance-list";
 
 const router: IRouter = Router();
+
+// GET /hr/attendance-cutover/status — F6.2 pilot + effective attendance canonical flags
+router.get("/hr/attendance-cutover/status", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const workspaceId = req.workspaceId;
+  if (!workspaceId) {
+    res.json(attendanceCutoverStatusForWorkspace(null));
+    return;
+  }
+  res.json(attendanceCutoverStatusForWorkspace(workspaceId));
+});
+
+// GET /hr/workforce/attendance/summaries — canonical daily summaries (admin list)
+router.get(
+  "/hr/workforce/attendance/summaries",
+  requireAuth,
+  requirePermission("hr.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    if (!req.workspaceId) {
+      res.status(403).json({ error: "No workspace" });
+      return;
+    }
+    const q = req.query as Record<string, string>;
+    const rows = await listAdminAttendanceSummaries(req.workspaceId, {
+      employeeId: q.employeeId ? Number(q.employeeId) : undefined,
+      dateFrom: q.dateFrom,
+      dateTo: q.dateTo,
+      status: q.status,
+    });
+    res.json(rows);
+  },
+);
 
 async function resolveEmployeeForUser(req: AuthRequest) {
   if (!req.workspaceId || !req.userId) return null;

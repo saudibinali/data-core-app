@@ -9,6 +9,14 @@ import {
   isLeavePilotWorkspace,
   leaveCutoverStatusForWorkspace,
 } from "../leave-cutover-flags";
+import {
+  isPayrollCutoverEnabledForWorkspace,
+  payrollCutoverStatusForWorkspace,
+} from "../payroll-cutover-flags";
+import {
+  attendanceCutoverStatusForWorkspace,
+  isAttendanceCutoverEnabledForWorkspace,
+} from "../attendance-cutover-flags";
 
 const PILOT_ENV = "PLATFORM_STABILIZATION_PILOT_WORKSPACE_ID";
 
@@ -46,11 +54,13 @@ function isLegacyFreezeEnabled(
 }
 
 export function isLegacyPayrollFrozen(workspaceId: number | null | undefined): boolean {
-  return isLegacyFreezeEnabled("LEGACY_PAYROLL_FREEZE", workspaceId);
+  if (isLegacyFreezeEnabled("LEGACY_PAYROLL_FREEZE", workspaceId)) return true;
+  return isPayrollCutoverEnabledForWorkspace("payrollCanonicalWrite", workspaceId);
 }
 
 export function isLegacyAttendanceFrozen(workspaceId: number | null | undefined): boolean {
-  return isLegacyFreezeEnabled("LEGACY_ATTENDANCE_FREEZE", workspaceId);
+  if (isLegacyFreezeEnabled("LEGACY_ATTENDANCE_FREEZE", workspaceId)) return true;
+  return isAttendanceCutoverEnabledForWorkspace("attendanceCanonicalWrite", workspaceId);
 }
 
 function sendLegacyFrozen(
@@ -84,16 +94,22 @@ export function assertLegacyAttendanceWriteAllowed(req: AuthRequest, res: Respon
 
 export function infrastructureCutoverStatus(workspaceId: number | null | undefined) {
   const leave = leaveCutoverStatusForWorkspace(workspaceId);
+  const payroll = payrollCutoverStatusForWorkspace(workspaceId);
+  const attendance = attendanceCutoverStatusForWorkspace(workspaceId);
   return {
     pilotWorkspaceId: stabilizationPilotWorkspaceId(),
     allWorkspacesMode: parseEnvBool(process.env.PLATFORM_STABILIZATION_ALL_WORKSPACES),
     leave,
+    payroll,
+    attendance,
     legacyPayrollFrozen: isLegacyPayrollFrozen(workspaceId),
     legacyAttendanceFrozen: isLegacyAttendanceFrozen(workspaceId),
     envKeys: {
       pilot: PILOT_ENV,
       payrollFreeze: "LEGACY_PAYROLL_FREEZE",
+      payrollCanonicalWrite: "PAYROLL_CANONICAL_WRITE",
       attendanceFreeze: "LEGACY_ATTENDANCE_FREEZE",
+      attendanceCanonicalWrite: "ATTENDANCE_CANONICAL_WRITE",
       leavePilot: "LEAVE_CUTOVER_PILOT_WORKSPACE_ID",
       allWorkspaces: "PLATFORM_STABILIZATION_ALL_WORKSPACES",
     },

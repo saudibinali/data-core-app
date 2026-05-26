@@ -15,8 +15,20 @@ import { compensationPackageService } from "../lib/payroll/compensation-package-
 import { payrollAttendanceAdapter } from "../lib/payroll/payroll-attendance-adapter";
 import { payrollLockService } from "../lib/payroll/payroll-lock-service";
 import { exportJobService } from "../lib/reports/export-job-service";
+import { payrollCutoverStatusForWorkspace } from "../lib/payroll-cutover-flags";
+import { logPayrollAccess } from "../lib/payroll/payroll-audit";
 
 const router: IRouter = Router();
+
+// GET /hr/payroll-cutover/status — F6.1 pilot + effective payroll canonical flags
+router.get("/hr/payroll-cutover/status", requireAuth, async (req: AuthRequest, res) => {
+  const workspaceId = req.workspaceId;
+  if (!workspaceId) {
+    res.json(payrollCutoverStatusForWorkspace(null));
+    return;
+  }
+  res.json(payrollCutoverStatusForWorkspace(workspaceId));
+});
 
 function requireWs(req: AuthRequest, res: import("express").Response): number | null {
   if (!req.workspaceId) {
@@ -284,7 +296,15 @@ router.post(
     const ws = requireWs(req, res);
     if (ws == null) return;
     try {
-      const result = await payrollRunService.calculateRun(ws, Number(req.params.id), req.userId);
+      const runId = Number(req.params.id);
+      const result = await payrollRunService.calculateRun(ws, runId, req.userId);
+      logPayrollAccess({
+        workspaceId: ws,
+        userId: req.userId,
+        action: "canonical_run_calculate",
+        resourceType: "payroll_run",
+        resourceId: runId,
+      });
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -331,14 +351,22 @@ router.post(
     if (ws == null) return;
     const body = (req.body ?? {}) as { issuePayslips?: boolean };
     try {
-      res.json(
-        await payrollRunService.lockRun(
-          ws,
-          Number(req.params.id),
-          req.userId,
-          body.issuePayslips !== false,
-        ),
+      const runId = Number(req.params.id);
+      const locked = await payrollRunService.lockRun(
+        ws,
+        runId,
+        req.userId,
+        body.issuePayslips !== false,
       );
+      logPayrollAccess({
+        workspaceId: ws,
+        userId: req.userId,
+        action: "canonical_run_lock",
+        resourceType: "payroll_run",
+        resourceId: runId,
+        metadata: { issuePayslips: body.issuePayslips !== false },
+      });
+      res.json(locked);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }

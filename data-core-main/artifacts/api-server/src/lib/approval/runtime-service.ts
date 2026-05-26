@@ -271,6 +271,10 @@ export async function decideApprovalStep(
     return { ok: false, status: 403, error: "Not authorized to decide this approval step" };
   }
 
+  if (decision === "rejected" && !notes?.trim()) {
+    return { ok: false, status: 400, error: "Rejection reason is required" };
+  }
+
   if (row.instance.entityType === "leave_request") {
     await syncLeaveStepDecision(workspaceId, row.instance.entityId, decision, actorUserId, notes);
     return { ok: true };

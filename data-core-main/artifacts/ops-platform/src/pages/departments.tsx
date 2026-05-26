@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { Link } from "wouter";
 import { useListDepartments, useCreateDepartment, useUpdateDepartment, useDeleteDepartment, useListUsers, useGetMe } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,11 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Plus, Users, Building2, UserCheck, Pencil, Trash2 } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Plus, Users, Building2, UserCheck, Pencil, Trash2, Info, ArrowRight } from "lucide-react";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
+import { useOrgCutover } from "@/lib/org-cutover-flags";
 
 // ─── Create / Edit Dialog ────────────────────────────────────────────────────
 
@@ -114,7 +117,9 @@ export default function DepartmentsPage() {
   const { data: departments, isLoading } = useListDepartments();
   const deleteDepartment = useDeleteDepartment();
   const { data: me } = useGetMe();
+  const { legacyDepartmentsFrozen } = useOrgCutover();
   const isAdmin = me?.role === "admin" || me?.role === "super_admin";
+  const canMutateDepartments = isAdmin && !legacyDepartmentsFrozen;
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
@@ -138,13 +143,29 @@ export default function DepartmentsPage() {
           <h2 className="text-2xl font-bold tracking-tight">{t("departments")}</h2>
           <p className="text-muted-foreground">{t("departments_subtitle")}</p>
         </div>
-        {isAdmin && (
+        {canMutateDepartments && (
           <Button onClick={() => setCreateOpen(true)}>
             <Plus className="w-4 h-4 mr-2" />
             {t("add_department")}
           </Button>
         )}
       </div>
+
+      {legacyDepartmentsFrozen && (
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>{t("dept_legacy_banner_title")}</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>{t("dept_legacy_banner_body")}</p>
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/admin/hr/foundation">
+                {t("dept_legacy_banner_cta")}
+                <ArrowRight className="w-3.5 h-3.5 ml-1" />
+              </Link>
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {isLoading ? (
@@ -158,7 +179,7 @@ export default function DepartmentsPage() {
                     <Building2 className="w-5 h-5 text-primary shrink-0" />
                     {dept.name}
                   </CardTitle>
-                  {isAdmin && (
+                  {canMutateDepartments && (
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100">
                       <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setEditing({ id: dept.id, name: dept.name, description: dept.description, managerId: dept.managerId })}>
                         <Pencil className="w-3.5 h-3.5" />
@@ -191,8 +212,8 @@ export default function DepartmentsPage() {
         )}
       </div>
 
-      {createOpen && <DepartmentFormDialog open onClose={() => setCreateOpen(false)} />}
-      {editing && <DepartmentFormDialog open onClose={() => setEditing(null)} existing={editing} />}
+      {canMutateDepartments && createOpen && <DepartmentFormDialog open onClose={() => setCreateOpen(false)} />}
+      {canMutateDepartments && editing && <DepartmentFormDialog open onClose={() => setEditing(null)} existing={editing} />}
     </div>
   );
 }

@@ -115,6 +115,16 @@ import type {
   ProcurementRfqSentEvent,
   ProcurementPoApprovedEvent,
   ProcurementOverrideRequestedEvent,
+  InventoryReceiptPostedEvent,
+  InventoryReceiptVoidedEvent,
+  InventoryMovementPostedEvent,
+  InventoryIssuePostedEvent,
+  InventoryTransferCompletedEvent,
+  InventoryReservationCreatedEvent,
+  InventoryAdjustmentPostedEvent,
+  InventoryCountPostedEvent,
+  InventoryReservationExpiredEvent,
+  InventoryCountCompletedEvent,
 } from "./events";
 
 // ── EVENT_TYPES constant object ───────────────────────────────────────────────
@@ -271,9 +281,6 @@ export const PAYROLL_EVENT_TYPES = {
   PAYSLIP_ISSUED: EVENT_TYPES.PAYROLL_PAYSLIP_ISSUED,
 } as const;
 
-/** Union of all canonical event type strings. */
-export type EventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES];
-
 // ── EventTypeMap — typed payload registry ─────────────────────────────────────
 
 /**
@@ -317,6 +324,17 @@ export interface EventTypeMap {
   "procurement.rfq.sent":         ProcurementRfqSentEvent["data"];
   "procurement.po.approved":      ProcurementPoApprovedEvent["data"];
   "procurement.override.requested": ProcurementOverrideRequestedEvent["data"];
+  // ── Inventory ────────────────────────────────────────────────────────────────
+  "inventory.receipt.posted":       InventoryReceiptPostedEvent["data"];
+  "inventory.receipt.voided":       InventoryReceiptVoidedEvent["data"];
+  "inventory.movement.posted":      InventoryMovementPostedEvent["data"];
+  "inventory.issue.posted":         InventoryIssuePostedEvent["data"];
+  "inventory.transfer.completed":   InventoryTransferCompletedEvent["data"];
+  "inventory.reservation.created":  InventoryReservationCreatedEvent["data"];
+  "inventory.adjustment.posted":    InventoryAdjustmentPostedEvent["data"];
+  "inventory.count.posted":         InventoryCountPostedEvent["data"];
+  "inventory.reservation.expired":  InventoryReservationExpiredEvent["data"];
+  "inventory.count.completed":      InventoryCountCompletedEvent["data"];
 }
 
 // ── AnyTypedEvent — full discriminated union ──────────────────────────────────
@@ -365,9 +383,20 @@ export type AnyTypedEvent =
   | ProcurementPrSubmittedEvent
   | ProcurementRfqSentEvent
   | ProcurementPoApprovedEvent
-  | ProcurementOverrideRequestedEvent;
+  | ProcurementOverrideRequestedEvent
+  | InventoryReceiptPostedEvent
+  | InventoryReceiptVoidedEvent
+  | InventoryMovementPostedEvent
+  | InventoryIssuePostedEvent
+  | InventoryTransferCompletedEvent
+  | InventoryReservationCreatedEvent
+  | InventoryAdjustmentPostedEvent
+  | InventoryCountPostedEvent
+  | InventoryReservationExpiredEvent
+  | InventoryCountCompletedEvent;
 
-// ── Type guard helper ─────────────────────────────────────────────────────────
+/** Union of all canonical event type strings registered in EventTypeMap. */
+export type EventType = keyof EventTypeMap;
 
 /**
  * isEventType — type guard for narrowing a BaseEvent to a specific TypedEvent.

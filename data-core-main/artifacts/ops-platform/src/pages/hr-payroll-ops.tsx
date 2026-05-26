@@ -4,7 +4,21 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  getGetHrPayrollOpsOverviewQueryKey,
+  getListHrPayrollOpsAuditLogsQueryKey,
+  getListHrPayrollOpsAuditPayslipsQueryKey,
+  getListHrPayrollOpsExceptionsQueryKey,
+  getListHrPayrollOpsRunsQueryKey,
+  useGetHrPayrollOpsOverview,
+  useListHrPayrollOpsAuditLogs,
+  useListHrPayrollOpsAuditPayslips,
+  useListHrPayrollOpsExceptions,
+  useListHrPayrollOpsRuns,
+  useResolveHrPayrollOpsException,
+  type GetHrPayrollOpsOverview200,
+} from "@workspace/api-client-react";
 import { Link } from "wouter";
 import {
   Activity,
@@ -16,7 +30,6 @@ import {
   Download,
   ChevronRight,
 } from "lucide-react";
-import { apiClient } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,25 +48,7 @@ import { useToast } from "@/hooks/use-toast";
 
 const POLL_MS = 30_000;
 
-type Overview = {
-  runMetrics: { total: number; byStatus: Record<string, number>; excludedEmployees: number };
-  reviewQueue: Array<{
-    run: { id: number; status: string; runType: string };
-    periodLabel: string;
-    warningCount: number;
-    excludedCount: number;
-  }>;
-  lockedPeriods: unknown[];
-  correctionRuns: unknown[];
-  exportReadiness: {
-    glMappingComplete: boolean;
-    componentsMissingGl: number;
-    bankExportReady: boolean;
-    message: string;
-  };
-  openExceptions: number;
-  alerts: Array<{ code: string; severity: string; title: string; message: string }>;
-};
+type Overview = GetHrPayrollOpsOverview200;
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   draft: "secondary",
@@ -80,57 +75,36 @@ export default function HrPayrollOpsPage() {
   const [tab, setTab] = useState("overview");
   const [runStatusFilter, setRunStatusFilter] = useState("");
 
-  const overviewQ = useQuery({
-    queryKey: ["/hr/payroll/ops/overview"],
-    queryFn: () => apiClient.get<Overview>("/api/hr/payroll/ops/overview").then((r) => r.data),
-    refetchInterval: POLL_MS,
+  const overviewQ = useGetHrPayrollOpsOverview({
+    query: { refetchInterval: POLL_MS },
   });
 
-  const runsQ = useQuery({
-    queryKey: ["/hr/payroll/ops/runs", runStatusFilter],
-    queryFn: () =>
-      apiClient
-        .get<Array<{ run: { id: number; status: string; runType: string }; periodLabel: string }>>(
-          `/api/hr/payroll/ops/runs${runStatusFilter ? `?status=${runStatusFilter}` : ""}`,
-        )
-        .then((r) => r.data),
-    enabled: tab === "runs",
-    refetchInterval: POLL_MS,
+  const runsQ = useListHrPayrollOpsRuns(
+    runStatusFilter ? { status: runStatusFilter } : undefined,
+    { query: { enabled: tab === "runs", refetchInterval: POLL_MS } },
+  );
+
+  const exceptionsQ = useListHrPayrollOpsExceptions(
+    { status: "open" },
+    { query: { enabled: tab === "exceptions", refetchInterval: POLL_MS } },
+  );
+
+  const auditQ = useListHrPayrollOpsAuditLogs(
+    { limit: 100 },
+    { query: { enabled: tab === "audit" } },
+  );
+
+  const payslipsQ = useListHrPayrollOpsAuditPayslips({
+    query: { enabled: tab === "payslips" },
   });
 
-  const exceptionsQ = useQuery({
-    queryKey: ["/hr/payroll/ops/exceptions"],
-    queryFn: () =>
-      apiClient
-        .get<Array<{ ex: { id: number; exceptionCode: string; severity: string; status: string; message: string; runId: number | null }; employeeName: string | null }>>(
-          "/api/hr/payroll/ops/exceptions?status=open",
-        )
-        .then((r) => r.data),
-    enabled: tab === "exceptions",
-    refetchInterval: POLL_MS,
-  });
-
-  const auditQ = useQuery({
-    queryKey: ["/hr/payroll/ops/audit/logs"],
-    queryFn: () =>
-      apiClient.get<Record<string, unknown>[]>("/api/hr/payroll/ops/audit/logs?limit=100").then((r) => r.data),
-    enabled: tab === "audit",
-  });
-
-  const payslipsQ = useQuery({
-    queryKey: ["/hr/payroll/ops/audit/payslips"],
-    queryFn: () =>
-      apiClient.get<Record<string, unknown>[]>("/api/hr/payroll/ops/audit/payslips").then((r) => r.data),
-    enabled: tab === "payslips",
-  });
-
-  const resolveEx = useMutation({
-    mutationFn: (id: number) =>
-      apiClient.post(`/api/hr/payroll/ops/exceptions/${id}/resolve`).then((r) => r.data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/hr/payroll/ops/exceptions"] });
-      qc.invalidateQueries({ queryKey: ["/hr/payroll/ops/overview"] });
-      toast({ title: isAr ? "تم الحل" : "Resolved" });
+  const resolveEx = useResolveHrPayrollOpsException({
+    mutation: {
+      onSuccess: () => {
+        void qc.invalidateQueries({ queryKey: getListHrPayrollOpsExceptionsQueryKey({ status: "open" }) });
+        void qc.invalidateQueries({ queryKey: getGetHrPayrollOpsOverviewQueryKey() });
+        toast({ title: isAr ? "تم الحل" : "Resolved" });
+      },
     },
   });
 
@@ -365,7 +339,7 @@ export default function HrPayrollOpsPage() {
                         size="sm"
                         variant="outline"
                         disabled={resolveEx.isPending}
-                        onClick={() => resolveEx.mutate(row.ex.id)}
+                        onClick={() => resolveEx.mutate({ id: row.ex.id })}
                       >
                         {isAr ? "حل" : "Resolve"}
                       </Button>
@@ -399,9 +373,13 @@ export default function HrPayrollOpsPage() {
                       : "Needs account mapping"}
                 </p>
                 <p className="text-muted-foreground">
-                  {isAr
-                    ? "لا تكامل بنكي ولا ترحيل محاسبي — تجهيز بيانات فقط"
-                    : "No bank integration or GL posting — metadata preparation only"}
+                  {ov.exportReadiness.wpsCsvExportReady
+                    ? (isAr
+                      ? "تصدير WPS/بنك CSV متاح لمسيرات مقفلة مع كشوف صادرة"
+                      : "WPS/bank CSV export available for locked runs with issued payslips")
+                    : isAr
+                      ? "لا تكامل بنكي مباشر — تجهيز بيانات فقط"
+                      : "No direct bank posting — metadata preparation only"}
                 </p>
               </CardContent>
             </Card>

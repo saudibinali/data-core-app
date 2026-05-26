@@ -1,9 +1,11 @@
 /**
- * P18-D2 — Canonical-first leave read bridge (no dual-write).
- * WRITE paths remain legacy until a later cutover phase.
+ * F5.2 — Unified leave read/write bridge (canonical-first).
+ * Reads: GET /hr/leave-requests (+ legacy admin list only when not frozen).
+ * Writes: POST /hr/leave-requests when cutover enabled; else POST /hr/me/leave-requests.
  */
 
 import type { AxiosInstance } from "axios";
+import type { LeaveCutoverStatus } from "@/lib/leave-cutover-flags";
 
 export type LeaveSource = "canonical" | "legacy";
 
@@ -76,15 +78,15 @@ function sortByDateDesc(a: NormalizedLeaveRow, b: NormalizedLeaveRow): number {
 }
 
 export type FetchLeaveListOptions = {
-  /** Filter status; use __all__ for none */
   status?: string;
   employeeId?: number;
-  /** When true, also load legacy admin list and merge (HR attendance) */
+  /** HR admin: merge legacy list only when legacy is not frozen */
   includeLegacyAdmin?: boolean;
+  cutover?: Pick<LeaveCutoverStatus, "legacyFreeze" | "canonicalRead">;
 };
 
 /**
- * Canonical-first read: GET /hr/leave-requests, optional legacy GET /hr/attendance/leaves.
+ * Canonical-first read: GET /hr/leave-requests; optional legacy admin merge.
  */
 export async function fetchLeaveListBridge(
   api: AxiosInstance,
@@ -97,17 +99,21 @@ export async function fetchLeaveListBridge(
   const canonicalQs = params.toString();
   const merged: NormalizedLeaveRow[] = [];
 
-  try {
-    const res = await api.get(
-      `/api/hr/leave-requests${canonicalQs ? `?${canonicalQs}` : ""}`,
-    );
-    const rows = (res.data ?? []) as Record<string, unknown>[];
-    merged.push(...rows.map(normalizeCanonicalLeave));
-  } catch {
-    // canonical unavailable — fall through to legacy only when allowed
+  const readCanonical = options.cutover?.canonicalRead !== false;
+  if (readCanonical) {
+    try {
+      const res = await api.get(
+        `/api/hr/leave-requests${canonicalQs ? `?${canonicalQs}` : ""}`,
+      );
+      const rows = (res.data ?? []) as Record<string, unknown>[];
+      merged.push(...rows.map(normalizeCanonicalLeave));
+    } catch {
+      /* canonical unavailable */
+    }
   }
 
-  if (options.includeLegacyAdmin) {
+  const legacyFrozen = options.cutover?.legacyFreeze ?? false;
+  if (options.includeLegacyAdmin && !legacyFrozen) {
     try {
       const legacyParams = new URLSearchParams();
       if (options.status && options.status !== "__all__") {
@@ -119,13 +125,48 @@ export async function fetchLeaveListBridge(
         `/api/hr/attendance/leaves${legacyParams.toString() ? `?${legacyParams}` : ""}`,
       );
       const legRows = (legRes.data ?? []) as Record<string, unknown>[];
-      merged.push(...legRows.map(normalizeLegacyLeave));
+      const canonicalIds = new Set(merged.map((r) => r.id));
+      for (const row of legRows.map(normalizeLegacyLeave)) {
+        if (!canonicalIds.has(row.id)) merged.push(row);
+      }
     } catch {
-      // legacy admin path requires hr.manage
+      /* legacy admin path requires hr.manage */
     }
   }
 
   return merged.sort(sortByDateDesc);
+}
+
+export type SubmitLeavePayload = {
+  leaveType: string;
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  leavePolicyId?: number | string | null;
+  daysCount?: number;
+};
+
+/** Single write path for self-service leave submit (F5.2). */
+export async function submitLeaveViaBridge(
+  api: AxiosInstance,
+  body: SubmitLeavePayload,
+  cutover: Pick<LeaveCutoverStatus, "canonicalSubmit">,
+): Promise<unknown> {
+  if (cutover.canonicalSubmit) {
+    const policyId = body.leavePolicyId != null && body.leavePolicyId !== "__none__"
+      ? Number(body.leavePolicyId)
+      : undefined;
+    const res = await api.post("/api/hr/leave-requests", {
+      leaveType: body.leaveType,
+      startDate: body.startDate,
+      endDate: body.endDate,
+      employeeNote: body.reason ?? undefined,
+      leavePolicyId: policyId,
+    });
+    return res.data;
+  }
+  const res = await api.post("/api/hr/me/leave-requests", body);
+  return res.data;
 }
 
 /** Employee self-service policies (no hr.view). */
