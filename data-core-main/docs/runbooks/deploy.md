@@ -25,6 +25,7 @@
 | 7 | **JWT_SECRET قوي** (≥32 حرف، ليس القيمة الافتراضية) | `.env` / `openssl rand -hex 64` |
 | 8 | **CORS origins** | Platform Settings → Network → `cors_origins` + `APP_URL` |
 | 9 | GitHub Actions | job `validate` + `database-integrity` ✅ |
+| 10 | جدول اختبارات F9–F10 | [docs/performance/test-schedule.md](../performance/test-schedule.md) |
 
 > **مرجع:** [runtime-integrity-validation.md](../../runtime-integrity-validation.md) — بوابات pre/post deploy  
 > **إعداد أول:** [platform-overview.txt §15](../../platform-overview.txt) — wizard `/setup/database`

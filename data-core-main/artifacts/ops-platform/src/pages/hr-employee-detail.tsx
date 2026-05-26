@@ -97,33 +97,41 @@ function initials(name: string) {
 
 // ── Sub-resource hooks ────────────────────────────────────────────────────────
 
-function useSubResource<T>(url: string, deps: unknown[]) {
+function useSubResource<T>(url: string, deps: unknown[], tabEnabled = true) {
   const [data, setData] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(tabEnabled);
   const apiFetch = useApiFetch();
   const reload = useCallback(() => {
+    if (!tabEnabled) return;
     setLoading(true);
     apiFetch(url)
       .then(r => r.json())
       .then(d => { setData(Array.isArray(d) ? d : []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [url, apiFetch]);
-  useEffect(() => { reload(); }, [reload, ...deps]);
+  }, [url, apiFetch, tabEnabled]);
+  useEffect(() => {
+    if (!tabEnabled) { setLoading(false); return; }
+    reload();
+  }, [reload, tabEnabled, ...deps]);
   return { data, loading, reload };
 }
 
-function useJsonObject<T>(url: string, deps: unknown[]) {
+function useJsonObject<T>(url: string, deps: unknown[], tabEnabled = true) {
   const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(tabEnabled);
   const apiFetch = useApiFetch();
   const reload = useCallback(() => {
+    if (!tabEnabled) return;
     setLoading(true);
     apiFetch(url)
       .then(r => r.json())
       .then(d => { setData(d && typeof d === "object" && !Array.isArray(d) ? d as T : null); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [url, apiFetch]);
-  useEffect(() => { reload(); }, [reload, ...deps]);
+  }, [url, apiFetch, tabEnabled]);
+  useEffect(() => {
+    if (!tabEnabled) { setLoading(false); return; }
+    reload();
+  }, [reload, tabEnabled, ...deps]);
   return { data, loading, reload };
 }
 
@@ -134,8 +142,9 @@ function useCodegenEmployeeList<T>(
     isLoading: boolean;
     refetch: () => void;
   },
+  tabEnabled = true,
 ) {
-  const enabled = Number.isFinite(employeeId) && employeeId > 0;
+  const enabled = tabEnabled && Number.isFinite(employeeId) && employeeId > 0;
   const q = useHook(employeeId, { query: { enabled } });
   return {
     data: q.data ?? [],
@@ -307,6 +316,7 @@ export default function HrEmployeeDetailPage() {
 
   const [editing, setEditing] = useState(false);
   const [edits, setEdits]     = useState<Record<string, any>>({});
+  const [activeTab, setActiveTab] = useState("profile");
 
   const { data: emp, isLoading, refetch } = useGetHrEmployee(
     Number(id),
@@ -340,14 +350,14 @@ export default function HrEmployeeDetailPage() {
 
   // Sub-resources
   const empId = Number(id);
-  const contracts     = useCodegenEmployeeList(empId, useListHrEmployeeContracts);
-  const documents     = useCodegenEmployeeList(empId, useListHrEmployeeDocuments);
-  const posHistory    = useSubResource<any>(`/api/hr/employees/${id}/position-history`,[id]);
-  const notes         = useSubResource<any>(`/api/hr/employees/${id}/notes`,           [id]);
-  const activity      = useSubResource<any>(`/api/hr/employees/${id}/activity`,        [id]);
-  const timeline      = useSubResource<any>(`/api/hr/employees/${id}/timeline`,        [id]);
-  const employeeFile  = useJsonObject<any>(`/api/hr/employees/${id}/file`,            [id]);
-  const customFields  = useSubResource<any>(`/api/hr/employees/${id}/custom-fields`,   [id]);
+  const contracts     = useCodegenEmployeeList(empId, useListHrEmployeeContracts, activeTab === "contracts");
+  const documents     = useCodegenEmployeeList(empId, useListHrEmployeeDocuments, activeTab === "documents");
+  const posHistory    = useSubResource<any>(`/api/hr/employees/${id}/position-history`, [id], activeTab === "movements");
+  const notes         = useSubResource<any>(`/api/hr/employees/${id}/notes`, [id], activeTab === "notes");
+  const activity      = useSubResource<any>(`/api/hr/employees/${id}/activity`, [id], activeTab === "activity");
+  const timeline      = useSubResource<any>(`/api/hr/employees/${id}/timeline`, [id], activeTab === "timeline");
+  const employeeFile  = useJsonObject<any>(`/api/hr/employees/${id}/file`, [id], activeTab === "file");
+  const customFields  = useSubResource<any>(`/api/hr/employees/${id}/custom-fields`, [id], activeTab === "custom");
 
   // ── Loading / not found ───────────────────────────────────────────────────
   if (isLoading) {
@@ -455,7 +465,7 @@ export default function HrEmployeeDetailPage() {
       </div>
 
       {/* Tabs */}
-      <Tabs defaultValue="profile">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex-wrap h-auto gap-1">
           <TabsTrigger value="profile"      className="text-xs"><User      className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الملف الشخصي" : "Profile"}</TabsTrigger>
           <TabsTrigger value="org"          className="text-xs"><Building2 className="w-3.5 h-3.5 mr-1.5" />{isAr ? "الهيكل التنظيمي" : "Org Structure"}</TabsTrigger>

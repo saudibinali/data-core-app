@@ -3,8 +3,17 @@ import { logger } from "./lib/logger";
 import { isDatabaseConfigured } from "@workspace/db";
 import { runInitSequence } from "./lib/init-sequence";
 import { assertProductionSecrets } from "./lib/security-config";
+import { getRuntimeMode, shouldStartHttpServer } from "./lib/runtime-mode";
 
 assertProductionSecrets();
+
+if (!shouldStartHttpServer()) {
+  logger.error(
+    { mode: getRuntimeMode() },
+    "WORKER_MODE=worker — start dist/worker.mjs instead of index.mjs",
+  );
+  process.exit(1);
+}
 
 // PORT - defaults to 8080 so the server starts without manual env setup.
 const port = Number(process.env["PORT"] ?? "8080");

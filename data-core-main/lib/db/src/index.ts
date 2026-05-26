@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./schema";
 import { tryResolveDatabaseUrl } from "./resolve-database-url";
+import { initializeReadDatabase, isReadReplicaConfigured, getReadDb } from "./read-database";
 
 const { Pool } = pg;
 
@@ -78,6 +79,11 @@ if (_bootResolved) {
   initializeDatabase(_bootResolved.url);
 }
 
+const _readUrl = process.env.DATABASE_READ_URL?.trim();
+if (_readUrl) {
+  initializeReadDatabase(_readUrl);
+}
+
 export { resolveDatabaseUrl, tryResolveDatabaseUrl, readPlatformConfigDatabaseUrl, getPlatformConfigPath } from "./resolve-database-url";
 export type { DatabaseUrlSource, ResolvedDatabaseUrl } from "./resolve-database-url";
 
@@ -104,3 +110,20 @@ export async function testDatabaseConnection(connectionString: string): Promise<
 }
 
 export * from "./schema";
+export {
+  initializeReadDatabase,
+  isReadReplicaConfigured,
+  getReadDb,
+  readPool,
+} from "./read-database";
+
+/** F10.3 — Prefer read replica for heavy SELECT paths when configured. */
+export function dbForRead(): DrizzleDb {
+  if (isReadReplicaConfigured()) {
+    return getReadDb();
+  }
+  if (!_db) {
+    throw new Error("Database is not initialized.");
+  }
+  return _db;
+}

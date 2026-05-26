@@ -7,10 +7,12 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
+    "start:worker": "node --enable-source-maps ./dist/worker.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.750.0",
     "@google-cloud/storage": "^7.19.0",
     "@workspace/api-zod": "workspace:*",
     "@workspace/core-events": "workspace:*",
@@ -30,6 +32,7 @@
     "pdf-lib": "^1.17.1",
     "pino": "^9",
     "pino-http": "^10",
+    "redis": "^4.7.0",
     "sharp": "^0.34.3",
     "xlsx": "^0.18.5",
     "zod": "catalog:"

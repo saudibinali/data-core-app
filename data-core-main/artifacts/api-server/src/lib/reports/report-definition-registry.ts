@@ -19,7 +19,7 @@ export const REPORT_DEFINITIONS: ReportDefinition[] = [
     module: "hr",
     supportedFormats: ["xlsx", "csv", "pdf"],
     permission: "hr.manage",
-    asyncThresholdRows: Number(process.env.REPORT_ASYNC_ROW_THRESHOLD ?? 500),
+    asyncThresholdRows: Number(process.env.REPORT_ASYNC_ROW_THRESHOLD ?? 1000),
     defaultExpiryDays: 30,
   },
   {

@@ -18,6 +18,13 @@ services:
       retries: 5
 
   # ── API Server ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["scale"]
+    ports:
+      - "6379:6379"
+
   api:
     build:
       context: ..
@@ -29,6 +36,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8080
+      WORKER_MODE: ${WORKER_MODE:-embedded}
+      REDIS_URL: ${REDIS_URL:-}
+      DATABASE_READ_URL: ${DATABASE_READ_URL:-}
       DATABASE_URL: postgresql://opsuser:${POSTGRES_PASSWORD:-changeme}@postgres:5432/opsplatform
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
@@ -42,6 +52,23 @@ services:
       SMTP_SECURE: ${SMTP_SECURE:-false}
     expose:
       - "8080"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    profiles: ["scale"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "--enable-source-maps", "artifacts/api-server/dist/worker.mjs"]
+    environment:
+      NODE_ENV: production
+      WORKER_MODE: worker
+      DATABASE_URL: postgresql://opsuser:${POSTGRES_PASSWORD:-changeme}@postgres:5432/opsplatform
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
 
   # ── Frontend (Nginx) ────────────────────────────────────────────────────────
   web:

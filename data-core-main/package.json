@@ -17,6 +17,7 @@
     "test:smoke": "node scripts/post-deploy-smoke.cjs",
     "validate:runbooks": "node scripts/validate-runbooks.cjs",
     "validate:openapi-drift": "node scripts/openapi-route-diff.cjs",
+    "load:k6": "k6 run scripts/load/k6-core.js",
     "typecheck:ci": "pnpm run typecheck:libs"
   },
   "private": true,

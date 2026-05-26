@@ -32,6 +32,19 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react") || id.includes("@tanstack")) return "vendor-core";
+            if (id.includes("lucide-react") || id.includes("date-fns")) return "vendor-ui";
+            return "vendor";
+          }
+          if (id.includes("/pages/super-admin")) return "chunk-super-admin";
+          if (id.includes("/pages/hr-")) return "chunk-hr";
+        },
+      },
+    },
   },
   server: {
     port,

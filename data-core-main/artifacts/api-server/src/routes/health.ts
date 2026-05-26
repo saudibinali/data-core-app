@@ -6,6 +6,8 @@ import {
   isMetricsEndpointEnabled,
 } from "../lib/health/prometheus-metrics";
 import { countPendingOutboxRows } from "../lib/events/outbox";
+import { isRedisEnabled, pingRedis } from "../lib/redis/cache";
+import { isReadReplicaConfigured } from "@workspace/db";
 import {
   type AuthRequest,
   requireAuth,
@@ -22,6 +24,22 @@ router.get("/healthz", (_req, res) => {
 });
 
 // F8.2 — Prometheus metrics (super_admin, disable via METRICS_ENABLED=false)
+router.get("/health/redis", requireAuth, requireSuperAdmin, async (_req, res): Promise<void> => {
+  if (!isRedisEnabled()) {
+    res.json({ enabled: false, ok: true, mode: "memory-fallback" });
+    return;
+  }
+  const ping = await pingRedis();
+  res.json({ enabled: true, ...ping });
+});
+
+router.get("/health/read-replica", requireAuth, requireSuperAdmin, async (_req, res): Promise<void> => {
+  res.json({
+    configured: isReadReplicaConfigured(),
+    note: "When DATABASE_READ_URL is set, report/dashboard reads use dbForRead()",
+  });
+});
+
 router.get("/health/metrics", requireAuth, requireSuperAdmin, async (_req, res): Promise<void> => {
   if (!isMetricsEndpointEnabled()) {
     res.status(404).json({ error: "Metrics disabled", code: "METRICS_DISABLED" });

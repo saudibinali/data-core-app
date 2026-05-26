@@ -68,6 +68,7 @@ import {
   bridgeContractAttachments,
 } from "../lib/documents/document-bridge";
 import { reportService } from "../lib/reports/report-service";
+import { parseListPagination } from "../lib/list-pagination";
 import {
   buildOrgTree,
   wouldCreateOrgCycle,
@@ -392,9 +393,8 @@ router.get("/hr/employees", requireAuth, requirePermission("hr.view"), async (re
   const workspaceId = req.workspaceId;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
-  const { search, orgUnitId, employmentType, status, limit: limitQ, offset: offsetQ } = req.query as Record<string, string | undefined>;
-  const limit  = Math.min(parseInt(limitQ  ?? "50"), 200);
-  const offset = parseInt(offsetQ ?? "0");
+  const { search, orgUnitId, employmentType, status } = req.query as Record<string, string | undefined>;
+  const { limit, offset } = parseListPagination(req.query as Record<string, unknown>);
 
   const conditions = [eq(employeesTable.workspaceId, workspaceId)];
   if (orgUnitId)      conditions.push(eq(employeesTable.orgUnitId, parseInt(orgUnitId)));

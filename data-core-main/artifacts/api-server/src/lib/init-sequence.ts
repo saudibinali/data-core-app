@@ -15,12 +15,8 @@ import { bootstrapDevAdmin } from "../seed/bootstrap";
 import { workflowEngine } from "./workflows";
 import { governanceScheduler } from "./workflows/governance-scheduler";
 import { seedNotificationTemplates } from "./notifications/seed-templates";
-import { startNotificationQueueProcessor } from "./notifications/queue-processor";
-import { startExportJobProcessor } from "./reports/export-job-processor";
-import { startScheduledReportScheduler } from "./reports/scheduled-report-scheduler";
-import { seedAllWorkspaceAttendanceSources } from "./workforce-attendance/source-seed";
-import { attendancePolicyService } from "./workforce-attendance/attendance-policy-service";
-import { startAttendanceSyncWorker } from "./workforce-integration/sync-worker";
+import { startBackgroundWorkers } from "./background-workers";
+import { shouldStartBackgroundWorkers } from "./runtime-mode";
 import { runOrgRuntimeStartupChecks } from "./workforce/org/org-runtime-startup";
 import { runApprovalRuntimeStartupChecks } from "./approval/approval-startup";
 import { runWorkforceOpsStartupChecks } from "./workforce/operations/workforce-ops-startup";
@@ -137,74 +133,10 @@ export async function runInitSequence(): Promise<void> {
     logger.error({ err }, "Failed to bootstrap dev admin");
   }
 
-  // 5. P19-B: DB-backed notification job processor (no Redis)
-  try {
-    startNotificationQueueProcessor();
-  } catch (err) {
-    logger.warn({ err }, "Notification queue processor failed to start");
-  }
-
-  // 6. P19-D: DB-backed export job processor (no Redis)
-  try {
-    startExportJobProcessor();
-  } catch (err) {
-    logger.warn({ err }, "Export job processor failed to start");
-  }
-
-  // 7. P19-E: Scheduled report scheduler (no Redis)
-  try {
-    startScheduledReportScheduler();
-  } catch (err) {
-    logger.warn({ err }, "Scheduled report scheduler failed to start");
-  }
-
-  // F2.7: Weekly platform access review (stale permissions report)
-  try {
-    const { startPlatformAccessReviewScheduler } = await import("./platform-access-review-scheduler");
-    startPlatformAccessReviewScheduler();
-  } catch (err) {
-    logger.warn({ err }, "Platform access review scheduler failed to start");
-  }
-
-  // 8. P20-B: Default attendance sources per workspace
-  try {
-    await seedAllWorkspaceAttendanceSources();
-  } catch (err) {
-    logger.warn({ err }, "Attendance source seed failed");
-  }
-
-  // 9. P20-D: Default attendance policies per workspace
-  try {
-    const { db, workspacesTable } = await import("@workspace/db");
-    const workspaces = await db.select({ id: workspacesTable.id }).from(workspacesTable);
-    for (const ws of workspaces) {
-      await attendancePolicyService.ensureDefaultPolicy(ws.id);
-    }
-  } catch (err) {
-    logger.warn({ err }, "Attendance policy seed failed");
-  }
-
-  // 10. P20-E: DB-backed attendance integration sync worker (no Redis)
-  try {
-    startAttendanceSyncWorker();
-  } catch (err) {
-    logger.warn({ err }, "Attendance sync worker failed to start");
-  }
-
-  // 10b. F7.2: transactional event outbox drain (optional)
-  try {
-    const { startEventOutboxWorker } = await import("./events/outbox-worker");
-    startEventOutboxWorker();
-  } catch (err) {
-    logger.warn({ err }, "Event outbox worker failed to start");
-  }
-
-  // 11. P21-B: Default payroll policies per workspace
-  try {
-    const { payrollPolicyService } = await import("./payroll/payroll-policy-service");
-    const count = await payrollPolicyService.seedAllWorkspaces();
-    logger.info({ count }, "Payroll policy defaults seeded");
-  } catch (err) {
-    logger.warn({ err }, "Payroll policy seed failed");
+  // 5–11. Background workers (F10.2: skip when WORKER_MODE=api — use separate worker process)
+  if (shouldStartBackgroundWorkers()) {
+    await startBackgroundWorkers();
+  } else {
+    logger.info("Background workers disabled in API-only mode (WORKER_MODE=api)");
   }
 }

@@ -9,6 +9,7 @@ import {
 } from "@workspace/api-zod";
 import { type AuthRequest, requireAuth, requirePermission } from "../middlewares/requireAuth";
 import { appEventBus, EVENT_TYPES } from "../lib/events";
+import { parseListPagination } from "../lib/list-pagination";
 
 const router: IRouter = Router();
 
@@ -45,6 +46,8 @@ router.get("/tickets", requireAuth, requirePermission("tickets.view"), async (re
   if (filters.assigneeId) conditions.push(eq(ticketsTable.assigneeUserId, filters.assigneeId));
   if (filters.search) conditions.push(ilike(ticketsTable.title, `%${filters.search}%`));
 
+  const { limit, offset } = parseListPagination(req.query as Record<string, unknown>);
+
   const tickets = await db
     .select(ticketBase)
     .from(ticketsTable)
@@ -52,8 +55,13 @@ router.get("/tickets", requireAuth, requirePermission("tickets.view"), async (re
     .leftJoin(sql`users creator`, sql`creator.id = ${ticketsTable.createdByUserId}`)
     .leftJoin(sql`users assignee`, sql`assignee.id = ${ticketsTable.assigneeUserId}`)
     .where(and(...conditions))
-    .orderBy(desc(ticketsTable.createdAt));
+    .orderBy(desc(ticketsTable.createdAt))
+    .limit(limit)
+    .offset(offset);
 
+  res.setHeader("X-Total-Count", String(tickets.length));
+  res.setHeader("X-Limit", String(limit));
+  res.setHeader("X-Offset", String(offset));
   res.json(tickets);
 });
 

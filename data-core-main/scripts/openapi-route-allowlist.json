@@ -25,6 +25,8 @@
     "GET /health/workforce/metrics",
     "GET /health/workforce/schema",
     "GET /health/metrics",
+    "GET /health/redis",
+    "GET /health/read-replica",
     "GET /hr/approval-templates",
     "GET /hr/approval-templates/{code}",
     "GET /hr/attendance",
