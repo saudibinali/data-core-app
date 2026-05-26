@@ -11,6 +11,7 @@
 | Schema consistency | Drizzle schema vs DB introspection |
 | Workforce graph | validate-workforce-integrity.cjs (full + F6 cutover) |
 | Payroll canonical | validate-payroll-integrity.cjs (F6.4) |
+| Prometheus metrics | GET /api/health/metrics (F8.2, super_admin) |
 | Position occupancy | occupancy = count(employees) |
 | Approval consistency | no pending without approver |
 | Leave balances | sum matches policy accrual rules |

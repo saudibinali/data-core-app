@@ -101,6 +101,15 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
   await setWorkspaceRlsSessionContext(req);
   recordPlatformTenantAccessIfNeeded(req);
 
+  const reqWithLog = req as AuthRequest & { log?: { child: (bindings: Record<string, unknown>) => unknown } };
+  if (reqWithLog.log && typeof reqWithLog.log.child === "function") {
+    reqWithLog.log = reqWithLog.log.child({
+      workspaceId: user.workspaceId ?? null,
+      userId: user.id,
+      userRole: user.role,
+    }) as typeof reqWithLog.log;
+  }
+
   next();
 };
 

@@ -5,4 +5,5 @@ export * from "./delegation-resolver";
 export * from "./routing-resolver";
 export * from "./runtime-service";
 export * from "./process-templates";
+export * from "./policy-admin-service";
 export * from "./approval-startup";

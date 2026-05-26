@@ -2,6 +2,11 @@ import { Router, type IRouter } from "express";
 import { HealthCheckResponse } from "@workspace/api-zod";
 import { getConnectionCount } from "../lib/sse";
 import {
+  formatPrometheusMetrics,
+  isMetricsEndpointEnabled,
+} from "../lib/health/prometheus-metrics";
+import { countPendingOutboxRows } from "../lib/events/outbox";
+import {
   type AuthRequest,
   requireAuth,
   requireSuperAdmin,
@@ -14,6 +19,17 @@ const router: IRouter = Router();
 router.get("/healthz", (_req, res) => {
   const data = HealthCheckResponse.parse({ status: "ok" });
   res.json(data);
+});
+
+// F8.2 — Prometheus metrics (super_admin, disable via METRICS_ENABLED=false)
+router.get("/health/metrics", requireAuth, requireSuperAdmin, async (_req, res): Promise<void> => {
+  if (!isMetricsEndpointEnabled()) {
+    res.status(404).json({ error: "Metrics disabled", code: "METRICS_DISABLED" });
+    return;
+  }
+  const pendingOutbox = await countPendingOutboxRows();
+  res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+  res.send(formatPrometheusMetrics({ event_outbox_pending: pendingOutbox }));
 });
 
 // ── GET /health/sse-connections ───────────────────────────────────────────────

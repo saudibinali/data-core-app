@@ -60,7 +60,7 @@ export default function WorkflowsPage() {
     mutation: {
       onSuccess: () => {
         void refetch();
-        toast({ title: "Workflow updated" });
+        toast({ title: t("workflow_updated_toast", { defaultValue: isAr ? "تم تحديث سير العمل" : "Workflow updated" }) });
       },
     },
   });
@@ -70,7 +70,7 @@ export default function WorkflowsPage() {
       onSuccess: () => {
         setDeleteId(null);
         void refetch();
-        toast({ title: "Workflow deleted" });
+        toast({ title: t("workflow_deleted_toast", { defaultValue: isAr ? "تم حذف سير العمل" : "Workflow deleted" }) });
       },
     },
   });

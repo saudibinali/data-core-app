@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Link } from "wouter";
 import { Plus, Trash2, GitBranch, ClipboardCheck, Zap, ArrowDown } from "lucide-react";
 import type { FormWorkflowPlan, FormWorkflowStepPlan, WorkflowApproverType } from "@/lib/form-smart-types";
 
@@ -96,6 +97,10 @@ export default function FormWorkflowBuilder({ value, onChange, isAr, formName, a
             {isAr ? "تفعيل مسار الموافقة" : "Enable approval workflow"}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
+            <Link href="/process-templates" className="text-primary hover:underline">
+              {isAr ? "قوالب العمليات المعتمدة" : "Org process templates"}
+            </Link>
+            {" · "}
             {isAr
               ? "يُنشأ سير عمل تلقائي (مسودة) — فعّله لاحقاً من صفحة سير العمل."
               : "A draft workflow is auto-created — activate it later from the Workflows page."}

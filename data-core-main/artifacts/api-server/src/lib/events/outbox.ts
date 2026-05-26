@@ -98,6 +98,19 @@ export async function drainOneOutboxRow(row: EventOutboxRow): Promise<void> {
   await appEventBus.emit(payload);
 }
 
+export async function countPendingOutboxRows(): Promise<number> {
+  try {
+    const rows = await db
+      .select({ id: eventOutboxTable.id })
+      .from(eventOutboxTable)
+      .where(inArray(eventOutboxTable.status, ["pending", "retry"]))
+      .limit(5000);
+    return rows.length;
+  } catch {
+    return 0;
+  }
+}
+
 export async function processEventOutboxBatch(limit = 25): Promise<number> {
   if (!shouldDrainEventOutbox()) return 0;
 

@@ -21,6 +21,7 @@ app.use(
 app.use(
   pinoHttp({
     logger,
+    genReqId: (req) => req.headers["x-request-id"]?.toString() ?? crypto.randomUUID(),
     serializers: {
       req(req) {
         return { id: req.id, method: req.method, url: req.url?.split("?")[0] };

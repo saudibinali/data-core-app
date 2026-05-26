@@ -105,11 +105,23 @@ export default function ApprovalInboxPage() {
                   href={
                     item.entityType === "leave_request"
                       ? "/admin/hr/leave"
-                      : `/workflows`
+                      : item.entityType === "form_submission"
+                        ? `/forms`
+                        : item.entityType === "ticket"
+                          ? `/tickets/${item.entityId}`
+                          : "/workflows"
                   }
                   className="text-xs text-primary hover:underline mt-1 inline-block"
                 >
                   {isAr ? "عرض السياق" : "View context"}
+                </Link>
+              )}
+              {typeof item.context?.employeeId === "number" && (
+                <Link
+                  href={`/hr/employees/${item.context.employeeId}`}
+                  className="text-xs text-muted-foreground hover:underline block"
+                >
+                  {isAr ? "ملف الموظف" : "Employee record"}
                 </Link>
               )}
             </div>

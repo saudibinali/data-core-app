@@ -2,6 +2,7 @@ import { db } from "@workspace/db";
 import {
   approvalInstancesTable,
   approvalStepsTable,
+  approvalProcessPoliciesTable,
   notificationsTable,
 } from "@workspace/db";
 import { and, eq, asc, desc, sql, inArray } from "drizzle-orm";
@@ -334,9 +335,30 @@ export async function getApprovalInbox(
     .orderBy(asc(approvalStepsTable.dueAt))
     .limit(limit);
 
+  const policyNames = new Map<string, string>();
+  const codes = [...new Set(rows.map((r) => r.processCode))];
+  if (codes.length > 0) {
+    const policies = await db
+      .select({
+        code: approvalProcessPoliciesTable.code,
+        name: approvalProcessPoliciesTable.name,
+        nameAr: approvalProcessPoliciesTable.nameAr,
+      })
+      .from(approvalProcessPoliciesTable)
+      .where(
+        and(
+          eq(approvalProcessPoliciesTable.workspaceId, workspaceId),
+        ),
+      );
+    for (const p of policies) {
+      policyNames.set(p.code, p.name);
+    }
+  }
+
   return rows.map((r) => {
     const dueMs = r.dueAt ? new Date(r.dueAt).getTime() : null;
     const slaWarning = dueMs != null && dueMs - now < 6 * 60 * 60 * 1000;
+    const displayName = policyNames.get(r.processCode) ?? r.processCode.replace(/\./g, " / ");
     return {
       instanceId: r.instanceId,
       stepId: r.stepId,
@@ -344,7 +366,7 @@ export async function getApprovalInbox(
       entityType: r.entityType,
       entityId: r.entityId,
       processCode: r.processCode,
-      processName: r.processCode.replace(/\./g, " / "),
+      processName: displayName,
       status: r.instanceStatus,
       stepStatus: r.stepStatus,
       dueAt: r.dueAt?.toISOString() ?? null,

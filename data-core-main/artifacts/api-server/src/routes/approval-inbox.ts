@@ -19,8 +19,10 @@ import {
   decideApprovalStep,
   handleApprovalRouteError,
   BUSINESS_PROCESS_TEMPLATES,
-  describeRoutingType,
   getProcessPolicy,
+  updateApprovalProcessPolicy,
+  enrichPolicyRow,
+  validateApprovalPolicyPatch,
 } from "../lib/approval";
 
 const router: IRouter = Router();
@@ -140,18 +142,22 @@ router.get("/hr/approval-templates", requireAuth, requirePermission("hr.view"), 
   if (!workspaceId) { res.json([]); return; }
 
   try {
+    const includeInactive = req.query.includeInactive === "true" || req.query.includeInactive === "1";
     const policies = await db
       .select()
       .from(approvalProcessPoliciesTable)
-      .where(and(eq(approvalProcessPoliciesTable.workspaceId, workspaceId), eq(approvalProcessPoliciesTable.isActive, true)))
+      .where(
+        includeInactive
+          ? eq(approvalProcessPoliciesTable.workspaceId, workspaceId)
+          : and(eq(approvalProcessPoliciesTable.workspaceId, workspaceId), eq(approvalProcessPoliciesTable.isActive, true)),
+      )
       .orderBy(approvalProcessPoliciesTable.displayOrder);
 
     const isAr = req.headers["accept-language"]?.toString().startsWith("ar");
     const merged = policies.map((p) => {
       const template = BUSINESS_PROCESS_TEMPLATES.find((t) => t.code === p.code);
       return {
-        ...p,
-        routingLabel: describeRoutingType(p.routingType, isAr),
+        ...enrichPolicyRow(p, isAr),
         description: template?.description ?? null,
         descriptionAr: template?.descriptionAr ?? null,
       };
@@ -159,6 +165,84 @@ router.get("/hr/approval-templates", requireAuth, requirePermission("hr.view"), 
     res.json(merged);
   } catch (e) {
     if (handleApprovalRouteError(res, e, { route: "GET /hr/approval-templates" })) return;
+    throw e;
+  }
+});
+
+router.get("/hr/approval-templates/:code", requireAuth, requirePermission("hr.view"), async (req: AuthRequest, res): Promise<void> => {
+  const workspaceId = req.workspaceId;
+  const code = String(req.params.code ?? "").trim();
+  if (!workspaceId || !code) { res.status(400).json({ error: "Invalid" }); return; }
+
+  try {
+    const policy = await getProcessPolicy(workspaceId, code);
+    const [row] = policy
+      ? [policy]
+      : await db
+          .select()
+          .from(approvalProcessPoliciesTable)
+          .where(
+            and(
+              eq(approvalProcessPoliciesTable.workspaceId, workspaceId),
+              eq(approvalProcessPoliciesTable.code, code),
+            ),
+          )
+          .limit(1);
+
+    if (!row) { res.status(404).json({ error: "Not found" }); return; }
+
+    const isAr = req.headers["accept-language"]?.toString().startsWith("ar");
+    const template = BUSINESS_PROCESS_TEMPLATES.find((t) => t.code === row.code);
+    res.json({
+      ...enrichPolicyRow(row, isAr),
+      description: template?.description ?? null,
+      descriptionAr: template?.descriptionAr ?? null,
+    });
+  } catch (e) {
+    if (handleApprovalRouteError(res, e, { route: "GET /hr/approval-templates/:code" })) return;
+    throw e;
+  }
+});
+
+router.patch("/hr/approval-templates/:code", requireAuth, requireWorkspaceAdmin, async (req: AuthRequest, res): Promise<void> => {
+  const workspaceId = req.workspaceId;
+  const userId = req.userId;
+  const code = String(req.params.code ?? "").trim();
+  if (!workspaceId || !userId || !code) { res.status(400).json({ error: "Invalid" }); return; }
+
+  const body = req.body ?? {};
+  const patch = {
+    name: body.name,
+    nameAr: body.nameAr,
+    routingType: body.routingType,
+    chainDepth: body.chainDepth,
+    timeoutHours: body.timeoutHours,
+    onTimeout: body.onTimeout,
+    isActive: body.isActive,
+    displayOrder: body.displayOrder,
+  };
+
+  const validationError = validateApprovalPolicyPatch(patch);
+  if (validationError) {
+    res.status(400).json({ error: validationError, code: "INVALID_POLICY_PATCH" });
+    return;
+  }
+
+  try {
+    const result = await updateApprovalProcessPolicy(workspaceId, code, patch, userId);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error, code: result.code });
+      return;
+    }
+    const isAr = req.headers["accept-language"]?.toString().startsWith("ar");
+    const template = BUSINESS_PROCESS_TEMPLATES.find((t) => t.code === result.policy.code);
+    res.json({
+      ...enrichPolicyRow(result.policy, isAr),
+      description: template?.description ?? null,
+      descriptionAr: template?.descriptionAr ?? null,
+    });
+  } catch (e) {
+    if (handleApprovalRouteError(res, e, { route: "PATCH /hr/approval-templates/:code" })) return;
     throw e;
   }
 });
