@@ -91,6 +91,8 @@ import {
 import { toast } from "sonner";
 import { toCode } from "@/lib/hr-utils";
 import { downloadWithAuth } from "@workspace/api-client-react";
+import * as XLSX from "xlsx";
+import { FoundationMergePanel } from "@/components/hr/foundation-merge-panel";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -586,6 +588,109 @@ export default function HrFoundationPage() {
     }
   }
 
+  // ── H4: Foundation import (3 categories first) ─────────────────────────────
+  const [foundationImportOpen, setFoundationImportOpen] = useState(false);
+  const [foundationCategory, setFoundationCategory] = useState<
+    "job-grades"
+    | "job-titles"
+    | "org-units"
+    | "work-locations"
+    | "employment-types"
+    | "employee-statuses"
+    | "contract-types"
+    | "document-types"
+    | "leave-policies"
+    | "probation-policies"
+    | "positions"
+  >("job-grades");
+  const [foundationPreview, setFoundationPreview] = useState<any>(null);
+  const [foundationPreviewFileName, setFoundationPreviewFileName] = useState<string | null>(null);
+  const [foundationCommitBusy, setFoundationCommitBusy] = useState(false);
+
+  async function downloadFoundationTemplate() {
+    try {
+      await downloadWithAuth(
+        `${BASE}/api/hr/foundation/import/${foundationCategory}/template`,
+        `${foundationCategory}_template.xlsx`,
+      );
+      toast.success(isAr ? "تم تحميل القالب" : "Template downloaded");
+    } catch {
+      toast.error(isAr ? "فشل تحميل القالب" : "Failed to download template");
+    }
+  }
+
+  function cellToString(val: unknown): string {
+    if (val == null || val === "") return "";
+    return String(val).trim();
+  }
+
+  async function parseFoundationFile(file: File) {
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buf), { type: "array", cellDates: true });
+      const sheetName = wb.SheetNames.find((n) => n === "Template") ?? wb.SheetNames[0]!;
+      const ws = wb.Sheets[sheetName]!;
+      const raw = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, raw: false, dateNF: "yyyy-mm-dd" });
+      if (raw.length < 2) throw new Error("empty file");
+      const headers = (raw[0] as string[]).map((h) => cellToString(h));
+      const dataRows = raw.slice(1) as unknown[][];
+      const rows = dataRows
+        .filter((r) => r.some((c) => cellToString(c) !== ""))
+        .map((r) => {
+          const obj: Record<string, string> = {};
+          headers.forEach((h, i) => { if (h) obj[h] = cellToString(r[i]); });
+          return obj;
+        });
+      if (!rows.length) throw new Error("no rows");
+      return rows;
+    } catch {
+      throw new Error(isAr ? "تعذّر قراءة الملف — استخدم قالب المنصة" : "Could not read file — use platform template");
+    }
+  }
+
+  async function previewFoundationImport(file: File) {
+    try {
+      const rows = await parseFoundationFile(file);
+      const r = await apiFetch(`/api/hr/foundation/import/${foundationCategory}/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      if (!r.ok) throw new Error("preview failed");
+      const data = await r.json();
+      setFoundationPreview(data);
+      setFoundationPreviewFileName(file.name);
+      setFoundationImportOpen(true);
+    } catch (e) {
+      toast.error(isAr ? "فشل المعاينة" : "Preview failed", { description: e instanceof Error ? e.message : undefined } as any);
+    }
+  }
+
+  async function commitFoundationImport() {
+    if (!foundationPreview?.rows) return;
+    setFoundationCommitBusy(true);
+    try {
+      const r = await apiFetch(`/api/hr/foundation/import/${foundationCategory}/commit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: foundationPreview.rows }),
+      });
+      if (!r.ok) throw new Error("commit failed");
+      const data = await r.json();
+      toast.success(isAr ? "تم استيراد البيانات بنجاح" : "Imported successfully", {
+        description: isAr ? `إنشاء: ${data.created} — تحديث: ${data.updated} — مرفوض: ${data.rejected}` : `Created: ${data.created} — Updated: ${data.updated} — Rejected: ${data.rejected}`,
+      } as any);
+      setFoundationImportOpen(false);
+      setFoundationPreview(null);
+      setFoundationPreviewFileName(null);
+      await refetchAll();
+    } catch {
+      toast.error(isAr ? "فشل تنفيذ الاستيراد" : "Commit failed");
+    } finally {
+      setFoundationCommitBusy(false);
+    }
+  }
+
   // ── Tab definitions ────────────────────────────────────────────────────────
   const tabs = [
     { id: "statuses",         labelEn: "Statuses",        labelAr: "الحالات",          Icon: UserCheck  },
@@ -634,7 +739,8 @@ export default function HrFoundationPage() {
             {t("hr_foundation_import_desc")}
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap gap-2">
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={downloadEmployeeTemplate}>
             <FileSpreadsheet className="w-4 h-4 me-2 text-green-600" />
             {t("hr_foundation_template")}
@@ -647,8 +753,147 @@ export default function HrFoundationPage() {
             <RefreshCw className="w-4 h-4 me-2" />
             {t("hr_foundation_refresh")}
           </Button>
+          </div>
+
+          <div className="rounded-md border p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-sm">
+                <div className="font-medium">{isAr ? "استيراد بيانات Foundation" : "Import Foundation data"}</div>
+                <div className="text-xs text-muted-foreground">
+                  {isAr ? "ابدأ بالدرجات والمسميات والوحدات التنظيمية لمنع التكرار" : "Start with grades, titles, and org units to prevent duplication"}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Select value={foundationCategory} onValueChange={(v) => setFoundationCategory(v as any)}>
+                  <SelectTrigger className="w-[220px] h-8">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="job-grades">{isAr ? "الدرجات الوظيفية" : "Job grades"}</SelectItem>
+                    <SelectItem value="job-titles">{isAr ? "المسميات الوظيفية" : "Job titles"}</SelectItem>
+                    <SelectItem value="org-units">{isAr ? "الوحدات التنظيمية" : "Org units"}</SelectItem>
+                    <SelectItem value="work-locations">{isAr ? "مواقع العمل" : "Work locations"}</SelectItem>
+                    <SelectItem value="employment-types">{isAr ? "أنواع التوظيف" : "Employment types"}</SelectItem>
+                    <SelectItem value="employee-statuses">{isAr ? "حالات الموظفين" : "Employee statuses"}</SelectItem>
+                    <SelectItem value="contract-types">{isAr ? "أنواع العقود" : "Contract types"}</SelectItem>
+                    <SelectItem value="document-types">{isAr ? "أنواع المستندات" : "Document types"}</SelectItem>
+                    <SelectItem value="leave-policies">{isAr ? "سياسات الإجازات" : "Leave policies"}</SelectItem>
+                    <SelectItem value="probation-policies">{isAr ? "فترة الاختبار" : "Probation policies"}</SelectItem>
+                    <SelectItem value="positions">{isAr ? "المناصب" : "Positions"}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button variant="outline" size="sm" onClick={downloadFoundationTemplate}>
+                  <Download className="w-4 h-4 me-2" />
+                  {isAr ? "تحميل قالب" : "Download template"}
+                </Button>
+                <label className="inline-flex">
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void previewFoundationImport(f);
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                  <Button variant="default" size="sm" type="button">
+                    <Upload className="w-4 h-4 me-2" />
+                    {isAr ? "رفع ومعاينة" : "Upload & preview"}
+                  </Button>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          {isAdmin && (
+            <FoundationMergePanel
+              isAr={isAr}
+              isAdmin={isAdmin}
+              apiFetch={apiFetch}
+              onMerged={refetchAll}
+              lists={{
+                jobGrades: jobGrades as { id: number; code?: string; name?: string; isActive?: boolean }[],
+                jobTitles: jobTitles as { id: number; code?: string; name?: string; isActive?: boolean }[],
+                orgUnits: orgUnits as { id: number; code?: string; name?: string; isActive?: boolean }[],
+                workLocations: workLocations as { id: number; code?: string; name?: string; isActive?: boolean }[],
+                positions: positions as { id: number; code?: string; title?: string; isActive?: boolean }[],
+              }}
+            />
+          )}
         </CardContent>
       </Card>
+
+      <Dialog open={foundationImportOpen} onOpenChange={(v) => { if (!v) setFoundationImportOpen(false); }}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="w-4 h-4" />
+              {isAr ? "معاينة استيراد Foundation" : "Foundation import preview"}
+            </DialogTitle>
+            <DialogDescription>
+              {foundationPreviewFileName ? (isAr ? `الملف: ${foundationPreviewFileName}` : `File: ${foundationPreviewFileName}`) : ""}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto space-y-3">
+            <div className="grid grid-cols-4 gap-3">
+              {[
+                { label: isAr ? "إجمالي" : "Total", value: foundationPreview?.summary?.total ?? 0, cls: "text-foreground" },
+                { label: isAr ? "إنشاء" : "Create", value: foundationPreview?.summary?.create ?? 0, cls: "text-emerald-600" },
+                { label: isAr ? "تحديث" : "Update", value: foundationPreview?.summary?.update ?? 0, cls: "text-blue-600" },
+                { label: isAr ? "مرفوض" : "Reject", value: foundationPreview?.summary?.reject ?? 0, cls: "text-red-600" },
+              ].map((s) => (
+                <div key={s.label} className="rounded-md border p-3 text-center">
+                  <p className={`text-xl font-bold ${s.cls}`}>{s.value}</p>
+                  <p className="text-xs text-muted-foreground">{s.label}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="border rounded-md overflow-auto max-h-80">
+              <table className="w-full text-xs">
+                <thead className="bg-muted/50 sticky top-0">
+                  <tr>
+                    <th className="p-2 text-left">#</th>
+                    <th className="p-2 text-left">{isAr ? "الإجراء" : "Action"}</th>
+                    <th className="p-2 text-left">{isAr ? "الكود" : "Code"}</th>
+                    <th className="p-2 text-left">{isAr ? "الاسم" : "Name"}</th>
+                    <th className="p-2 text-left">{isAr ? "ملاحظات" : "Notes"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(foundationPreview?.rows ?? []).slice(0, 200).map((r: any) => (
+                    <tr key={r.rowIndex} className="border-t">
+                      <td className="p-2 text-muted-foreground">{r.rowIndex}</td>
+                      <td className="p-2">
+                        <Badge variant={r.action === "reject" ? "destructive" : r.action === "update" ? "secondary" : "default"}>
+                          {r.action}
+                        </Badge>
+                      </td>
+                      <td className="p-2 font-mono">{r.code}</td>
+                      <td className="p-2 font-medium">{r.name}</td>
+                      <td className="p-2">
+                        {(r.errors ?? []).map((e: string, i: number) => <div key={i} className="text-red-600">{e}</div>)}
+                        {(r.warnings ?? []).map((w: string, i: number) => <div key={i} className="text-amber-600">{w}</div>)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setFoundationImportOpen(false)} disabled={foundationCommitBusy}>
+              {isAr ? "إغلاق" : "Close"}
+            </Button>
+            <Button onClick={commitFoundationImport} disabled={foundationCommitBusy || (foundationPreview?.summary?.reject ?? 0) > 0}>
+              {foundationCommitBusy ? (isAr ? "جاري التنفيذ..." : "Committing...") : (isAr ? "تنفيذ الاستيراد" : "Commit import")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Tabs ──────────────────────────────────────────────────────────── */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>

@@ -71,6 +71,7 @@ import AdminFormsNewPage from "@/pages/admin-forms-new";
 import AdminFormsDetailPage from "@/pages/admin-forms-detail";
 import HrDashboardPage from "@/pages/hr-dashboard";
 import HrEmployeesPage from "@/pages/hr-employees";
+import HrImportStagingPage from "@/pages/hr-import-staging";
 import HrEmployeeNewPage from "@/pages/hr-employee-new";
 import HrEmployeeDetailPage from "@/pages/hr-employee-detail";
 import HrServicesPage from "@/pages/hr-services";
@@ -656,6 +657,7 @@ function AppRoutes() {
         <Route path="/hr">{() => <ProtectedRoute component={HrDashboardPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/hr/reports">{() => <ProtectedRoute component={ReportCenterPage} requiredPermission="hr.manage" moduleKey="report-center" />}</Route>
         <Route path="/hr/employees">{() => <ProtectedRoute component={HrEmployeesPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
+        <Route path="/hr/employees/import-staging">{() => <ProtectedRoute component={HrImportStagingPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/hr/employees/new">{() => <ProtectedRoute component={HrEmployeeNewPage} requiredRoles={["admin", "manager"]} moduleKey="hr" />}</Route>
         <Route path="/hr/employees/:id">{() => <ProtectedRoute component={HrEmployeeDetailPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>
         <Route path="/hr/services">{() => <ProtectedRoute component={HrServicesPage} requiredPermission="hr.manage" moduleKey="hr" />}</Route>

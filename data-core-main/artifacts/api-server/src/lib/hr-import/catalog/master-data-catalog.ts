@@ -17,6 +17,7 @@ import {
   hrProbationPoliciesTable,
   hrMasterDataRegistryTable,
   hrCustomFieldDefsTable,
+  hrMasterDataAliasesTable,
 } from "@workspace/db";
 import { and, asc, eq } from "drizzle-orm";
 import { normalizeName, normalizeRuntimeKey } from "../normalization";
@@ -164,6 +165,7 @@ export class MasterDataCatalogService {
       probationPolicies,
       registry,
       customFields,
+      aliases,
     ] = await Promise.all([
       db.select().from(hrOrgUnitsTable).where(eq(hrOrgUnitsTable.workspaceId, workspaceId)).orderBy(asc(hrOrgUnitsTable.name)),
       db.select().from(hrJobTitlesTable).where(eq(hrJobTitlesTable.workspaceId, workspaceId)).orderBy(asc(hrJobTitlesTable.name)),
@@ -182,6 +184,10 @@ export class MasterDataCatalogService {
         .from(hrCustomFieldDefsTable)
         .where(and(eq(hrCustomFieldDefsTable.workspaceId, workspaceId), eq(hrCustomFieldDefsTable.isActive, true)))
         .orderBy(asc(hrCustomFieldDefsTable.displayOrder)),
+      db
+        .select()
+        .from(hrMasterDataAliasesTable)
+        .where(eq(hrMasterDataAliasesTable.workspaceId, workspaceId)),
     ]);
 
     const customFieldDropdowns = customFields
@@ -214,6 +220,17 @@ export class MasterDataCatalogService {
     const indexes: MasterDataCatalogSnapshot["indexes"] = {};
     for (const [key, list] of Object.entries(entities) as [CatalogEntityType, CatalogEntry[]][]) {
       if (list?.length) indexes[key] = buildIndexes(list);
+    }
+
+    // Apply alias codes into indexes.byAlias (code->id) without changing entity tables.
+    for (const a of aliases) {
+      const entityType = a.entityType as CatalogEntityType;
+      const idx = indexes[entityType];
+      if (!idx) continue;
+      const canonicalId = idx.byCode[normalizeRuntimeKey(a.canonicalCode)] ?? idx.byCode[a.canonicalCode];
+      if (!canonicalId) continue;
+      idx.byAlias[normalizeRuntimeKey(a.aliasCode)] = canonicalId;
+      idx.byAlias[normalizeName(a.aliasCode)] = canonicalId;
     }
 
     const snapshot: MasterDataCatalogSnapshot = {

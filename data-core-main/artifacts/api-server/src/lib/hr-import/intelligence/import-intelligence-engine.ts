@@ -14,6 +14,7 @@ import {
 import { resolveImportEnum, defaultEnumValue, type EnumField } from "./enum-normalizer";
 import type { CatalogEntityType } from "../catalog/master-data-catalog";
 import { incrementRuntimeMetric } from "../../workforce/stabilization/observability-metrics";
+import { getEmployeeImportGovernanceSettings } from "../../hr-foundation/employee-import-governance";
 
 export type PreviewRow = {
   rowIndex: number;
@@ -22,6 +23,8 @@ export type PreviewRow = {
   errors: string[];
   warnings: string[];
   data: Record<string, unknown>;
+  staged?: boolean;
+  mismatchFields?: Array<Record<string, unknown>>;
 };
 
 export type ImportIntelligenceBuckets = {
@@ -41,16 +44,20 @@ const LOOKUP_FIELDS: Array<{ entityType: CatalogEntityType; rawKeys: string[]; n
   { entityType: "work_location", rawKeys: ["work_location"], nameKey: "workLocationName", idKey: "workLocationId" },
 ];
 
-/** Safe auto-create when enterprise runtime is not formally activated. */
+/** H1 — disabled by default; match-only import never auto-creates Foundation entities. */
 export const IMPORT_INTELLIGENCE_POLICIES: Record<string, EnterprisePolicyProfile> = {
-  job_title: { autoCreateMode: "controlled", approvalRequired: false, reconciliationMode: "suggest" },
-  job_grade: { autoCreateMode: "controlled", approvalRequired: false, reconciliationMode: "suggest" },
-  work_location: { autoCreateMode: "controlled", approvalRequired: false, reconciliationMode: "suggest" },
-  org_unit: { autoCreateMode: "controlled", approvalRequired: true, reconciliationMode: "suggest" },
-  position: { autoCreateMode: "controlled", approvalRequired: true, reconciliationMode: "suggest" },
+  job_title: { autoCreateMode: "disabled", approvalRequired: false, reconciliationMode: "suggest" },
+  job_grade: { autoCreateMode: "disabled", approvalRequired: false, reconciliationMode: "suggest" },
+  work_location: { autoCreateMode: "disabled", approvalRequired: false, reconciliationMode: "suggest" },
+  org_unit: { autoCreateMode: "disabled", approvalRequired: true, reconciliationMode: "suggest" },
+  position: { autoCreateMode: "disabled", approvalRequired: true, reconciliationMode: "suggest" },
 };
 
 async function resolveEntityPolicy(workspaceId: number, entityType: string): Promise<EnterprisePolicyProfile | null> {
+  const governance = await getEmployeeImportGovernanceSettings(workspaceId);
+  if (governance.matchOnly) {
+    return { autoCreateMode: "disabled", approvalRequired: false, reconciliationMode: "suggest" };
+  }
   const enterprise = await isEnterpriseImportRuntimeActive(workspaceId);
   if (enterprise) {
     return getEffectiveEntityPolicy(workspaceId, entityType);
@@ -190,7 +197,18 @@ export async function applyImportPreviewIntelligence(input: {
             : `${field.entityType} "${nameHint}" will be auto-created on confirm`,
         );
       } else if (nameHint) {
-        row.warnings.push(`${field.entityType} "${nameHint}" not matched — import continues without link`);
+        const governance = await getEmployeeImportGovernanceSettings(input.workspaceId);
+        if (governance.matchOnly) {
+          row.errors.push(`MASTER_DATA_NOT_FOUND: ${field.entityType} "${nameHint}" is not in Foundation — row will be archived`);
+          row.staged = true;
+          row.mismatchFields = [
+            ...(row.mismatchFields ?? []),
+            { field: field.entityType, value: nameHint, entityType: field.entityType },
+          ];
+          row.status = "staged";
+        } else {
+          row.warnings.push(`${field.entityType} "${nameHint}" not matched — import continues without link`);
+        }
       }
     }
 
@@ -252,6 +270,11 @@ export async function applyImportConfirmIntelligence(input: {
   approveEntityCreates?: boolean;
   userId?: number;
 }): Promise<{ rows: ConfirmRow[]; created: number; queued: number; skipped: number }> {
+  const governance = await getEmployeeImportGovernanceSettings(input.workspaceId);
+  if (governance.matchOnly) {
+    return { rows: input.rows, created: 0, queued: 0, skipped: 0 };
+  }
+
   const catalog = await masterDataCatalogService.loadSnapshot(input.workspaceId, true);
   let created = 0;
   let queued = 0;

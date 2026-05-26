@@ -81,7 +81,9 @@ export function reconcileEntityLookup(
       };
     }
 
-    const byAlias = idx.byAlias[normalizeName(input)];
+    const byAlias =
+      idx.byAlias[normalizeRuntimeKey(input)]
+      ?? idx.byAlias[normalizeName(input)];
     if (byAlias != null) {
       const e = entries.find((x) => x.id === byAlias);
       return {

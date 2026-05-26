@@ -13,6 +13,26 @@ import {
 import { workspacesTable } from "./workspaces";
 import { usersTable } from "./users";
 
+/** H7 — alias mapping for master data codes during import/matching. */
+export const hrMasterDataAliasesTable = pgTable(
+  "hr_master_data_aliases",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    entityType: text("entity_type").notNull(),
+    aliasCode: text("alias_code").notNull(),
+    canonicalCode: text("canonical_code").notNull(),
+    createdByUserId: integer("created_by_user_id").references(() => usersTable.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_hr_master_data_alias_ws_type_alias").on(t.workspaceId, t.entityType, t.aliasCode),
+    index("idx_hr_master_data_alias_ws_type_canonical").on(t.workspaceId, t.entityType, t.canonicalCode),
+  ],
+);
+
 export const hrImportSessionsTable = pgTable(
   "hr_import_sessions",
   {
@@ -233,6 +253,40 @@ export const hrImportWorkspaceRolloutTable = pgTable(
     index("idx_hr_import_workspace_rollout_status").on(t.rolloutStatus, t.rolloutSequence),
   ],
 );
+
+/** H6 — employee rows held when master data does not match Foundation (match-only import). */
+export const hrEmployeeImportStagingTable = pgTable(
+  "hr_employee_import_staging",
+  {
+    id: serial("id").primaryKey(),
+    workspaceId: integer("workspace_id")
+      .notNull()
+      .references(() => workspacesTable.id, { onDelete: "cascade" }),
+    batchId: text("batch_id").notNull(),
+    rowIndex: integer("row_index").notNull(),
+    status: text("status").notNull().default("pending_review"),
+    rawRow: jsonb("raw_row"),
+    normalizedRow: jsonb("normalized_row").notNull(),
+    mismatchFields: jsonb("mismatch_fields").notNull().default([]),
+    errors: jsonb("errors").notNull().default([]),
+    warnings: jsonb("warnings").notNull().default([]),
+    existingEmployeeId: integer("existing_employee_id"),
+    promotedEmployeeId: integer("promoted_employee_id"),
+    reviewedByUserId: integer("reviewed_by_user_id").references(() => usersTable.id, {
+      onDelete: "set null",
+    }),
+    promotedAt: timestamp("promoted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("idx_hr_employee_import_staging_ws_status").on(t.workspaceId, t.status, t.createdAt),
+    index("idx_hr_employee_import_staging_batch").on(t.workspaceId, t.batchId),
+  ],
+);
+
+export type HrEmployeeImportStagingRow = typeof hrEmployeeImportStagingTable.$inferSelect;
+export type HrMasterDataAlias = typeof hrMasterDataAliasesTable.$inferSelect;
 
 export type HrImportSession = typeof hrImportSessionsTable.$inferSelect;
 export type HrImportSessionRow = typeof hrImportSessionRowsTable.$inferSelect;

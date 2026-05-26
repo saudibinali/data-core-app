@@ -232,11 +232,12 @@ function NumberingSettingsModal({ open, onClose, isAr }: { open: boolean; onClos
 // ─────────────────────────────────────────────────────────────────────────────
 type ImportRow = {
   rowIndex: number;
-  status: "new" | "update" | "error" | "skip";
+  status: "new" | "update" | "error" | "skip" | "staged";
   existingEmployeeId?: number;
   errors: string[];
   warnings: string[];
   data: Record<string, unknown>;
+  mismatchFields?: Array<Record<string, unknown>>;
 };
 
 function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => void; isAr: boolean }) {
@@ -244,11 +245,11 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
   const qc = useQueryClient();
   const [step, setStep] = useState<"upload" | "preview" | "done">("upload");
   const [previewRows, setPreviewRows] = useState<ImportRow[]>([]);
-  const [summary, setSummary] = useState<{ total: number; new: number; update: number; errors: number } | null>(null);
+  const [summary, setSummary] = useState<{ total: number; new: number; update: number; errors: number; staged?: number } | null>(null);
   const [importIntelligence, setImportIntelligence] = useState<ImportIntelligence | null>(null);
   const [proposalSummary, setProposalSummary] = useState<ProposalSummaryItem[]>([]);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [result, setResult] = useState<{ imported: number; updated: number; errors: string[]; importIntelligence?: Record<string, unknown> } | null>(null);
+  const [result, setResult] = useState<{ imported: number; updated: number; staged?: number; stagingBatchId?: string; errors: string[]; importIntelligence?: Record<string, unknown> } | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -378,6 +379,10 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
         status: r.status,
         existingEmployeeId: r.existingEmployeeId,
         data: r.data,
+        mismatchFields: r.mismatchFields,
+        errors: r.errors,
+        warnings: r.warnings,
+        rowIndex: r.rowIndex,
       }));
     confirmMut.mutate({ data: { rows: rowsToImport, approveEntityCreates } } as any);
   }
@@ -432,6 +437,7 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                     <li>{isAr ? "حمّل قالب Excel الديناميكي (يتضمن حقولك المخصصة والعلاقات)" : "Download the dynamic Excel template (includes your custom fields and lookups)"}</li>
                     <li>{isAr ? "أدخل بيانات الموظفين في الصفوف ابتداءً من الصف الرابع" : "Enter employee data in rows starting from row 4"}</li>
                     <li>{isAr ? "ارفع الملف للمراجعة قبل الحفظ" : "Upload the file to preview before saving"}</li>
+                    <li>{isAr ? "يجب أن تطابق الدرجات والمسميات والوحدات بيانات Foundation — وإلا تذهب للأرشيف" : "Grades, titles, and org units must match Foundation — otherwise rows go to archive"}</li>
                   </ol>
                 </div>
               </div>
@@ -467,11 +473,12 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
           {step === "preview" && summary && (
             <div className="space-y-4 py-2">
               {/* Summary */}
-              <div className="grid grid-cols-4 gap-3">
+              <div className="grid grid-cols-5 gap-3">
                 {[
                   { label: isAr ? "إجمالي" : "Total", value: summary.total, color: "text-foreground" },
                   { label: isAr ? "جديد" : "New", value: summary.new, color: "text-emerald-600" },
                   { label: isAr ? "تحديث" : "Update", value: summary.update, color: "text-blue-600" },
+                  { label: isAr ? "أرشيف" : "Archive", value: summary.staged ?? 0, color: "text-amber-600" },
                   { label: isAr ? "أخطاء" : "Errors", value: summary.errors, color: "text-red-600" },
                 ].map((s) => (
                   <div key={s.label} className="rounded-md border p-3 text-center">
@@ -480,6 +487,15 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                   </div>
                 ))}
               </div>
+
+              {(summary.staged ?? 0) > 0 && (
+                <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 p-3 text-sm text-amber-800 dark:text-amber-300 flex gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  {isAr
+                    ? `${summary.staged} صف سيُرسل إلى أرشيف الاستيراد — لن يُنشأ أي قسم/درجة/مسمى تلقائياً`
+                    : `${summary.staged} row(s) will go to import archive — no departments/grades/titles will be auto-created`}
+                </div>
+              )}
 
               {summary.errors > 0 && (
                 <div className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 p-3 text-sm text-amber-800 dark:text-amber-300 flex gap-2">
@@ -548,7 +564,7 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                   </thead>
                   <tbody>
                     {previewRows.map((row) => (
-                      <tr key={row.rowIndex} className={`border-t ${row.status === "error" ? "bg-red-50 dark:bg-red-950/20" : row.status === "update" ? "bg-blue-50 dark:bg-blue-950/20" : ""}`}>
+                      <tr key={row.rowIndex} className={`border-t ${row.status === "error" ? "bg-red-50 dark:bg-red-950/20" : row.status === "staged" ? "bg-amber-50 dark:bg-amber-950/20" : row.status === "update" ? "bg-blue-50 dark:bg-blue-950/20" : ""}`}>
                         <td className="p-2">
                           {row.status !== "error" && (
                             <Checkbox
@@ -564,6 +580,7 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                         <td className="p-2 text-muted-foreground">{row.rowIndex}</td>
                         <td className="p-2">
                           {row.status === "error"   && <span className="text-red-600 font-medium flex items-center gap-1"><AlertCircle className="w-3 h-3" />{isAr ? "خطأ" : "Error"}</span>}
+                          {row.status === "staged"  && <span className="text-amber-600 font-medium flex items-center gap-1"><AlertTriangle className="w-3 h-3" />{isAr ? "أرشيف" : "Archive"}</span>}
                           {row.status === "new"     && <span className="text-emerald-600 font-medium flex items-center gap-1"><CheckCircle2 className="w-3 h-3" />{isAr ? "جديد" : "New"}</span>}
                           {row.status === "update"  && <span className="text-blue-600 font-medium flex items-center gap-1"><RefreshCcw className="w-3 h-3" />{isAr ? "تحديث" : "Update"}</span>}
                         </td>
@@ -586,7 +603,7 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
             <div className="py-6 space-y-4 text-center">
               <CheckCircle2 className="w-14 h-14 mx-auto text-emerald-500" />
               <h3 className="text-lg font-semibold">{isAr ? "اكتمل الاستيراد" : "Import Complete"}</h3>
-              <div className="grid grid-cols-3 gap-3 max-w-sm mx-auto">
+              <div className="grid grid-cols-4 gap-3 max-w-lg mx-auto">
                 <div className="rounded-md border p-3">
                   <p className="text-xl font-bold text-emerald-600">{result.imported}</p>
                   <p className="text-xs text-muted-foreground">{isAr ? "موظف جديد" : "Imported"}</p>
@@ -596,10 +613,21 @@ function ImportModal({ open, onClose, isAr }: { open: boolean; onClose: () => vo
                   <p className="text-xs text-muted-foreground">{isAr ? "محدّث" : "Updated"}</p>
                 </div>
                 <div className="rounded-md border p-3">
+                  <p className="text-xl font-bold text-amber-600">{result.staged ?? 0}</p>
+                  <p className="text-xs text-muted-foreground">{isAr ? "في الأرشيف" : "Archived"}</p>
+                </div>
+                <div className="rounded-md border p-3">
                   <p className="text-xl font-bold text-red-600">{result.errors.length}</p>
                   <p className="text-xs text-muted-foreground">{isAr ? "أخطاء" : "Errors"}</p>
                 </div>
               </div>
+              {(result.staged ?? 0) > 0 && (
+                <Link href="/hr/employees/import-staging">
+                  <Button variant="outline" className="mt-2">
+                    {isAr ? "فتح أرشيف الاستيراد" : "Open import archive"}
+                  </Button>
+                </Link>
+              )}
               {result.errors.length > 0 && (
                 <div className="text-left rounded-md border bg-red-50 dark:bg-red-950/20 p-3 max-h-40 overflow-auto">
                   {result.errors.map((e, i) => <p key={i} className="text-xs text-red-700 dark:text-red-400">{e}</p>)}
@@ -970,6 +998,14 @@ export default function HrEmployeesPage() {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              {/* Import archive */}
+              <Link href="/hr/employees/import-staging">
+                <Button variant="outline" size="sm">
+                  <AlertTriangle className="w-4 h-4 mr-1.5" />
+                  {isAr ? "أرشيف الاستيراد" : "Import Archive"}
+                </Button>
+              </Link>
 
               {/* Import */}
               <Button variant="outline" size="sm" onClick={() => setShowImport(true)}>

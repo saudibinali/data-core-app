@@ -107,6 +107,14 @@ import { isSchemaMismatchError } from "../lib/commercial-route-utils";
 import { logger } from "../lib/logger";
 import { HrEmployeeCreateBody, formatZodError } from "../lib/security-validation";
 import { maybeDeactivateLinkedUserOnTermination } from "../lib/hr/employee-offboarding";
+import {
+  assertFoundationReadinessForImport,
+  buildMasterDataLookupMaps,
+  detectMasterDataMismatches,
+  getEmployeeImportGovernanceSettings,
+  resolveMasterDataIds,
+} from "../lib/hr-foundation/employee-import-governance";
+import { insertStagingBatch } from "../lib/hr-foundation/employee-import-staging-service";
 
 const router: IRouter = Router();
 
@@ -631,16 +639,33 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
   try {
+  const governance = await getEmployeeImportGovernanceSettings(workspaceId);
+  if (governance.readinessGateEnabled) {
+    try {
+      await assertFoundationReadinessForImport(workspaceId);
+    } catch (e) {
+      const err = e as Error & { code?: string; readiness?: unknown };
+      if (err.code === "FOUNDATION_NOT_READY") {
+        res.status(409).json({
+          error: "FOUNDATION_NOT_READY",
+          message: err.message,
+          readiness: err.readiness,
+        });
+        return;
+      }
+      throw e;
+    }
+  }
 
   const rawRows: Record<string, string>[] = Array.isArray(req.body.rows) ? req.body.rows : [];
 
   // Load reference lookups in parallel (dynamic enums merged with legacy fallback)
   const [orgUnits, jobTitles, jobGrades, positions, workLocations, customFields, existingEmps, settings, employmentTypesDynamic, statusesDynamic, importRuntimeSettings] = await Promise.all([
-    db.select({ id: hrOrgUnitsTable.id, name: hrOrgUnitsTable.name }).from(hrOrgUnitsTable).where(eq(hrOrgUnitsTable.workspaceId, workspaceId)),
-    db.select({ id: hrJobTitlesTable.id, name: hrJobTitlesTable.name }).from(hrJobTitlesTable).where(eq(hrJobTitlesTable.workspaceId, workspaceId)),
-    db.select({ id: hrJobGradesTable.id, name: hrJobGradesTable.name }).from(hrJobGradesTable).where(eq(hrJobGradesTable.workspaceId, workspaceId)),
-    db.select({ id: hrPositionsTable.id, title: hrPositionsTable.title }).from(hrPositionsTable).where(eq(hrPositionsTable.workspaceId, workspaceId)),
-    db.select({ id: hrWorkLocationsTable.id, name: hrWorkLocationsTable.name }).from(hrWorkLocationsTable).where(eq(hrWorkLocationsTable.workspaceId, workspaceId)),
+    db.select({ id: hrOrgUnitsTable.id, name: hrOrgUnitsTable.name, code: hrOrgUnitsTable.code }).from(hrOrgUnitsTable).where(eq(hrOrgUnitsTable.workspaceId, workspaceId)),
+    db.select({ id: hrJobTitlesTable.id, name: hrJobTitlesTable.name, code: hrJobTitlesTable.code }).from(hrJobTitlesTable).where(eq(hrJobTitlesTable.workspaceId, workspaceId)),
+    db.select({ id: hrJobGradesTable.id, name: hrJobGradesTable.name, code: hrJobGradesTable.code }).from(hrJobGradesTable).where(eq(hrJobGradesTable.workspaceId, workspaceId)),
+    db.select({ id: hrPositionsTable.id, title: hrPositionsTable.title, code: hrPositionsTable.code }).from(hrPositionsTable).where(eq(hrPositionsTable.workspaceId, workspaceId)),
+    db.select({ id: hrWorkLocationsTable.id, name: hrWorkLocationsTable.name, code: hrWorkLocationsTable.code }).from(hrWorkLocationsTable).where(eq(hrWorkLocationsTable.workspaceId, workspaceId)),
     db.select({ name: hrCustomFieldDefsTable.name, id: hrCustomFieldDefsTable.id, fieldType: hrCustomFieldDefsTable.fieldType, required: hrCustomFieldDefsTable.required }).from(hrCustomFieldDefsTable).where(and(eq(hrCustomFieldDefsTable.workspaceId, workspaceId), eq(hrCustomFieldDefsTable.isActive, true))),
     db.select({ id: employeesTable.id, employeeNumber: employeesTable.employeeNumber, email: employeesTable.email, fullName: employeesTable.fullName }).from(employeesTable).where(eq(employeesTable.workspaceId, workspaceId)),
     db.select().from(hrWorkspaceSettingsTable).where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId)),
@@ -650,12 +675,8 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   ]);
 
   const numberingMode = settings[0]?.numberingMode ?? "auto";
+  const lookupMaps = buildMasterDataLookupMaps({ orgUnits, jobTitles, jobGrades, positions, workLocations });
 
-  const orgByName = new Map(orgUnits.map((o) => [o.name.toLowerCase(), o.id]));
-  const jtByName  = new Map(jobTitles.map((j) => [j.name.toLowerCase(), j.id]));
-  const jgByName  = new Map(jobGrades.map((g) => [g.name.toLowerCase(), g.id]));
-  const posByName = new Map(positions.map((p) => [p.title.toLowerCase(), p.id]));
-  const wlByName  = new Map(workLocations.map((w) => [w.name.toLowerCase(), w.id]));
   const empByNum  = new Map(existingEmps.map((e) => [String(e.employeeNumber ?? "").toLowerCase(), e]));
   const empByEmail = new Map(existingEmps.map((e) => [String(e.email ?? "").toLowerCase(), e]));
 
@@ -671,11 +692,12 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
 
   type PreviewRow = {
     rowIndex: number;
-    status: "new" | "update" | "error" | "skip";
+    status: "new" | "update" | "error" | "skip" | "staged";
     existingEmployeeId?: number;
     errors: string[];
     warnings: string[];
     data: Record<string, unknown>;
+    mismatchFields?: Array<Record<string, unknown>>;
   };
 
   const previewRows: PreviewRow[] = [];
@@ -696,10 +718,15 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     const dob      = getField(row, "date_of_birth", "تاريخ الميلاد", "Date of Birth");
     const gender   = getField(row, "gender", "الجنس", "Gender");
     const orgName  = getField(row, "org_unit_name", "الوحدة التنظيمية", "Org Unit / Department");
+    const orgCode  = getField(row, "org_unit_code", "كود الوحدة", "Org Unit Code");
     const jtName   = getField(row, "job_title_name", "المسمى الوظيفي", "Job Title");
+    const jtCode   = getField(row, "job_title_code", "كود المسمى", "Job Title Code");
     const jgName   = getField(row, "job_grade_name", "الدرجة الوظيفية", "Job Grade");
+    const jgCode   = getField(row, "job_grade_code", "كود الدرجة", "Job Grade Code");
     const posName  = getField(row, "position_title", "المنصب", "Position");
+    const posCode  = getField(row, "position_code", "كود المنصب", "Position Code");
     const wlName   = getField(row, "work_location", "موقع العمل", "Work Location");
+    const wlCode   = getField(row, "work_location_code", "كود الموقع", "Work Location Code");
     const mgrNum   = getField(row, "direct_manager_num", "رقم المدير المباشر", "Manager Employee #");
 
     if (!fullName) { errors.push("full_name is required"); }
@@ -727,17 +754,24 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
       if (val && !DATE_RE.test(val)) errors.push(`Invalid ${lbl}: "${val}" - expected YYYY-MM-DD`);
     }
 
-    // Relations
-    const resolvedOrgId  = orgName  ? orgByName.get(orgName.toLowerCase())  : undefined;
-    const resolvedJtId   = jtName   ? jtByName.get(jtName.toLowerCase())   : undefined;
-    const resolvedJgId   = jgName   ? jgByName.get(jgName.toLowerCase())   : undefined;
-    const resolvedPosId  = posName  ? posByName.get(posName.toLowerCase())  : undefined;
-    const resolvedWlName = wlName   ? (wlByName.has(wlName.toLowerCase()) ? wlName : undefined) : undefined;
-    if (orgName && resolvedOrgId === undefined)  warnings.push(`org_unit_name "${orgName}" not found - will be ignored`);
-    if (jtName  && resolvedJtId === undefined)   warnings.push(`job_title_name "${jtName}" not found - will be ignored`);
-    if (jgName  && resolvedJgId === undefined)   warnings.push(`job_grade_name "${jgName}" not found - will be ignored`);
-    if (posName && resolvedPosId === undefined)  warnings.push(`position_title "${posName}" not found - will be ignored`);
-    if (wlName  && resolvedWlName === undefined) warnings.push(`work_location "${wlName}" not found - will be ignored`);
+    const resolved = resolveMasterDataIds({
+      orgName, orgCode, jtName, jtCode, jgName, jgCode, posName, posCode, wlName, wlCode, maps: lookupMaps,
+    });
+    const mismatches = governance.matchOnly
+      ? detectMasterDataMismatches({ orgName, orgCode, jtName, jtCode, jgName, jgCode, posName, posCode, wlName, wlCode, maps: lookupMaps })
+      : [];
+
+    if (!governance.matchOnly) {
+      if (orgName && resolved.orgUnitId === undefined)  warnings.push(`org_unit_name "${orgName}" not found - will be ignored`);
+      if (jtName  && resolved.jobTitleId === undefined)   warnings.push(`job_title_name "${jtName}" not found - will be ignored`);
+      if (jgName  && resolved.jobGradeId === undefined)   warnings.push(`job_grade_name "${jgName}" not found - will be ignored`);
+      if (posName && resolved.positionId === undefined)  warnings.push(`position_title "${posName}" not found - will be ignored`);
+      if (wlName  && !resolved.workLocationId) warnings.push(`work_location "${wlName}" not found - will be ignored`);
+    } else if (mismatches.length > 0) {
+      for (const m of mismatches) {
+        errors.push(`MASTER_DATA_NOT_FOUND: ${m.labelEn} "${m.value}" is not in Foundation`);
+      }
+    }
     if (mgrNum) {
       const mgr = empByNum.get(mgrNum.toLowerCase());
       if (!mgr) warnings.push(`manager employee_number "${mgrNum}" not found - will be ignored`);
@@ -756,12 +790,20 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     const existingByMail = email ? empByEmail.get(email.toLowerCase()) : undefined;
     const existing = existingByNum ?? existingByMail;
 
+    const nonMasterErrors = errors.filter((e) => !e.startsWith("MASTER_DATA_NOT_FOUND"));
+    let rowStatus: PreviewRow["status"];
+    if (nonMasterErrors.length > 0) rowStatus = "error";
+    else if (governance.matchOnly && mismatches.length > 0) rowStatus = "staged";
+    else if (existing) rowStatus = "update";
+    else rowStatus = "new";
+
     previewRows.push({
       rowIndex: i + 1,
-      status: errors.length > 0 ? "error" : existing ? "update" : "new",
+      status: rowStatus,
       existingEmployeeId: existing?.id,
       errors,
       warnings,
+      mismatchFields: mismatches,
       data: {
         fullName,
         firstName: getField(row, "first_name", "الاسم الأول", "First Name"),
@@ -787,16 +829,21 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
         emergencyContactName: getField(row, "emergency_name", "اسم جهة الطوارئ", "Emergency Contact Name") || null,
         emergencyContactPhone: getField(row, "emergency_phone", "هاتف جهة الطوارئ", "Emergency Contact Phone") || null,
         emergencyContactRelation: getField(row, "emergency_relation", "صلة القرابة للطوارئ", "Emergency Relation") || null,
-        orgUnitId: resolvedOrgId ?? null,
+        orgUnitId: resolved.orgUnitId ?? null,
         orgUnitName: orgName || null,
-        jobTitleId: resolvedJtId ?? null,
+        orgUnitCode: orgCode || null,
+        jobTitleId: resolved.jobTitleId ?? null,
         jobTitleName: jtName || null,
-        jobGradeId: resolvedJgId ?? null,
+        jobTitleCode: jtCode || null,
+        jobGradeId: resolved.jobGradeId ?? null,
         jobGradeName: jgName || null,
-        positionId: resolvedPosId ?? null,
+        jobGradeCode: jgCode || null,
+        positionId: resolved.positionId ?? null,
         positionTitle: posName || null,
+        positionCode: posCode || null,
         workLocationName: wlName || null,
-        location: resolvedWlName ?? null,
+        workLocationCode: wlCode || null,
+        location: resolved.workLocationName ?? (wlName || null),
         managerEmployeeNumber: mgrNum || null,
         customValues,
       },
@@ -852,6 +899,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
     new: finalPreviewRows.filter((r) => r.status === "new").length,
     update: finalPreviewRows.filter((r) => r.status === "update").length,
     errors: finalPreviewRows.filter((r) => r.status === "error").length,
+    staged: finalPreviewRows.filter((r) => r.status === "staged").length,
   };
 
   const allWarnings = finalPreviewRows.flatMap((r) => r.warnings);
@@ -896,6 +944,7 @@ router.post("/hr/employees/import/preview", requireAuth, requirePermission("hr.m
   res.json({
     rows: finalPreviewRows,
     summary,
+    governance,
     importIntelligence,
     proposalSummary,
     enterprise: enterprisePreview.enterprise,
@@ -925,11 +974,32 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
   const workspaceId = req.workspaceId;
   if (!workspaceId) { res.status(403).json({ error: "No workspace" }); return; }
 
+  const governance = await getEmployeeImportGovernanceSettings(workspaceId);
+  if (governance.readinessGateEnabled) {
+    try {
+      await assertFoundationReadinessForImport(workspaceId);
+    } catch (e) {
+      const err = e as Error & { code?: string; readiness?: unknown };
+      if (err.code === "FOUNDATION_NOT_READY") {
+        res.status(409).json({ error: "FOUNDATION_NOT_READY", message: err.message, readiness: err.readiness });
+        return;
+      }
+      throw e;
+    }
+  }
+
   const rows: Array<{
-    status: "new" | "update" | "skip";
+    status: "new" | "update" | "skip" | "staged";
     existingEmployeeId?: number;
     data: Record<string, unknown>;
+    mismatchFields?: Array<Record<string, unknown>>;
+    errors?: string[];
+    warnings?: string[];
+    rowIndex?: number;
   }> = Array.isArray(req.body.rows) ? req.body.rows : [];
+
+  const stagedRows = rows.filter((r) => r.status === "staged");
+  const commitInputRows = rows.filter((r) => r.status !== "staged");
 
   const [settings, allEmps, importRuntimeSettings] = await Promise.all([
     db.select().from(hrWorkspaceSettingsTable).where(eq(hrWorkspaceSettingsTable.workspaceId, workspaceId)),
@@ -942,7 +1012,7 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
   const approveEntityCreates = req.body.approveEntityCreates === true;
 
   let enterpriseResolution: Awaited<ReturnType<typeof applyEnterpriseConfirmResolution>> = {
-    rows,
+    rows: commitInputRows as Array<{ status: "new" | "update" | "skip"; existingEmployeeId?: number; data: Record<string, unknown> }>,
     created: 0,
     queued: 0,
     skipped: 0,
@@ -951,19 +1021,39 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
   try {
     enterpriseResolution = await applyEnterpriseConfirmResolution({
       workspaceId,
-      rows,
+      rows: commitInputRows as Array<{ status: "new" | "update" | "skip"; existingEmployeeId?: number; data: Record<string, unknown> }>,
       approveEntityCreates,
       userId: req.userId,
     });
   } catch (e) {
     if (isSchemaMismatchError(e)) {
       logger.warn({ workspaceId, err: e }, "Enterprise confirm hook skipped — import runtime schema incomplete");
-      enterpriseResolution = { rows, created: 0, queued: 0, skipped: 0, enterpriseActive: false };
+      enterpriseResolution = { rows: commitInputRows as typeof enterpriseResolution.rows, created: 0, queued: 0, skipped: 0, enterpriseActive: false };
     } else {
       throw e;
     }
   }
   const commitRows = enterpriseResolution.rows;
+
+  let staged = 0;
+  let stagingBatchId: string | undefined;
+  if (governance.stagingEnabled && stagedRows.length > 0) {
+    const batch = await insertStagingBatch({
+      workspaceId,
+      reviewedByUserId: req.userId,
+      rows: stagedRows.map((r, idx) => ({
+        rowIndex: r.rowIndex ?? idx + 1,
+        normalizedRow: r.data,
+        mismatchFields: (r.mismatchFields ?? []) as Array<Record<string, unknown>>,
+        errors: r.errors ?? [],
+        warnings: r.warnings ?? [],
+        existingEmployeeId: r.existingEmployeeId,
+        intendedStatus: r.existingEmployeeId ? "update" : "new",
+      })),
+    });
+    staged = batch.inserted;
+    stagingBatchId = batch.batchId;
+  }
 
   let imported = 0; let updated = 0;
   const errors: string[] = [];
@@ -1133,6 +1223,8 @@ router.post("/hr/employees/import/confirm", requireAuth, requirePermission("hr.m
   res.json({
     imported,
     updated,
+    staged,
+    stagingBatchId,
     errors,
     importIntelligence: {
       entitiesCreated: enterpriseResolution.created,

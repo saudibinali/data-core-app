@@ -40,6 +40,7 @@ export const hrOrgUnitsTable = pgTable(
     index("idx_hr_org_units_parent").on(t.parentId),
     index("idx_hr_org_units_type").on(t.type),
     index("idx_hr_org_units_manager_employee").on(t.managerEmployeeId),
+    uniqueIndex("uq_hr_org_units_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -67,6 +68,7 @@ export const hrJobGradesTable = pgTable(
   },
   (t) => [
     index("idx_hr_job_grades_workspace").on(t.workspaceId),
+    uniqueIndex("uq_hr_job_grades_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -94,6 +96,7 @@ export const hrJobTitlesTable = pgTable(
   },
   (t) => [
     index("idx_hr_job_titles_workspace").on(t.workspaceId),
+    uniqueIndex("uq_hr_job_titles_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -126,6 +129,7 @@ export const hrWorkLocationsTable = pgTable(
   (t) => [
     index("idx_hr_work_locations_workspace").on(t.workspaceId),
     index("idx_hr_work_locations_type").on(t.type),
+    uniqueIndex("uq_hr_work_locations_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -167,6 +171,7 @@ export const hrPositionsTable = pgTable(
     index("idx_hr_positions_org_unit").on(t.orgUnitId),
     index("idx_hr_positions_status").on(t.status),
     index("idx_hr_positions_job_title").on(t.jobTitleId),
+    uniqueIndex("uq_hr_positions_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -711,6 +716,7 @@ export const hrDocumentTypesTable = pgTable(
   },
   (t) => [
     index("idx_hr_doc_types_workspace").on(t.workspaceId),
+    uniqueIndex("uq_hr_document_types_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -744,6 +750,7 @@ export const hrLeavePoliciesTable = pgTable(
   },
   (t) => [
     index("idx_hr_leave_policies_workspace").on(t.workspaceId),
+    uniqueIndex("uq_hr_leave_policies_ws_code").on(t.workspaceId, t.code),
   ],
 );
 
@@ -1307,6 +1314,12 @@ export const hrWorkspaceSettingsTable = pgTable("hr_workspace_settings", {
   employeeImportRuntimeMode: text("employee_import_runtime_mode").notNull().default("legacy"),
   /** legacy | shadow | active — master data catalog/import cutover (Phase 0+1) */
   masterDataRuntimeMode: text("master_data_runtime_mode").notNull().default("legacy"),
+  /** H1 — match-only employee import (no Foundation auto-create) */
+  employeeImportMatchOnly: boolean("employee_import_match_only").notNull().default(true),
+  /** H6 — route unmatched rows to staging archive */
+  employeeImportStagingEnabled: boolean("employee_import_staging_enabled").notNull().default(true),
+  /** H5 — block employee import until Foundation minimum is complete */
+  foundationReadinessGateEnabled: boolean("foundation_readiness_gate_enabled").notNull().default(true),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
 

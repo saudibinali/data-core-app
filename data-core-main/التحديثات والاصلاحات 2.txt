@@ -1,0 +1,578 @@
+================================================================================
+        التحديثات والاصلاحات 2 — حوكمة HR Foundation + استيراد Match-only
+   خطة ترقية Enterprise (نمط SAP/Microsoft) — Foundation-first + Staging
+                    (تخطيط تنفيذي — مرجع للتطوير والاعتماد)
+================================================================================
+تاريخ الإعداد: 2026-05-26
+المرجع: نقاش حوكمة البيانات الأساسية + تقرير HR Master Data Audit
+الجمهور: Product، Engineering، HR Operations، Platform Owner
+العلاقة بالخطة السابقة: تكمّل «الترقية والاصلاحات 1» (F0–F10) ولا تستبدلها
+الهدف: منع تكرار Master Data (مثل G1 / g1_2 / g1_3)، فرض هوية canonical
+        لكل workspace، وفصل بناء Foundation عن استيراد الموظفين بحوكمة كاملة
+
+================================================================================
+0. مبادئ الترقية (Non-Negotiable)
+================================================================================
+
+  1. Foundation = System of Record لكل workspace (العميل يملك قاموسه: G1/G2 أو GD1/GD2).
+  2. Employee Import = Match-only (مقارنة بالأكواد الموجودة — لا auto-create).
+  3. القيم غير المعروفة → Staging/Archive للمراجعة (لا suffix _2/_3).
+  4. Expand → Migrate → Contract (لا Big Bang؛ feature flags + pilot workspaces).
+  5. كل commit/import يُسجَّل في Audit Trail (من، متى، ماذا، قبل/بعد).
+  6. DB constraints + CI integrity gates تمنع عودة التكرار بعد الإصلاح.
+
+================================================================================
+1. خريطة الفيزات — نظرة عامة
+================================================================================
+
+  ┌──────┬────────────────────────────────────┬──────────┬────────────────────────────┐
+  │ فيز  │ الاسم                              │ المدة    │ الهدف الرئيسي              │
+  ├──────┼────────────────────────────────────┼──────────┼────────────────────────────┤
+  │ H0   │ Policy & Safety Net                │ 1–2 أسبوع│ سياسة + قياس الوضع الحالي  │
+  │ H1   │ Stop the Bleeding                  │ 2–3 أسابيع│ إيقاف auto-create + gate   │
+  │ H2   │ Canonical DB Integrity             │ 2–4 أسابيع│ UNIQUE + indexes + CI     │
+  │ H3   │ Foundation RBAC & Audit            │ 3–4 أسابيع│ صلاحيات + تدقيق          │
+  │ H4   │ Foundation Import/Export Hub       │ 4–6 أسابيع│ قوالب + preview + commit  │
+  │ H5   │ Readiness Gate & Templates         │ 2–3 أسابيع│ قفل employee import       │
+  │ H6   │ Employee Staging & Partial Import  │ 4–6 أسابيع│ أرشيف + ترقية + bulk fix  │
+  │ H7   │ Alias Mapping & Normalization      │ 2–3 أسابيع│ G1F→G1 بدون تكرار         │
+  │ H8   │ Duplicate Cleanup & Merge        │ 4–8 أسابيع│ دمج G1+g1_2+g1_3          │
+  │ H9   │ Enterprise+ Governance             │ مستمر    │ approvals + DQ dashboards │
+  └──────┴────────────────────────────────────┴──────────┴────────────────────────────┘
+
+  **معيار النجاح الكلي:**
+  - Duplicate Rate على code داخل workspace = 0 (بعد H8).
+  - لا يُنشأ أي Foundation entity أثناء employee import (بعد H1).
+  - المؤسسة تبني Foundation عبر Hub قبل رفع الموظفين (بعد H4+H5).
+
+  **ترتيب التنفيذ الإلزامي:** H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8 → H9
+
+================================================================================
+2. ربط الفيزات بالكود الحالي
+================================================================================
+
+  المنطقة الحالية                    │ الملف/المسار المرجعي
+  ───────────────────────────────────┼────────────────────────────────────────────
+  Foundation UI (يدوي + export جزئي) │ artifacts/ops-platform/src/pages/hr-foundation.tsx
+  Employee import + auto-create      │ artifacts/api-server/src/lib/hr-import/
+  Import intelligence / policies     │ .../intelligence/import-intelligence-engine.ts
+  Canonical code suffix (_2)         │ .../normalization.ts (uniquifyRuntimeCode)
+  Duplicate prevention (ضعيف)        │ .../duplicate-prevention.ts
+  Master data catalog                │ .../catalog/master-data-catalog.ts
+  Commit orchestrator                │ .../commit/commit-orchestrator.ts
+  HR schema (constraints)            │ lib/db/src/schema/hr.ts
+  Foundation routes API              │ artifacts/api-server/src/routes/hr.ts (foundation handlers)
+
+================================================================================
+3. تصنيف الحوكمة (Tiers) — مرجع لكل فيز
+================================================================================
+
+  Tier 0 (حرج): Org Units, Positions — موافقة + audit كامل
+  Tier 1 (أساسي): Job Grades, Job Titles, Work Locations — import بـ preview صارم
+  Tier 2 (مرن): Document Types, Leave/Probation Policies — unique code إلزامي
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+                    الفيز H0 — Policy & Safety Net (أسبوع 1–2)
+              «تثبيت السياسة وقياس الوضع قبل أي تغيير سلوكي»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  توثيق سياسة Master Data المعتمدة + baseline لقياس التكرارات والفجوات.
+
+── التحديثات ──
+
+  H0.1 — Platform Policy Document (توثيق)
+    • docs/hr/master-data-governance-policy.md (جديد)
+      - تعريف Master Data لكل كيان
+      - قواعد code إلزامي + unique per workspace
+      - منع auto-create في employee import
+      - تعريف Staging/Archive و Alias
+      - مصفوفة الصلاحيات (RBAC)
+    • ربط السياسة بـ /admin/hr/foundation في دليل المستخدم
+
+  H0.2 — Data Quality Baseline Report (سكربت قراءة فقط)
+    • scripts/report-hr-master-data-quality.cjs (جديد)
+      - عدد التكرارات لكل كيان (code/name collisions)
+      - قائمة أكواد suffix (_2, _3, …)
+      - orphan FKs (position بدون org_unit صالح، …)
+      - output JSON + ملخص عربي للتشغيل
+    • لا يعدّل البيانات — تقرير فقط
+
+  H0.3 — Feature flags registry
+    • workspace/platform settings:
+      - hr.foundation.import.hub.enabled (default: false)
+      - hr.employee.import.match_only (default: false → true في H1 pilot)
+      - hr.employee.import.staging.enabled (default: false)
+      - hr.master_data.strict_unique (default: false → true بعد H2)
+
+  H0.4 — Test plan & acceptance matrix
+    • docs/hr/upgrade-2-test-schedule.md (جديد)
+    • حالات: G1 موجود + Excel فيه G1F → staging وليس g1_2
+
+── معايير القبول ──
+  [ ] سياسة معتمدة من Product + HR Ops
+  [ ] baseline report يُشغَّل على staging/production copy
+  [ ] flags موثّقة في .env.example
+
+── Rollback ──
+  لا تغيير سلوكي — إزالة التوثيق/السكربت فقط
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+                    الفيز H1 — Stop the Bleeding (أسبوع 3–5)
+           «إيقاف إنشاء Foundation أثناء استيراد الموظفين»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  منع auto-create و suffix codes فوراً عبر policy + runtime (pilot أولاً).
+
+── التحديثات ──
+
+  H1.1 — تعطيل auto-create في employee import
+    • artifacts/api-server/src/lib/hr-import/intelligence/import-intelligence-engine.ts
+      - IMPORT_INTELLIGENCE_POLICIES: autoCreateMode = "disabled" لكل catalog entities
+    • artifacts/api-server/src/lib/hr-import/activation/enterprise-entity-resolver.ts
+      - resolveOrCreateEntity → يرفض الإنشاء عند match_only flag
+    • artifacts/api-server/src/lib/hr-import/policy/policy-registry-service.ts
+      - default policy: no auto-create for job_grade, job_title, org_unit, position, work_location
+
+  H1.2 — إيقاف uniquifyRuntimeCode للـ canonical entities
+    • artifacts/api-server/src/lib/hr-import/normalization.ts
+      - uniquifyRuntimeCode: لا يُستدعى لـ foundation entities في employee import
+    • foundation manual routes: الإبقاء على validation لكن بدون suffix تلقائي في import path
+
+  H1.3 — Match-by-code في validator
+    • artifacts/api-server/src/lib/hr-import/validation/hr-import-validator.ts
+    • artifacts/api-server/src/lib/hr-import/mapping/mapping-foundation.ts
+      - الحقول الإلزامية: job_grade_code, job_title_code, org_unit_code, work_location_code, …
+      - إذا code غير موجود → error code MASTER_DATA_NOT_FOUND (لا create)
+
+  H1.4 — Temporary staging storage (minimal — قبل H6 الكامل)
+    • جدول مؤقت أو reuse import batch errors:
+      - hr_employee_import_staging (مخطط — يُكتمل في H6)
+    • حتى H6: رفض الصف + رسالة واضحة + رابط /hr/import-staging (placeholder)
+
+  H1.5 — UI: تحذير في employee import
+    • artifacts/ops-platform/src/pages/hr-employees (import dialog)
+      - "لن يتم إنشاء درجات/مسميات/وحدات تلقائياً"
+      - رابط إلى /admin/hr/foundation
+
+  H1.6 — Pilot rollout
+    • platform-runtime أو workspace setting:
+      - hr.employee.import.match_only = true لـ pilot workspaces فقط
+    • مراقبة metrics: import_rejected_master_data_count
+
+── معايير القبول ──
+  [ ] رفع Excel فيه G1F والـ G1 موجود → لا يُنشأ g1_2 ولا g1_3
+  [ ] الصف يُرفض أو يُعلَّم للمراجعة (حسب H6)
+  [ ] pilot workspace: صفر auto-create events في logs
+  [ ] non-pilot: السلوك القديم حتى cutover (أو shadow mode)
+
+── Rollback ──
+  hr.employee.import.match_only = false
+  revert policy defaults في policy-registry
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+                 الفيز H2 — Canonical DB Integrity (أسبوع 6–9)
+              «قيود قاعدة البيانات لمنع التكرار على مستوى DB»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  فرض UNIQUE(workspace_id, code) و indexes للمطابقة السريعة.
+
+── التحديثات ──
+
+  H2.1 — Schema: code NOT NULL + unique (additive migration)
+    • lib/db/src/schema/hr.ts
+      - hr_job_grades, hr_job_titles, hr_org_units, hr_work_locations, hr_positions, …
+      - code: NOT NULL (بعد backfill)
+    • lib/db/drizzle/00XX_hr_master_data_unique_codes.sql (جديد)
+      - UNIQUE (workspace_id, code) لكل جدول أساسي
+      - فهارس: idx_*_workspace_code
+
+  H2.2 — Backfill script (قبل NOT NULL)
+    • scripts/backfill-hr-master-data-codes.cjs
+      - توليد code من name للصفوف الفارغة (مرة واحدة)
+      - تقرير collisions يتطلب قرار يدوي (لا suffix تلقائي في production)
+
+  H2.3 — Integrity CI gate
+    • scripts/validate-hr-master-data-integrity.cjs (جديد)
+      - duplicate codes per workspace
+      - suffix pattern detection (_\d+$)
+      - orphan references
+    • .github/workflows/ci.yml: job hr-master-data-integrity
+    • runtime-integrity-validation.md: توثيق الأمر
+
+  H2.4 — تفعيل strict flag
+    • hr.master_data.strict_unique = true بعد نجاح backfill على staging
+
+── معايير القبول ──
+  [ ] محاولة INSERT مكرر (workspace_id, code) تفشل على DB
+  [ ] validate-hr-master-data-integrity = 0 issues على staging
+  [ ] journal migration متطابق
+
+── Rollback ──
+  إسقاط unique constraints (migration down) — فقط بعد إيقاف strict flag
+  استعادة DB من backup إذا فشل backfill
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+              الفيز H3 — Foundation RBAC & Audit (أسبوع 10–13)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  صلاحيات enterprise: من ينشئ يدوياً، من يستورد، من يراجع staging.
+
+── التحديثات ──
+
+  H3.1 — صلاحيات جديدة (RBAC)
+    • lib/db أو permissions registry:
+      - hr.foundation.view
+      - hr.foundation.manual.create
+      - hr.foundation.manual.update
+      - hr.foundation.import
+      - hr.foundation.export
+      - hr.employees.import
+      - hr.employees.staging.view
+      - hr.employees.staging.promote
+      - hr.master_data.alias.manage
+    • artifacts/api-server/src/middlewares/requirePermission (أو ما يعادله)
+    • artifacts/ops-platform/src/hooks/use-permissions.ts — إخفاء أزرار حسب الصلاحية
+
+  H3.2 — Separation of Duties (Tier 0)
+    • org_unit / position create أو import commit:
+      - يتطلب hr.foundation.approve (اختياري في H9 كاملاً)
+    • منفّذ الاستيراد ≠ معتمد التغيير (إعداد workspace policy)
+
+  H3.3 — Audit trail لـ Foundation
+    • جدول hr_master_data_audit_log (جديد) أو توسيع workspace audit:
+      - entity_type, entity_id, action, before_json, after_json, actor_id, source (manual|import)
+    • تسجيل في:
+      - foundation CRUD routes
+      - foundation import commit
+      - alias create/update
+
+  H3.4 — UI: إظهار الصلاحيات في Foundation
+    • hr-foundation.tsx: إخفاء Import/Create/Delete حسب role
+
+── معايير القبول ──
+  [ ] مستخدم بدون hr.foundation.import لا يرى زر الاستيراد
+  [ ] كل import commit يظهر في audit log
+  [ ] Tier 0: محاولة commit بدون صلاحية → 403
+
+── Rollback ──
+  permissions optional (fallback إلى hr.admin القديم)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+           الفيز H4 — Foundation Import/Export Hub (أسبوع 14–19)
+        «مركز استيراد/تصدير لكل فئة Master Data في /admin/hr/foundation»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  تمكين العميل من بناء قاموسه (G1/G2 أو GD1/GD2) عبر Excel قبل الموظفين.
+
+── التحديثات ──
+
+  H4.1 — Import Center UI
+    • artifacts/ops-platform/src/pages/hr-foundation.tsx
+      - تبويب/زر "استيراد البيانات" → FoundationImportHub component (جديد)
+      - بطاقة لكل فئة: Employment Types, Contract Types, Locations, Org Units,
+        Job Grades, Job Titles, Positions, Document Types, Leave, Probation
+    • artifacts/ops-platform/src/components/hr/foundation-import-hub.tsx (جديد)
+
+  H4.2 — API: template + upload + preview + commit (لكل category)
+    • artifacts/api-server/src/routes/hr-foundation-import.ts (جديد)
+      - GET  /api/hr/foundation/import/:category/template
+      - POST /api/hr/foundation/import/:category/upload
+      - POST /api/hr/foundation/import/:category/preview
+      - POST /api/hr/foundation/import/:category/commit
+    • خدمة موحدة:
+      - artifacts/api-server/src/lib/hr-foundation-import/orchestrator.ts (جديد)
+      - idempotency_key per batch
+      - transactional commit
+
+  H4.3 — Excel templates (per category)
+    • scripts/templates/hr-foundation/ (جديد)
+      - employment_types.xlsx, job_grades.xlsx, org_units.xlsx, …
+    • أعمدة إلزامية: code, name, name_ar (اختياري), is_active
+    • org_units: parent_code (ترتيب topological في preview)
+    • positions: org_unit_code, job_title_code, job_grade_code, work_location_code
+
+  H4.4 — Preview engine
+    • لكل صف: create | update | reject + سبب
+    • منع duplicate code داخل الملف وداخل DB
+    • لا suffix — reject مع رسالة "code exists"
+
+  H4.5 — Export per category + export all
+    • GET /api/hr/foundation/export/:category
+    • GET /api/hr/foundation/export/all (موجود جزئياً — توحيد)
+
+  H4.6 — OpenAPI + allowlist
+    • scripts/openapi-route-allowlist.json
+    • توثيق في docs/hr/foundation-import.md
+
+── معايير القبول ──
+  [ ] العميل A يرفع job_grades بـ G1,G2 بنجاح
+  [ ] العميل B يرفع GD1,GD2 في workspace مختلف بدون تعارض
+  [ ] preview يظهر 0 duplicates قبل commit
+  [ ] commit يُسجَّل في audit (H3)
+
+── Rollback ──
+  hr.foundation.import.hub.enabled = false (العودة للإنشاء اليدوي فقط)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+            الفيز H5 — Readiness Gate & Employee Templates (أسبوع 20–22)
+              «منع استيراد الموظفين قبل اكتمال Foundation»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  إجبار المؤسسة على بناء الأساسيات أولاً — رسالة واضحة + checklist.
+
+── التحديثات ──
+
+  H5.1 — Readiness service
+    • artifacts/api-server/src/lib/hr-foundation/readiness-service.ts (جديد)
+      - الحد الأدنى:
+        employment_types >= 1
+        employee_statuses >= 1
+        org_units >= 1
+        job_grades >= 1
+        job_titles >= 1
+        work_locations >= 1
+      - optional: contract_types, leave_policies, …
+    • GET /api/hr/foundation/readiness
+
+  H5.2 — Gate على employee import
+    • hr import routes: إذا readiness < 100% required → 409 FOUNDATION_NOT_READY
+    • ops-platform: banner على /hr/employees + رابط foundation
+
+  H5.3 — Readiness UI في Foundation
+    • FoundationImportHub أو card في hr-foundation.tsx
+      - checklist أخضر/أحمر
+      - "جاهز لاستيراد الموظفين" / "ناقص: الدرجات الوظيفية"
+
+  H5.4 — Employee import template v2 (code-based)
+    • GET /api/hr/employees/import-template
+      - أعمدة: job_grade_code, job_title_code, org_unit_code, work_location_code, …
+      - sheet تعليمات + قائمة أكواد متاحة (اختياري: validation dropdown)
+
+── معايير القبول ──
+  [ ] workspace بدون job_grades لا يستطيع بدء employee import
+  [ ] بعد استيراد grades عبر Hub → readiness يتحول لجاهز
+  [ ] template الموظفين لا يعتمد على الأسماء فقط
+
+── Rollback ──
+  readiness gate = warn only (لا block) عبر flag
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+        الفيز H6 — Employee Staging & Partial Import (أسبوع 23–28)
+      «أرشيف الموظفين + استيراد جزئي + ترقية للموظفين الفعليين»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  الصفوف غير المطابقة تذهب لأرشيف مراجعة — الصفوف الصحيحة تدخل مباشرة.
+
+── التحديثات ──
+
+  H6.1 — Schema: employee import staging
+    • lib/db/drizzle/00XX_hr_employee_import_staging.sql
+      - hr_employee_import_staging:
+        id, workspace_id, batch_id, row_index, status, raw_row jsonb,
+        normalized_row jsonb, mismatch_fields jsonb, errors[], warnings[],
+        created_at, reviewed_by, promoted_at, employee_id (nullable)
+      - status: pending_review | field_mismatch | ready_to_promote | promoted | rejected
+
+  H6.2 — Import pipeline: partial commit
+    • commit-orchestrator.ts:
+      - valid rows → employees table
+      - mismatch → staging table (لا fail كامل الملف)
+
+  H6.3 — Staging API
+    • GET    /api/hr/employees/import-staging?status=&batch_id=
+    • GET    /api/hr/employees/import-staging/:id
+    • PATCH  /api/hr/employees/import-staging/:id  (تصحيح حقول)
+    • POST   /api/hr/employees/import-staging/:id/promote
+    • POST   /api/hr/employees/import-staging/bulk-promote
+    • POST   /api/hr/employees/import-staging/bulk-map  (G1F→G1 لكل المحدد)
+
+  H6.4 — UI: صفحة أرشيف/معلقات الاستيراد
+    • artifacts/ops-platform/src/pages/hr-employee-import-staging.tsx (جديد)
+      - مسار: /hr/employees/import-staging أو /hr/import-archive
+      - جدول: موظف، سبب التعليق، حقول غير مطابقة، إجراءات
+      - زر "إرسال للموظفين" (Promote)
+      - bulk mapping panel
+
+  H6.5 — إشعارات وتقارير
+    • بعد import: ملخص (مستورد N، مؤرشف M، مرفوض K)
+    • export staging report Excel
+
+── معايير القبول ──
+  [ ] ملف 1000 موظف: 950 مستورد، 50 في الأرشيف بأسباب دقيقة
+  [ ] تصحيح صف مؤرشف + promote → يظهر في /hr/employees
+  [ ] لا إنشاء foundation أثناء promote
+
+── Rollback ──
+  hr.employee.import.staging.enabled = false → رفض الصفوف غير المطابقة فقط (H1)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+              الفيز H7 — Alias Mapping & Normalization (أسبوع 29–31)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  ربط الأكواد البديلة (G1F) بالرسمية (G1) — تقليل تكرار الأرشيف.
+
+── التحديثات ──
+
+  H7.1 — Schema: master data aliases
+    • hr_master_data_aliases:
+      workspace_id, entity_type, alias_code, canonical_code, created_by, created_at
+      UNIQUE (workspace_id, entity_type, alias_code)
+
+  H7.2 — Resolver في import
+    • قبل match: تحويل alias → canonical
+    • catalog + import validator يستخدمان alias map
+
+  H7.3 — UI: إدارة aliases
+    • من staging: "حفظ كـ alias" عند الربط
+    • /admin/hr/foundation → Aliases tab (اختياري)
+
+  H7.4 — Bulk alias من staging
+    • bulk-map ينشئ alias تلقائياً إن اختار المستخدم "تذكر لهذا الاستيراد المستقبلي"
+
+── معايير القبول ──
+  [ ] بعد حفظ G1F→G1، الاستيراد التالي لـ G1F يطابق G1 بدون أرشيف
+  [ ] alias لا ينشئ صف foundation جديد
+
+── Rollback ──
+  تجاهل alias table في resolver (flag)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+         الفيز H8 — Duplicate Cleanup & Merge (أسبوع 32–39)
+              «علاج تكرارات الماضي: G1 + g1_2 + g1_3 → G1»
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  دمج آمن للبيانات التاريخية مع إعادة ربط كل المراجع.
+
+── التحديثات ──
+
+  H8.1 — Duplicate detection report (interactive)
+    • scripts/report-hr-master-data-quality.cjs — توسيع
+    • GET /api/hr/foundation/duplicates?entity_type=job_grade
+
+  H8.2 — Merge service (admin-only, super careful)
+    • POST /api/hr/foundation/merge
+      - source_ids[] → target_id
+      - entity_type
+      - dry_run=true افتراضياً
+    • إعادة ربط FKs: employees, positions, imports, …
+    • source codes → aliases (H7)
+
+  H8.3 — Merge UI wizard
+    • /admin/hr/foundation/merge (جديد)
+      - اختيار الكيان الرابح
+      - preview تأثير (عدد موظفين، مناصب، …)
+      - confirm + audit
+
+  H8.4 — Post-merge integrity
+    • validate-hr-master-data-integrity = 0
+    • تعطيل/حذف الصفوف المدمجة (soft delete is_active=false)
+
+── معايير القبول ──
+  [ ] بعد دمج g1_2 و g1_3 في G1: قائمة grades تعرض G1 فقط
+  [ ] جميع الموظفين يشيرون إلى G1
+  [ ] g1_2, g1_3 موجودة كـ aliases أو محذوفة بأمان
+
+── Rollback ──
+  استعادة DB من snapshot قبل merge (merge غير قابل للعكس بسهولة)
+
+================================================================================
+════════════════════════════════════════════════════════════════════════════════
+              الفيز H9 — Enterprise+ Governance (مستمر)
+════════════════════════════════════════════════════════════════════════════════
+
+── الهدف ──
+  مستوى SAP/Microsoft+: موافقات، جودة بيانات، effective dating.
+
+── التحديثات (اختيارية لاحقاً) ──
+
+  H9.1 — Approval workflow لـ Tier 0 (org_unit, position)
+  H9.2 — Effective dating للهيكل التنظيمي
+  H9.3 — Data Quality dashboard (/admin/hr/data-quality)
+  H9.4 — KPI alerts: staging_rate, duplicate_count, import_failures
+  H9.5 — Integration API: read-only master data codes for external systems
+
+── معايير القبول ──
+  [ ] Tier 0 تغيير يتطلب موافقة ثانية
+  [ ] dashboard يعرض trends أسبوعية
+
+================================================================================
+4. مصفوفة الكيانات × السلوك المستهدف
+================================================================================
+
+  ┌─────────────────┬──────────────────┬─────────────────┬──────────────────┐
+  │ الكيان          │ Foundation Hub   │ Employee Import │ عند عدم التطابق │
+  ├─────────────────┼──────────────────┼─────────────────┼──────────────────┤
+  │ Employment Type │ import/export    │ match by code   │ staging          │
+  │ Contract Type   │ import/export    │ match by code   │ staging          │
+  │ Work Location   │ import/export    │ match by code   │ staging          │
+  │ Org Unit        │ import/export    │ match by code   │ staging + Tier0  │
+  │ Job Grade       │ import/export    │ match by code   │ staging          │
+  │ Job Title       │ import/export    │ match by code   │ staging          │
+  │ Position        │ import/export    │ match by code   │ staging + Tier0  │
+  │ Document Type   │ import/export    │ match by code   │ staging          │
+  │ Leave Policy    │ import/export    │ match by code   │ staging/default  │
+  │ Probation Pol.  │ import/export    │ match by code   │ staging          │
+  └─────────────────┴──────────────────┴─────────────────┴──────────────────┘
+
+================================================================================
+5. معايير النجاح العالمية (KPIs)
+================================================================================
+
+  - Duplicate Rate (code per workspace): 0% بعد H8
+  - Auto-create during employee import: 0 events بعد H1 cutover
+  - Staging rate: يتناقص شهراً بعد شهر (بفضل H7 aliases + templates H5)
+  - Audit coverage: 100% لـ foundation import/commit/merge
+  - p95 employee import (1000 rows): ضمن SLA متفق (مرجع F9 k6)
+
+================================================================================
+6. تبعيات النشر (Deploy Order)
+================================================================================
+
+  1) H0 توثيق + baseline (لا deploy risk)
+  2) H1 على pilot → تعميم
+  3) H2 backfill على staging → production (backup إلزامي)
+  4) H3 RBAC
+  5) H4 Hub
+  6) H5 Gate (يُفعَّل بعد H4 جاهز)
+  7) H6 Staging
+  8) H7 Alias
+  9) H8 Merge (نافذة صيانة محتملة)
+  10) H9 تدريجي
+
+  مرجع النشر العام: docs/runbooks/deploy.md
+  مرجع الاختبار: docs/hr/upgrade-2-test-schedule.md (يُنشأ في H0)
+
+================================================================================
+7. ملخص تنفيذي (للإدارة)
+================================================================================
+
+  المشكلة: استيراد الموظفين ينشئ Foundation مكررة (G1, g1_2, g1_3) لغياب
+           هوية canonical وحوكمة وقيود DB.
+
+  الحل: Foundation-first + Match-only + Staging + Alias + Merge — على مراحل
+         H0–H9 مع flags وبدون تعطيل المنصة.
+
+  النتيجة المتوقعة: كل عميل يملك قاموسه المعتمد؛ استيراد الموظفين يطابق فقط؛
+                    الصفوف الخاطئة تُراجع في أرشيف؛ لا تكرار صامت مستقبلاً.
+
+================================================================================
+                              نهاية الوثيقة
+================================================================================
